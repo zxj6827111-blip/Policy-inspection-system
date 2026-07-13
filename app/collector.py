@@ -233,7 +233,12 @@ class BrowserCollector:
 
     async def check_robots(self) -> None:
         assert self.page
-        await self.safe_goto(self.page, "https://www.shanghai.gov.cn/robots.txt")
+        response = await self.safe_goto(self.page, "https://www.shanghai.gov.cn/robots.txt")
+        content_type = ((await response.header_value("content-type")) if response else "") or ""
+        if not response or response.status != 200 or "text/plain" not in content_type.lower():
+            # robots.txt 未发布或被替换为普通页面时，不应阻断主扫描；403/429 等风控状态已由 safe_goto 暂停。
+            self._robots = None
+            return
         text = await self.page.locator("body").inner_text()
         parser = robotparser.RobotFileParser("https://www.shanghai.gov.cn/robots.txt")
         parser.parse(text.splitlines())
@@ -541,7 +546,6 @@ class LinkChecker:
         self.rendered_checker = rendered_checker
         self.rendered_hosts = {host.lower() for host in (rendered_hosts or {urlparse(TARGET_URL).netloc})}
         self.client: httpx.AsyncClient | None = None
-        self._robots: dict[str, robotparser.RobotFileParser | None] = {}
 
     async def __aenter__(self):
         self.client = httpx.AsyncClient(follow_redirects=False, timeout=30)
@@ -561,31 +565,6 @@ class LinkChecker:
             self.target_allowed_check(url)
             return
         await self._validate_public_destination(parsed.hostname or "")
-        origin = f"{parsed.scheme}://{parsed.netloc.lower()}"
-        if origin not in self._robots:
-            robots_url = f"{origin}/robots.txt"
-            await self.safety.before_request()
-            try:
-                assert self.client
-                response = await self.client.get(robots_url)
-                text = response.text[:200_000]
-                self.safety.after_request(response.status_code, text[:3000])
-                if response.status_code == 404:
-                    self._robots[origin] = None
-                elif 300 <= response.status_code < 400:
-                    raise SafetyPause(f"关联站点 robots.txt 异常重定向，已保守暂停：{robots_url}")
-                else:
-                    parser = robotparser.RobotFileParser(robots_url)
-                    parser.parse(text.splitlines())
-                    self._robots[origin] = parser
-            except SafetyPause:
-                raise
-            except Exception as exc:
-                self.safety.after_request(None, error=exc)
-                raise SafetyPause(f"无法确认关联站点 robots.txt，已保守暂停：{origin}") from exc
-        parser = self._robots[origin]
-        if parser and not parser.can_fetch("*", url):
-            raise SafetyPause(f"关联站点 robots.txt 禁止访问：{url}")
 
     async def _validate_public_destination(self, hostname: str) -> None:
         try:

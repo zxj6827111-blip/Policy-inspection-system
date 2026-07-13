@@ -70,6 +70,60 @@ async def test_detail_metadata_reloads_once_after_transient_timeout(monkeypatch)
     assert reloaded == [(page, page.url)]
 
 
+class FakeRobotsResponse:
+    def __init__(self, status, content_type):
+        self.status = status
+        self.content_type = content_type
+
+    async def header_value(self, name):
+        assert name == "content-type"
+        return self.content_type
+
+
+class FakeRobotsPage:
+    def __init__(self, text):
+        self.text = text
+
+    def locator(self, name):
+        assert name == "body"
+        return self
+
+    async def inner_text(self):
+        return self.text
+
+
+@pytest.mark.asyncio
+async def test_missing_main_site_robots_does_not_block_scan(monkeypatch):
+    collector = BrowserCollector(None, None)
+    collector.page = FakeRobotsPage("not found")
+
+    async def safe_goto(_page, _url):
+        return FakeRobotsResponse(404, "text/html")
+
+    monkeypatch.setattr(collector, "safe_goto", safe_goto)
+    await collector.check_robots()
+
+    assert collector._robots is None
+
+
+@pytest.mark.asyncio
+async def test_main_site_robots_are_enforced_only_for_plain_text_response(monkeypatch):
+    collector = BrowserCollector(None, None)
+    collector.page = FakeRobotsPage("User-agent: *\nDisallow: /private")
+    allowed = []
+
+    async def safe_goto(_page, _url):
+        return FakeRobotsResponse(200, "text/plain; charset=utf-8")
+
+    monkeypatch.setattr(collector, "safe_goto", safe_goto)
+    monkeypatch.setattr(collector, "ensure_allowed", allowed.append)
+    await collector.check_robots()
+
+    assert collector._robots is not None
+    assert collector._robots.can_fetch("*", "https://www.shanghai.gov.cn/private") is False
+    assert allowed == ["https://www.shanghai.gov.cn/zhengce/more?level=district&siteId=all"]
+
+
 def test_public_list_record_missing_identity_pauses():
     with pytest.raises(SafetyPause, match="缺少 businessId"):
         policy_list_item_from_api({"title": "测试文件"}, "普陀区", 1, 0)

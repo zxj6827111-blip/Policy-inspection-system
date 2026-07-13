@@ -1,5 +1,4 @@
 import random
-from urllib import robotparser
 
 import httpx
 import pytest
@@ -25,7 +24,6 @@ def checker_with(handler):
     )
     checker = LinkChecker(safety, resolver=lambda _host: ["1.1.1.1"])
     checker.client = httpx.AsyncClient(transport=httpx.MockTransport(handler), follow_redirects=False)
-    checker._robots["https://links.test"] = None
     return checker
 
 
@@ -90,24 +88,42 @@ async def test_network_error_types_after_bounded_retries(exception, error_type):
 
 
 @pytest.mark.asyncio
-async def test_external_robots_disallow_pauses_without_opening_link():
-    called = False
+async def test_external_link_is_checked_directly_without_requesting_robots_txt():
+    calls = []
 
     def handler(request):
-        nonlocal called
-        called = True
-        return httpx.Response(200, content=b"unexpected")
+        calls.append(request.url.path)
+        return httpx.Response(200, headers={"Content-Type": "application/pdf"}, content=b"%PDF-1.7 test")
 
     checker = checker_with(handler)
-    parser = robotparser.RobotFileParser("https://links.test/robots.txt")
-    parser.parse(["User-agent: *", "Disallow: /private"])
-    checker._robots["https://links.test"] = parser
     try:
-        with pytest.raises(SafetyPause, match="robots.txt"):
-            await checker.check("附件", "https://links.test/private/file.pdf")
+        result = await checker.check("附件", "https://links.test/private/file.pdf")
     finally:
         await checker.client.aclose()
-    assert called is False
+    assert result["result"] == "ok"
+    assert calls == ["/private/file.pdf"]
+
+
+@pytest.mark.asyncio
+async def test_http_to_https_broken_link_is_recorded_without_requesting_robots_txt():
+    calls = []
+
+    def handler(request):
+        calls.append(str(request.url))
+        if request.url.scheme == "http":
+            return httpx.Response(302, headers={"Location": str(request.url.copy_with(scheme="https"))})
+        return httpx.Response(404, headers={"Content-Type": "text/html"}, content=b"not found")
+
+    checker = checker_with(handler)
+    url = "http://links.test/affairs/missing.html"
+    try:
+        result = await checker.check("阅办联动", url)
+    finally:
+        await checker.client.aclose()
+    assert result["result"] == "broken"
+    assert result["error_type"] == "http_error"
+    assert result["final_url"] == "https://links.test/affairs/missing.html"
+    assert calls == [url, "https://links.test/affairs/missing.html"]
 
 
 @pytest.mark.asyncio
