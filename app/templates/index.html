@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>上海区级政策文件安全巡检系统</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <h1>上海区级政策文件安全巡检系统</h1>
+      <p>本地运行 · 串行访问 · 风控信号自动暂停</p>
+    </div>
+    <span class="health" id="health">正在检查服务</span>
+  </header>
+
+  <main>
+    <section class="control-band">
+      <form id="scan-form">
+        <fieldset>
+          <legend>扫描来源</legend>
+          <div class="districts source-targets">
+            {% for target in targets %}
+            <label class="source-option"><input type="checkbox" name="target" value="{{ target.key }}" {% if target.key == 'municipal_putuo' %}checked{% endif %}>
+              <span>{{ target.district }}</span><small class="source-badge">{{ target.source_level }}</small><em>{{ target.source_name }}</em>
+            </label>
+            {% endfor %}
+          </div>
+        </fieldset>
+        <div class="scan-settings">
+          <label class="field">扫描模式
+            <select name="mode">
+              <option value="incremental">增量扫描</option>
+              <option value="full">全历史扫描</option>
+            </select>
+          </label>
+          <label class="field">本次最多文件数
+            <input type="number" name="max_documents" value="5" min="0" step="1">
+            <small>0 表示不限制；首次验证建议 2–5 条</small>
+          </label>
+        </div>
+        <button type="submit" class="primary">开始扫描</button>
+      </form>
+      <div class="safety-strip">
+        <strong>固定安全节奏</strong>
+        <span>{{ safety.min_delay_seconds|int }}–{{ safety.max_delay_seconds|int }} 秒/页</span>
+        <span>每 {{ safety.rest_every_pages }} 页休息 3–5 分钟</span>
+        <span>详情与外链并发数 1</span>
+        <span>公开列表接口仅用于读取分页和总量，仍共享限速器</span>
+        <span>403 / 429 / 验证码立即暂停</span>
+      </div>
+    </section>
+
+    <section class="job-panel" id="current-panel" hidden>
+      <div class="section-heading">
+        <div><h2>当前任务 <span id="job-id"></span></h2><p id="job-subtitle"></p></div>
+        <div class="job-operations">
+          <p id="operation-hint" class="operation-hint" aria-live="polite"></p>
+          <div class="actions">
+          <button type="button" id="pause-btn">暂停</button>
+          <button type="button" id="resume-btn">恢复</button>
+          <button type="button" id="stop-btn">停止</button>
+          <a id="export-link" class="button-link">下载 Excel</a>
+          </div>
+        </div>
+      </div>
+      <div class="progress-track"><div id="progress-bar"></div></div>
+      <div class="metrics">
+        <div><span>状态</span><strong id="status"></strong></div>
+        <div><span>覆盖进度（详情 / 增量跳过）</span><strong id="processed"></strong></div>
+        <div><span>发现问题</span><strong id="finding-count"></strong></div>
+        <div><span>当前区县 / 页</span><strong id="position"></strong></div>
+      </div>
+      <dl class="details">
+        <dt>当前地址</dt><dd id="current-url">-</dd>
+        <dt>暂停或错误</dt><dd id="job-message">-</dd>
+        <dt>冷却状态</dt><dd id="cooldown">-</dd>
+      </dl>
+    </section>
+
+    <section id="findings-panel" hidden>
+      <div class="section-heading"><div><h2>问题复核</h2><p>当前任务的有限复核队列</p></div></div>
+      <div class="review-toolbar">
+        <div id="review-counts" class="review-counts"></div>
+        <div class="review-filters" role="group" aria-label="复核状态筛选">
+          <button type="button" class="review-filter" data-status="pending">待复核</button>
+          <button type="button" class="review-filter" data-status="all">全部</button>
+          <button type="button" class="review-filter" data-status="confirmed">确认异常</button>
+          <button type="button" class="review-filter" data-status="dismissed">已排除</button>
+        </div>
+      </div>
+      <div id="findings-body" class="findings-list"></div>
+      <div class="review-pagination">
+        <span id="review-page-info"></span>
+        <div><button type="button" id="review-prev">上一页</button><button type="button" id="review-next">下一页</button></div>
+      </div>
+    </section>
+
+    <section id="exceptions-panel" hidden>
+      <div class="section-heading"><div><h2>扫描异常复核</h2><p>已完成全量扫描后的复测仍未通过的政策条目</p></div></div>
+      <div id="exception-counts" class="review-counts"></div>
+      <div id="scan-exceptions-body" class="findings-list"></div>
+    </section>
+
+    <section class="history-panel">
+      <details id="history-details" class="collapsible-section">
+        <summary>
+          <span><strong>历史扫描</strong><small>状态、覆盖数量和结果导出</small></span>
+          <span class="collapse-hint" data-collapsed="展开历史扫描" data-expanded="收起历史扫描">展开历史扫描</span>
+        </summary>
+        <div class="history-content">
+          <div class="section-heading"><p>点击任务编号可查看详情、恢复扫描或导出结果。</p><button id="refresh-btn" type="button" title="刷新任务列表">↻</button></div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>ID</th><th>区县</th><th>模式</th><th>状态</th><th>进度</th><th>问题</th><th>创建时间</th><th>结果</th></tr></thead>
+              <tbody id="jobs-body"></tbody>
+            </table>
+          </div>
+        </div>
+      </details>
+    </section>
+  </main>
+  <dialog id="evidence-dialog" class="evidence-dialog" aria-labelledby="evidence-title">
+    <div class="dialog-heading">
+      <div><h2 id="evidence-title">问题证据定位</h2><p id="evidence-subtitle"></p></div>
+      <button type="button" id="evidence-close" title="关闭证据定位">关闭</button>
+    </div>
+    <div class="evidence-actions"><a id="evidence-source" class="button-link" target="_blank" rel="noopener noreferrer">打开原政策页面</a></div>
+    <dl class="evidence-fields">
+      <dt>页面值</dt><dd id="evidence-page-value">-</dd>
+      <dt>正文值</dt><dd id="evidence-body-value">-</dd>
+      <dt>规则证据</dt><dd id="evidence-rule-text">-</dd>
+    </dl>
+    <p class="evidence-note">红框表示规则命中的已采集文本；未在正文中出现的页面字段会保留在上方证据区。</p>
+    <pre id="evidence-body" class="evidence-body"></pre>
+  </dialog>
+  <div id="toast" role="status"></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

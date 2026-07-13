@@ -1,0 +1,94 @@
+:root { color-scheme: light; font-family: "Microsoft YaHei", "Segoe UI", sans-serif; color: #17212b; background: #f3f5f7; }
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 320px; }
+.topbar { background: #183b56; color: white; padding: 22px max(24px, calc((100vw - 1180px)/2)); display: flex; justify-content: space-between; align-items: center; }
+h1 { font-size: 24px; margin: 0 0 5px; letter-spacing: 0; }
+h2 { font-size: 18px; margin: 0 0 4px; letter-spacing: 0; }
+p { margin: 0; color: #657480; font-size: 13px; }
+.topbar p { color: #c9d6df; }
+.health { font-size: 13px; border: 1px solid #6e8798; padding: 6px 9px; border-radius: 4px; }
+main { max-width: 1180px; margin: 0 auto; padding: 26px 24px 50px; }
+section { background: white; border: 1px solid #dfe5e9; margin-bottom: 18px; padding: 20px; }
+.control-band form { display: grid; grid-template-columns: minmax(430px, 1.7fr) minmax(370px, 1.25fr) auto; gap: 16px; align-items: end; }
+fieldset { border: 0; margin: 0; padding: 0; }
+legend, .field { display: grid; gap: 7px; font-size: 13px; font-weight: 700; }
+.districts { display: flex; flex-wrap: wrap; gap: 8px; min-height: 40px; align-items: center; }
+.districts label { border: 1px solid #cfd8de; padding: 9px 13px; cursor: pointer; }
+.source-option { display: inline-flex; align-items: center; gap: 7px; white-space: nowrap; }
+.source-option em { font-style: normal; color: #657480; font-size: 12px; }
+.source-badge { background: #e6eef2; border: 1px solid #bfccd4; color: #31566a; padding: 1px 5px; font-size: 11px; }
+.scan-settings { display: grid; grid-template-columns: minmax(150px, .8fr) minmax(200px, 1fr); gap: 16px; align-items: start; }
+select, input[type=number] { height: 40px; border: 1px solid #b9c5cc; padding: 0 10px; background: white; font: inherit; }
+.review-note { width: 180px; height: 36px; border: 1px solid #b9c5cc; padding: 0 8px; font: inherit; }
+.review-decision { min-width: 110px; height: 36px; }
+small { font-weight: 400; color: #73818b; }
+button, .button-link { height: 40px; border: 1px solid #9aabb5; background: white; padding: 0 15px; font: inherit; cursor: pointer; border-radius: 4px; color: #17212b; text-decoration: none; display: inline-flex; align-items: center; justify-content: center; }
+button:hover, .button-link:hover { background: #edf3f6; }
+button.primary { background: #c44b37; border-color: #c44b37; color: white; font-weight: 700; }
+.safety-strip { margin-top: 18px; border-top: 1px solid #e4e9ec; padding-top: 14px; display: flex; flex-wrap: wrap; gap: 8px 18px; font-size: 12px; color: #4f606b; }
+.safety-strip strong { color: #9b3d2e; }
+.section-heading { display: flex; justify-content: space-between; gap: 16px; align-items: center; margin-bottom: 16px; }
+.history-panel { padding: 0; }
+.collapsible-section > summary { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 20px; cursor: pointer; list-style: none; }
+.collapsible-section > summary::-webkit-details-marker { display: none; }
+.collapsible-section > summary strong, .collapsible-section > summary small { display: block; }
+.collapsible-section > summary strong { font-size: 18px; margin-bottom: 4px; }
+.collapse-hint { color: #31566a; font-size: 13px; white-space: nowrap; }
+.history-content { border-top: 1px solid #dfe5e9; padding: 20px; }
+.actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.actions [hidden] { display: none; }
+.job-operations { display: grid; justify-items: end; gap: 8px; }
+.operation-hint { max-width: 380px; text-align: right; color: #52626d; }
+.metric-status-running strong { color: #176351; }
+.metric-status-cooling strong { color: #9b6219; }
+.metric-status-paused strong, .metric-status-failed strong { color: #993b2d; }
+.metric-status-partial strong { color: #31566a; }
+.progress-track { height: 8px; background: #e8edf0; overflow: hidden; }
+#progress-bar { height: 100%; width: 0; background: #27816f; transition: width .25s; }
+.metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; background: #e2e8eb; margin-top: 14px; }
+.metrics div { background: #f8fafb; padding: 14px; }
+.metrics span { display: block; font-size: 12px; color: #657480; margin-bottom: 6px; }
+.metrics strong { font-size: 18px; }
+.details { display: grid; grid-template-columns: 90px 1fr; gap: 8px 12px; margin: 16px 0 0; font-size: 13px; }
+.details dt { color: #6c7982; }
+.details dd { margin: 0; overflow-wrap: anywhere; }
+.findings-list { display: grid; gap: 12px; }
+.review-toolbar { display: flex; justify-content: space-between; gap: 14px; align-items: center; margin-bottom: 14px; }
+.review-counts, .review-filters, .review-pagination, .review-pagination > div { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.review-counts span { border: 1px solid #d5dfe4; color: #52626d; padding: 5px 8px; font-size: 12px; }
+.review-counts strong { color: #17212b; }
+.review-filter { height: 34px; padding: 0 10px; font-size: 13px; }
+.review-filter.active { background: #31566a; border-color: #31566a; color: #fff; }
+.review-pagination { justify-content: space-between; margin-top: 14px; color: #657480; font-size: 13px; }
+.review-pagination button { height: 34px; }
+.finding-card { border: 1px solid #dfe5e9; background: #fff; }
+.finding-card-header { display: flex; align-items: flex-start; gap: 10px; padding: 12px 14px; border-bottom: 1px solid #e1e7ea; font-size: 14px; line-height: 1.45; }
+.finding-card-header a { overflow-wrap: anywhere; }
+.finding-district { flex: 0 0 auto; color: #31566a; background: #e6eef2; border: 1px solid #bfccd4; padding: 2px 6px; font-size: 12px; }
+.finding-content { display: grid; grid-template-columns: minmax(220px, .8fr) minmax(300px, 1.2fr); gap: 20px; padding: 14px; }
+.finding-content p { margin: 4px 0 0; color: #17212b; line-height: 1.55; overflow-wrap: anywhere; }
+.finding-label { display: block; margin-bottom: 5px; color: #657480; font-size: 12px; }
+.finding-controls { display: grid; grid-template-columns: 130px minmax(220px, 1fr) auto; gap: 12px; align-items: end; border-top: 1px solid #e1e7ea; padding: 12px 14px; background: #f8fafb; }
+.finding-controls label { display: grid; gap: 6px; color: #52626d; font-size: 12px; }
+.finding-controls .review-note { width: 100%; }
+.finding-actions { display: flex; gap: 8px; }
+.table-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { border-bottom: 1px solid #e1e7ea; padding: 11px 9px; text-align: left; white-space: nowrap; }
+th { color: #52626d; background: #f5f7f8; }
+.status-pill { display: inline-block; padding: 3px 7px; border-radius: 3px; background: #e8edf0; }
+.status-running { background: #dff1ec; color: #176351; }
+.status-paused, .status-partial, .status-failed { background: #f8dfdb; color: #993b2d; }
+.wrap-cell { white-space: normal; min-width: 220px; max-width: 360px; overflow-wrap: anywhere; }
+#toast { position: fixed; right: 24px; bottom: 24px; background: #17212b; color: white; padding: 11px 15px; border-radius: 4px; display: none; max-width: 420px; }
+.evidence-dialog { width: min(980px, calc(100vw - 32px)); max-height: min(82vh, 860px); border: 1px solid #9aabb5; padding: 20px; color: #17212b; }
+.evidence-dialog::backdrop { background: rgb(23 33 43 / 46%); }
+.dialog-heading, .evidence-actions { display: flex; justify-content: space-between; align-items: center; gap: 16px; }
+.evidence-actions { margin: 16px 0; justify-content: flex-end; }
+.evidence-fields { display: grid; grid-template-columns: 90px 1fr; gap: 8px 12px; margin: 0; font-size: 13px; }
+.evidence-fields dt { color: #657480; }
+.evidence-fields dd { margin: 0; overflow-wrap: anywhere; }
+.evidence-note { margin: 16px 0 8px; }
+.evidence-body { margin: 0; max-height: 430px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; border: 1px solid #dfe5e9; background: #f8fafb; padding: 14px; font: 13px/1.75 "Microsoft YaHei", "Segoe UI", sans-serif; }
+.evidence-mark { border: 2px solid #c9362b; background: #fff0ef; color: #8b241d; padding: 1px 2px; }
+@media (max-width: 850px) { .control-band form, .scan-settings, .finding-content, .finding-controls { grid-template-columns: 1fr; } .metrics { grid-template-columns: 1fr 1fr; } .topbar { align-items: flex-start; gap: 16px; } .job-operations { justify-items: start; } .operation-hint { text-align: left; } .actions { justify-content: flex-start; } .finding-card-header { flex-direction: column; } .finding-actions { justify-content: flex-start; } .review-toolbar, .review-pagination { align-items: flex-start; flex-direction: column; } }

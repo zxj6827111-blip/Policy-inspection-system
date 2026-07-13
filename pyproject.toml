@@ -1,0 +1,11 @@
+[project]
+name = "shanghai-policy-inspector"
+version = "0.1.0"
+description = "上海区级政策文件安全巡检系统"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
