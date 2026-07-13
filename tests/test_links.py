@@ -127,6 +127,27 @@ async def test_http_to_https_broken_link_is_recorded_without_requesting_robots_t
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "body", "error_type"),
+    [
+        (403, b"forbidden", "http_error"),
+        (429, b"too many requests", "http_error"),
+        (200, "<html>请输入验证码后继续</html>".encode(), "access_restricted"),
+    ],
+)
+async def test_external_access_restriction_is_recorded_without_cooling(status, body, error_type):
+    checker = checker_with(
+        lambda _request: httpx.Response(status, headers={"Content-Type": "text/html; charset=utf-8"}, content=body)
+    )
+    try:
+        result = await checker.check("阅办联动", "https://links.test/restricted")
+    finally:
+        await checker.client.aclose()
+    assert result["result"] == "broken"
+    assert result["error_type"] == error_type
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("url", ["http://127.0.0.1/private", "http://169.254.169.254/latest", "http://[::1]/"])
 async def test_private_or_local_destinations_are_rejected_before_request(url):
     called = False

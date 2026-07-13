@@ -16,7 +16,7 @@ from playwright.async_api import Browser, BrowserContext, Page, TimeoutError as 
 from app.config import DISTRICT_SITE_IDS, TARGET_URL
 from app.domain import CooldownPause, ItemReviewRequired, PolicyListItem, PolicyRecord, RelatedLink, SafetyPause
 from app.rules import extract_authored_date, extract_document_numbers
-from app.safety import SafetyController
+from app.safety import RISK_TEXT, SafetyController
 
 
 DATE_VALUE_RE = re.compile(r"(?:19|20)\d{2}-\d{1,2}-\d{1,2}")
@@ -614,7 +614,9 @@ class LinkChecker:
                     async with self.client.stream("GET", current_url, headers={"Range": "bytes=0-65535"}) as response:
                         chunk = await response.aread()
                         visible = chunk[:65536].decode(response.encoding or "utf-8", errors="ignore")
-                        self.safety.after_request(response.status_code, visible[:3000])
+                        # 外链的访问限制属于链接检查结果，不应被误判为主站风控而中断整批扫描。
+                        # 仍通过安全控制器完成全局节流、访问计数和事件记录。
+                        self.safety.after_request(response.status_code, visible[:3000], enforce_risk=False)
                         redirect_chain.append(str(response.url))
                         if 300 <= response.status_code < 400:
                             location = response.headers.get("location")
@@ -630,12 +632,13 @@ class LinkChecker:
                         content_type = response.headers.get("content-type", "").lower()
                         plain_text = re.sub(r"<[^>]+>", "", visible).strip() if "html" in content_type else visible.strip()
                         business_error = any(marker in plain_text for marker in ("页面不存在", "内容不存在", "访问出错", "系统错误"))
+                        risk_page = any(marker in plain_text for marker in RISK_TEXT)
                         empty = not chunk or ("html" in content_type and not plain_text)
-                        ok = 200 <= response.status_code < 400 and not empty and not business_error
+                        ok = 200 <= response.status_code < 400 and not empty and not business_error and not risk_page
                         result.update(
                             final_url=str(response.url), status_code=response.status_code,
                             result="ok" if ok else "broken",
-                            error_type=("empty_page" if empty else "business_error" if business_error
+                            error_type=("empty_page" if empty else "access_restricted" if risk_page else "business_error" if business_error
                                         else "http_error" if response.status_code >= 400 else ""),
                         )
                         result["redirect_chain"] = redirect_chain

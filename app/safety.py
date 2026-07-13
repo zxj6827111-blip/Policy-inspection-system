@@ -54,11 +54,18 @@ class SafetyController:
             self._emit("rest", seconds=seconds, access_count=self._pages)
             await self._sleep(seconds)
 
-    def after_request(self, status_code: int | None, visible_text: str = "", error: Exception | None = None) -> None:
+    def after_request(
+        self,
+        status_code: int | None,
+        visible_text: str = "",
+        error: Exception | None = None,
+        *,
+        enforce_risk: bool = True,
+    ) -> None:
         try:
-            if status_code in {403, 429}:
+            if enforce_risk and status_code in {403, 429}:
                 raise CooldownPause(f"目标站返回风控状态码 {status_code}")
-            if any(marker in visible_text for marker in RISK_TEXT):
+            if enforce_risk and any(marker in visible_text for marker in RISK_TEXT):
                 raise CooldownPause("页面出现验证码或访问频率提示")
             if error:
                 self._failures += 1
