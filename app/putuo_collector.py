@@ -7,16 +7,18 @@ from urllib.parse import urljoin, urlparse
 
 from playwright.async_api import Browser, Page
 
-from app.collector import BrowserCollector, extract_labeled_value, is_attachment_url, parse_iso_date
-from app.config import PUTUO_DISTRICT_URL
-from app.domain import PolicyListItem, PolicyRecord, RelatedLink, SafetyPause
-from app.rules import extract_authored_date, extract_document_numbers
+from app.collector import BrowserCollector, is_attachment_url, parse_iso_date
+from app.config import PUTUO_DISTRICT_URL, ScanTarget
+from app.domain import DetailInspection, PolicyListItem, PolicyRecord, RelatedLink, SafetyPause
+from app.rules import extract_document_numbers
 from app.safety import SafetyController
 
 
 PUTUO_API_URL = "https://www.shpt.gov.cn/front/api/data/affair"
-PUTUO_CHANNEL_ID = "3"
 PUTUO_PAGE_SIZE = 15
+METADATA_LABELS = (
+    "索引号", "主题分类", "公开属性", "成文日期", "发文字号", "发布日期", "公开主体",
+)
 CHINESE_DATE_RE = re.compile(r"((?:19|20)\d{2})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日")
 
 
@@ -33,14 +35,24 @@ def parse_putuo_date(value: str) -> date | None:
         return None
 
 
-def putuo_list_item_from_api(record: dict, page_number: int, item_index: int) -> PolicyListItem:
+def extract_putuo_header_value(text: str, label: str) -> str:
+    """普陀详情页的字段按行读取，避免空值误吞下一行表头。"""
+    pattern = re.compile(rf"(?m)^[ \t]*{re.escape(label)}[ \t]*[:：][ \t]*(.*)$")
+    match = pattern.search(text)
+    return match.group(1).strip() if match else ""
+
+
+def putuo_list_item_from_api(
+    record: dict, page_number: int, item_index: int, *, source_site: str = "区级网站·普陀区",
+    source_key: str = "putuo_government", source_channel_id: str = "3", list_url: str = PUTUO_DISTRICT_URL,
+) -> PolicyListItem:
     title = str(record.get("title") or record.get("name") or "").strip()
     raw_url = str(
         record.get("url") or record.get("link") or record.get("linkUrl") or record.get("website") or ""
     ).strip()
     if not title or not raw_url:
         raise SafetyPause("普陀区官网列表接口缺少标题或详情地址，采集器需要更新")
-    url = urljoin(PUTUO_DISTRICT_URL, raw_url)
+    url = urljoin(list_url, raw_url)
     if urlparse(url).netloc.lower() != "www.shpt.gov.cn":
         raise SafetyPause(f"普陀区官网列表返回了异常详情域名：{url}")
     return PolicyListItem(
@@ -50,15 +62,20 @@ def putuo_list_item_from_api(record: dict, page_number: int, item_index: int) ->
         title=title,
         url=url,
         published_date=parse_putuo_date(str(record.get("display_date") or record.get("displayDate") or "")),
-        source_site="区级网站·普陀区",
+        source_site=source_site,
+        source_key=source_key,
+        source_channel_id=source_channel_id,
     )
 
 
 class PutuoDistrictCollector(BrowserCollector):
-    """普陀区官网区政府文件采集器：列表走公开接口，详情仍使用真实浏览器。"""
+    """普陀区官网五个政府文件栏目共用的安全采集器。"""
 
-    def __init__(self, browser: Browser, safety: SafetyController):
+    def __init__(self, browser: Browser, safety: SafetyController, target: ScanTarget):
         super().__init__(browser, safety)
+        self.target = target
+        self.list_url = target.list_url or PUTUO_DISTRICT_URL
+        self.channel_id = target.channel_id or "3"
         self._total_pages = 0
         self._current_page = 1
 
@@ -73,7 +90,7 @@ class PutuoDistrictCollector(BrowserCollector):
         parser = robotparser.RobotFileParser("https://www.shpt.gov.cn/robots.txt")
         parser.parse(text.splitlines())
         self._robots = parser
-        self.ensure_allowed(PUTUO_DISTRICT_URL)
+        self.ensure_allowed(self.list_url)
 
     def ensure_allowed(self, url: str) -> None:
         if self._robots and urlparse(url).netloc.lower() == "www.shpt.gov.cn":
@@ -89,7 +106,7 @@ class PutuoDistrictCollector(BrowserCollector):
             response = await self.context.request.post(
                 PUTUO_API_URL,
                 data={
-                    "channelList": [PUTUO_CHANNEL_ID],
+                    "channelList": [self.channel_id],
                     "pageSize": PUTUO_PAGE_SIZE,
                     "orderFields": ["display_date"],
                     "orderTypes": ["desc"],
@@ -124,7 +141,7 @@ class PutuoDistrictCollector(BrowserCollector):
 
     async def select_district(self, _district: str) -> None:
         assert self.page
-        await self.safe_goto(self.page, PUTUO_DISTRICT_URL)
+        await self.safe_goto(self.page, self.list_url)
         records = await self._fetch_page(1)
         if not records:
             raise SafetyPause("普陀区官网区政府文件列表为空，已停止扫描")
@@ -144,9 +161,12 @@ class PutuoDistrictCollector(BrowserCollector):
             for index, api_record in enumerate(self._current_records):
                 if page_number == start_page and index <= start_item_index:
                     continue
-                yield putuo_list_item_from_api(api_record, page_number, index)
+                yield putuo_list_item_from_api(
+                    api_record, page_number, index, source_site=self.target.label, source_key=self.target.key,
+                    source_channel_id=self.channel_id, list_url=self.list_url,
+                )
 
-    async def open_item(self, item: PolicyListItem) -> PolicyRecord:
+    async def open_item(self, item: PolicyListItem) -> DetailInspection:
         assert self.context
         detail_page = await self.context.new_page()
         try:
@@ -156,23 +176,37 @@ class PutuoDistrictCollector(BrowserCollector):
         finally:
             await detail_page.close()
 
-    async def _parse_putuo_detail(self, page: Page, fallback_title: str) -> PolicyRecord:
+    async def open_detail_url(self, _district: str, url: str, fallback_title: str) -> DetailInspection:
+        assert self.context
+        detail_page = await self.context.new_page()
+        try:
+            await self.safe_goto(detail_page, url)
+            await detail_page.wait_for_timeout(1000)
+            return await self._parse_putuo_detail(detail_page, fallback_title)
+        finally:
+            await detail_page.close()
+
+    async def _parse_putuo_detail(self, page: Page, fallback_title: str) -> DetailInspection:
         text = await page.locator("body").inner_text()
         title_locator = page.locator("h1")
         title = (await title_locator.first.inner_text()).strip() if await title_locator.count() else fallback_title
-        agency = (
-            extract_labeled_value(text, "公开主体")
-            or extract_labeled_value(text, "发文机构")
-            or extract_labeled_value(text, "发文单位")
+        values = {label: extract_putuo_header_value(text, label) for label in METADATA_LABELS}
+        header_detected = any(
+            re.search(rf"{re.escape(label)}[ \t]*[:：]", text) for label in METADATA_LABELS
         )
-        published = parse_putuo_date(extract_labeled_value(text, "发布日期"))
-        authored = parse_putuo_date(extract_labeled_value(text, "成文日期"))
+        if not header_detected:
+            return DetailInspection(record=None, header_detected=False)
+
+        authored = parse_putuo_date(values["成文日期"])
+        published = parse_putuo_date(values["发布日期"])
+        missing_fields = [label for label in METADATA_LABELS if not values[label]]
+        invalid_fields = []
+        if values["成文日期"] and not authored:
+            invalid_fields.append("成文日期（格式无效）")
+        if values["发布日期"] and not published:
+            invalid_fields.append("发布日期（格式无效）")
         body_locator = page.locator("article, .article-content, .TRS_Editor, .content")
         body_text = await body_locator.first.inner_text() if await body_locator.count() else text
-        if not authored:
-            authored = extract_authored_date(body_text, agency)
-        if not agency or not published:
-            raise SafetyPause("普陀区官网详情页缺少公开主体或发布日期，已保守暂停")
         links: list[RelatedLink] = []
         anchors = await page.locator("a").evaluate_all(
             "els => els.map(a => ({text:(a.innerText||'').trim(), href:a.href})).filter(x => x.href)"
@@ -189,18 +223,15 @@ class PutuoDistrictCollector(BrowserCollector):
                 kind = "附件"
             if kind and href != page.url and all(existing.url != href for existing in links):
                 links.append(RelatedLink(kind, href))
-        source_match = re.search(r"/(\d+)\.html$", urlparse(page.url).path)
-        return PolicyRecord(
-            district="普陀区",
-            title=title,
-            url=page.url,
-            source_id=extract_labeled_value(text, "索引号") or (source_match.group(1) if source_match else ""),
-            source_site="区级网站·普陀区",
-            issuing_agency=agency,
-            page_document_number=extract_labeled_value(text, "发文字号"),
-            published_date=published,
-            authored_date=authored,
-            body_text=body_text,
-            body_document_numbers=extract_document_numbers(body_text),
-            related_links=links,
+        record = PolicyRecord(
+            district="普陀区", title=title, url=page.url,
+            source_id=values["索引号"],
+            source_site=self.target.label, issuing_agency=values["公开主体"],
+            page_document_number=values["发文字号"], published_date=published, authored_date=authored,
+            body_text=body_text, body_document_numbers=extract_document_numbers(body_text), related_links=links,
+            topic_category=values["主题分类"], disclosure_attribute=values["公开属性"],
+            header_detected=True, missing_metadata_fields=[*missing_fields, *invalid_fields],
+        )
+        return DetailInspection(
+            record=record, header_detected=True, missing_fields=missing_fields, invalid_fields=invalid_fields,
         )

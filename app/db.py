@@ -45,7 +45,10 @@ CREATE TABLE IF NOT EXISTS scan_jobs (
     pause_reason TEXT NOT NULL DEFAULT '',
     cooldown_until TEXT,
     last_error TEXT NOT NULL DEFAULT '',
-    safety_json TEXT NOT NULL DEFAULT '{}'
+    safety_json TEXT NOT NULL DEFAULT '{}',
+    baseline_job_id INTEGER,
+    source_signature TEXT NOT NULL DEFAULT '[]',
+    FOREIGN KEY(baseline_job_id) REFERENCES scan_jobs(id)
 );
 
 CREATE TABLE IF NOT EXISTS policy_documents (
@@ -60,6 +63,8 @@ CREATE TABLE IF NOT EXISTS policy_documents (
     published_date TEXT,
     authored_date TEXT,
     body_text TEXT NOT NULL DEFAULT '',
+    topic_category TEXT NOT NULL DEFAULT '',
+    disclosure_attribute TEXT NOT NULL DEFAULT '',
     content_hash TEXT NOT NULL,
     last_detail_checked_at TEXT,
     first_seen_job_id INTEGER NOT NULL,
@@ -129,6 +134,42 @@ CREATE TABLE IF NOT EXISTS scan_job_documents (
     FOREIGN KEY(job_id) REFERENCES scan_jobs(id),
     FOREIGN KEY(document_id) REFERENCES policy_documents(id)
 );
+
+CREATE TABLE IF NOT EXISTS scan_item_results (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id INTEGER NOT NULL,
+    target_key TEXT NOT NULL,
+    source_label TEXT NOT NULL,
+    channel_id TEXT NOT NULL DEFAULT '',
+    page_number INTEGER NOT NULL,
+    item_index INTEGER NOT NULL,
+    title TEXT NOT NULL,
+    url TEXT NOT NULL,
+    listed_date TEXT,
+    detail_status TEXT NOT NULL,
+    header_detected INTEGER NOT NULL DEFAULT 0 CHECK(header_detected IN (0, 1)),
+    source_id TEXT NOT NULL DEFAULT '',
+    topic_category TEXT NOT NULL DEFAULT '',
+    disclosure_attribute TEXT NOT NULL DEFAULT '',
+    authored_date TEXT,
+    page_document_number TEXT NOT NULL DEFAULT '',
+    published_date TEXT,
+    issuing_agency TEXT NOT NULL DEFAULT '',
+    missing_fields_json TEXT NOT NULL DEFAULT '[]',
+    document_id INTEGER,
+    reused_document_id INTEGER,
+    baseline_job_id INTEGER,
+    reason TEXT NOT NULL DEFAULT '',
+    checked_at TEXT NOT NULL,
+    UNIQUE(job_id, target_key, page_number, item_index),
+    FOREIGN KEY(job_id) REFERENCES scan_jobs(id),
+    FOREIGN KEY(document_id) REFERENCES policy_documents(id),
+    FOREIGN KEY(reused_document_id) REFERENCES policy_documents(id),
+    FOREIGN KEY(baseline_job_id) REFERENCES scan_jobs(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_scan_item_results_baseline_lookup
+ON scan_item_results(job_id, target_key, url);
 
 CREATE TABLE IF NOT EXISTS job_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -234,10 +275,14 @@ class Database:
                 "retry_count": "INTEGER NOT NULL DEFAULT 0",
                 "rest_count": "INTEGER NOT NULL DEFAULT 0",
                 "resumed_count": "INTEGER NOT NULL DEFAULT 0",
+                "baseline_job_id": "INTEGER",
+                "source_signature": "TEXT NOT NULL DEFAULT '[]'",
             },
             "policy_documents": {
                 "last_detail_checked_at": "TEXT",
                 "source_site": "TEXT NOT NULL DEFAULT ''",
+                "topic_category": "TEXT NOT NULL DEFAULT ''",
+                "disclosure_attribute": "TEXT NOT NULL DEFAULT ''",
             },
             "link_checks": {"redirect_chain_json": "TEXT NOT NULL DEFAULT '[]'"},
         }
@@ -273,6 +318,18 @@ class Database:
                 created_at TEXT NOT NULL, FOREIGN KEY(job_id) REFERENCES scan_jobs(id));
             CREATE UNIQUE INDEX IF NOT EXISTS uq_link_check_per_job_url
                 ON link_checks(job_id, document_id, original_url);
+            CREATE TABLE IF NOT EXISTS scan_item_results (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, job_id INTEGER NOT NULL, target_key TEXT NOT NULL,
+                source_label TEXT NOT NULL, channel_id TEXT NOT NULL DEFAULT '', page_number INTEGER NOT NULL,
+                item_index INTEGER NOT NULL, title TEXT NOT NULL, url TEXT NOT NULL, listed_date TEXT,
+                detail_status TEXT NOT NULL, header_detected INTEGER NOT NULL DEFAULT 0,
+                source_id TEXT NOT NULL DEFAULT '', topic_category TEXT NOT NULL DEFAULT '',
+                disclosure_attribute TEXT NOT NULL DEFAULT '', authored_date TEXT, page_document_number TEXT NOT NULL DEFAULT '',
+                published_date TEXT, issuing_agency TEXT NOT NULL DEFAULT '', missing_fields_json TEXT NOT NULL DEFAULT '[]',
+                document_id INTEGER, reused_document_id INTEGER, baseline_job_id INTEGER, reason TEXT NOT NULL DEFAULT '',
+                checked_at TEXT NOT NULL, UNIQUE(job_id,target_key,page_number,item_index));
+            CREATE INDEX IF NOT EXISTS idx_scan_item_results_baseline_lookup
+                ON scan_item_results(job_id,target_key,url);
             """
         )
 
@@ -287,14 +344,18 @@ class Database:
             [(d, a, json.dumps(x, ensure_ascii=False), json.dumps(p, ensure_ascii=False)) for d, a, x, p in rows],
         )
 
-    def create_job(self, districts: list[str], mode: str, safety: dict[str, Any], max_documents: int = 0) -> int:
+    def create_job(
+        self, districts: list[str], mode: str, safety: dict[str, Any], max_documents: int = 0,
+        baseline_job_id: int | None = None,
+    ) -> int:
         now = utc_now()
         with self.connect() as conn:
             cur = conn.execute(
                 """INSERT INTO scan_jobs(districts_json,mode,status,created_at,safety_json,max_documents,
-                coverage_status) VALUES(?,?,?,?,?,?,?)""",
+                coverage_status,baseline_job_id,source_signature) VALUES(?,?,?,?,?,?,?,?,?)""",
                 (json.dumps(districts, ensure_ascii=False), mode, "pending", now,
-                 json.dumps(safety, ensure_ascii=False), max_documents, "not_started"),
+                 json.dumps(safety, ensure_ascii=False), max_documents, "not_started", baseline_job_id,
+                 json.dumps(sorted(districts), ensure_ascii=False)),
             )
             return int(cur.lastrowid)
 
@@ -309,6 +370,7 @@ class Database:
             "current_district_index", "total_by_district_json", "examined_by_district_json",
             "coverage_status", "completion_kind", "access_count", "retry_count", "rest_count",
             "resumed_count", "pause_reason", "cooldown_until", "last_error",
+            "baseline_job_id", "source_signature",
         }
         values = {k: v for k, v in values.items() if k in allowed}
         sql = ",".join(f"{key}=?" for key in values)
@@ -338,6 +400,16 @@ class Database:
                 "SELECT * FROM scan_jobs WHERE status IN ('pending','running','cooling') ORDER BY id DESC LIMIT 1"
             ).fetchone()
             return dict(row) if row else None
+
+    def eligible_baselines(self) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """SELECT * FROM scan_jobs WHERE mode='full' AND status='completed'
+                AND coverage_status='complete'
+                AND EXISTS(SELECT 1 FROM scan_item_results s WHERE s.job_id=scan_jobs.id)
+                ORDER BY id DESC"""
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def agency_rules(self, district: str) -> list[dict[str, Any]]:
         with self.connect() as conn:

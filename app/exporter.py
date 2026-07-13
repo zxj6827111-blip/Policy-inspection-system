@@ -85,7 +85,7 @@ def _write_sheet(workbook: Workbook, name: str, headers: list[str], rows: list[t
             if isinstance(cell.value, str) and cell.value.startswith(("http://", "https://")):
                 cell.hyperlink = cell.value
                 cell.style = "Hyperlink"
-            if name in {"超期与日期问题", "文号与机构问题", "外链问题"}:
+            if name in {"超期与日期问题", "文号与机构问题", "外链问题", "元数据问题"}:
                 cell.fill = ALERT_FILL
     _format_sheet(sheet)
 
@@ -115,6 +115,12 @@ def export_job(db: Database, job_id: int) -> Path:
             WHERE j.id IS NOT NULL OR d.last_seen_job_id=?
             GROUP BY d.id,j.action,j.reason,j.page_number,j.item_index
             ORDER BY d.district,j.page_number,j.item_index""", (job_id, job_id, job_id)
+        ).fetchall()
+        item_results = conn.execute(
+            """SELECT s.*,COALESCE(s.document_id,s.reused_document_id) AS effective_document_id
+            FROM scan_item_results s WHERE s.job_id=?
+            ORDER BY s.source_label,s.page_number,s.item_index""",
+            (job_id,),
         ).fetchall()
         events = conn.execute(
             "SELECT * FROM job_events WHERE job_id=? ORDER BY id", (job_id,)
@@ -191,27 +197,59 @@ def export_job(db: Database, job_id: int) -> Path:
                   r["checked_at"], r["document_url"]) for r in links]
     _write_sheet(workbook, "外链问题", ["来源", "区县", "文件标题", "关联类型", "原始URL", "最终URL", "状态码", "检查结果", "错误类型", "重定向链", "页面标题", "检查时间", "文件链接"], link_rows)
 
+    status_names = {
+        "checked_complete": "表头完整，已检查",
+        "checked_incomplete": "表头不完整，已记录问题",
+        "no_header_pass": "无表头 PASS",
+        "reused_baseline_detail": "基线复用（有表头）",
+        "reused_baseline_no_header": "基线复用（无表头 PASS）",
+        "reused_current_detail": "当期 URL 复用（有表头）",
+        "reused_current_no_header": "当期 URL 复用（无表头 PASS）",
+        "exception": "详情异常，待复测",
+    }
     all_rows = []
-    for document in documents:
-        raw = json.loads(document["raw_json"] or "{}")
-        body_numbers = raw.get("body_document_numbers") or []
-        effective_number = document["page_document_number"] or (body_numbers[0] if body_numbers else "")
-        number_type, number_year, number_index, combined = _document_number_parts(effective_number)
-        authored = _excel_date(document["authored_date"])
-        published = _excel_date(document["published_date"])
+    metadata_rows = []
+    for item_result in item_results:
+        document_id = item_result["effective_document_id"]
+        doc_findings = findings_by_document.get(int(document_id), []) if document_id else []
+        issue_codes = "、".join(finding["rule_code"] for finding in doc_findings)
+        issue_details = "；".join(finding["detail"] for finding in doc_findings)
+        try:
+            missing_fields = json.loads(item_result["missing_fields_json"] or "[]")
+        except json.JSONDecodeError:
+            missing_fields = ["缺失字段记录格式异常"]
+        authored = _excel_date(item_result["authored_date"])
+        published = _excel_date(item_result["published_date"])
         workdays, time_status = _timeliness(authored, published)
-        doc_findings = findings_by_document.get(int(document["id"]), [])
-        issue_codes = "、".join(item["rule_code"] for item in doc_findings)
-        issue_details = "；".join(item["detail"] for item in doc_findings)
+        number_type, number_year, number_index, combined = _document_number_parts(item_result["page_document_number"])
+        header_state = "无表头" if not item_result["header_detected"] else "表头不完整" if missing_fields else "表头完整"
         all_rows.append((
-            document["source_site"] or "市级平台", document["district"], document["source_id"], document["title"], authored,
-            published, workdays, time_status, number_type, number_year, number_index, combined,
-            "页面" if document["page_document_number"] else "正文" if body_numbers else "", issue_codes,
-            issue_details, "是", "", "", document["issuing_agency"], document["finding_count"],
-            "详情检查" if document["action"] == "processed" else "增量跳过", document["reason"],
-            document["page_number"], document["url"],
+            item_result["source_label"], item_result["channel_id"], item_result["page_number"],
+            item_result["item_index"] + 1, _excel_date(item_result["listed_date"]), item_result["title"],
+            header_state, item_result["source_id"], item_result["topic_category"], item_result["disclosure_attribute"],
+            authored, item_result["page_document_number"], published, item_result["issuing_agency"],
+            "、".join(missing_fields), workdays, time_status, number_type, number_year, number_index, combined,
+            issue_codes, issue_details, len(doc_findings), status_names.get(item_result["detail_status"], item_result["detail_status"]),
+            item_result["baseline_job_id"] or "", item_result["reason"], item_result["url"],
         ))
-    _write_sheet(workbook, "全量明细", ["栏目名称", "区县", "文件ID", "标题", "成文日期", "发布日期", "工作日差", "时效状态", "文号类型", "文号年份", "文号编号", "组合文号", "文号来源", "问题类型", "问题详情", "纳入检查", "筛除原因", "索引号", "发文机构", "问题数", "本批动作", "跳过/重检原因", "列表页码", "链接"], all_rows)
+        if missing_fields:
+            metadata_rows.append((
+                item_result["source_label"], item_result["channel_id"], item_result["title"], item_result["source_id"],
+                "、".join(missing_fields), item_result["detail_status"], item_result["reason"], item_result["url"],
+            ))
+    _write_sheet(
+        workbook, "全量明细",
+        ["来源 Sheet", "栏目 ID", "列表页码", "列表序号", "列表发布日期", "标题", "表头状态", "索引号", "主题分类",
+         "公开属性", "成文日期", "发文字号", "发布日期", "公开主体", "缺失/无效字段", "工作日差", "时效状态",
+         "文号类型", "文号年份", "文号编号", "组合文号", "问题类型", "问题详情", "问题数", "处理结果",
+         "基线任务 ID", "处理说明", "链接"],
+        all_rows,
+    )
+    _write_sheet(
+        workbook, "元数据问题",
+        ["来源 Sheet", "栏目 ID", "标题", "索引号", "缺失/无效字段", "处理结果", "处理说明", "链接"],
+        metadata_rows,
+    )
 
     run_rows = [(job["id"], "任务汇总", job["mode"], job["status"], coverage_label, job["completion_kind"],
                  job["created_at"], job["started_at"], job["finished_at"], job["examined_count"],

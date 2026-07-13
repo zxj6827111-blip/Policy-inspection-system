@@ -18,11 +18,22 @@
   <main>
     <section class="control-band">
       <form id="scan-form">
-        <fieldset>
+        <fieldset class="scan-source-field">
           <legend>扫描来源</legend>
           <div class="districts source-targets">
-            {% for target in targets %}
-            <label class="source-option"><input type="checkbox" name="target" value="{{ target.key }}" {% if target.key == 'municipal_putuo' %}checked{% endif %}>
+            {% set putuo_targets = targets | selectattr('collector_type', 'equalto', 'putuo') | list %}
+            {% if putuo_targets %}
+            <label class="source-option source-option--merged is-selected">
+              <input type="checkbox" id="putuo-merged-target" data-putuo-merged-target checked>
+              <span class="source-option-name">普陀区</span><small class="source-badge">区级</small><em>政策文件（合并扫描）</em>
+              <small class="source-coverage">区政府、委办局、街道镇、规范性文件、党政混合信息</small>
+            </label>
+            {% for target in putuo_targets %}
+            <input type="checkbox" name="target" value="{{ target.key }}" data-source-label="{{ target.label }}" data-putuo-member-target checked hidden>
+            {% endfor %}
+            {% endif %}
+            {% for target in targets if target.collector_type != 'putuo' %}
+            <label class="source-option"><input type="checkbox" name="target" value="{{ target.key }}" data-source-label="{{ target.label }}" {% if target.collector_type == 'putuo' %}checked{% endif %}>
               <span>{{ target.district }}</span><small class="source-badge">{{ target.source_level }}</small><em>{{ target.source_name }}</em>
             </label>
             {% endfor %}
@@ -31,13 +42,19 @@
         <div class="scan-settings">
           <label class="field">扫描模式
             <select name="mode">
-              <option value="incremental">增量扫描</option>
-              <option value="full">全历史扫描</option>
+              <option value="full">全量建立基线</option>
+              <option value="incremental">基于全量记录的增量扫描</option>
             </select>
           </label>
+          <label class="field" id="baseline-field" hidden>基准全量扫描记录
+            <select name="baseline_job_id" id="baseline-select" disabled>
+              <option value="">正在加载可用基线…</option>
+            </select>
+            <small id="baseline-hint">增量扫描会锁定为基准任务的同一组来源。</small>
+          </label>
           <label class="field">本次最多文件数
-            <input type="number" name="max_documents" value="5" min="0" step="1">
-            <small>0 表示不限制；首次验证建议 2–5 条</small>
+            <input type="number" name="max_documents" value="0" min="0" step="1">
+            <small>0 表示扫描全部条目。设为非 0 仅用于试扫，未完整完成的任务不能作为增量基线。</small>
           </label>
         </div>
         <button type="submit" class="primary">开始扫描</button>
@@ -69,6 +86,7 @@
       <div class="metrics">
         <div><span>状态</span><strong id="status"></strong></div>
         <div><span>覆盖进度（详情 / 增量跳过）</span><strong id="processed"></strong></div>
+        <div><span>表头 / 复用状态</span><strong id="item-stats">加载中</strong></div>
         <div><span>发现问题</span><strong id="finding-count"></strong></div>
         <div><span>当前区县 / 页</span><strong id="position"></strong></div>
       </div>

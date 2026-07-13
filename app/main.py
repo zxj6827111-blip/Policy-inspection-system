@@ -37,6 +37,7 @@ class CreateJobRequest(BaseModel):
     districts: list[str] = Field(default_factory=list)
     mode: str = "incremental"
     max_documents: int = Field(default=0, ge=0, le=100000)
+    baseline_job_id: int | None = Field(default=None, ge=1)
 
 
 class ReviewRequest(BaseModel):
@@ -63,6 +64,12 @@ async def list_jobs():
     return db.list_jobs()
 
 
+@app.get("/api/baselines")
+async def list_baselines():
+    """仅返回可作为增量依据的完整全量扫描任务。"""
+    return db.eligible_baselines()
+
+
 @app.get("/api/jobs/{job_id}")
 async def get_job(job_id: int):
     job = db.get_job(job_id)
@@ -86,8 +93,37 @@ async def create_job(payload: CreateJobRequest):
         raise HTTPException(400, "同一扫描来源只能选择一次")
     if payload.mode not in {"full", "incremental"}:
         raise HTTPException(400, "扫描模式必须是 full 或 incremental")
-    job_id = await manager.create_and_start(labels, payload.mode, payload.max_documents)
+    try:
+        job_id = await manager.create_and_start(
+            labels, payload.mode, payload.max_documents, payload.baseline_job_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     return {"job_id": job_id}
+
+
+@app.get("/api/jobs/{job_id}/item-stats")
+async def item_stats(job_id: int):
+    if not db.get_job(job_id):
+        raise HTTPException(404, "任务不存在")
+    with db.connect() as conn:
+        rows = conn.execute(
+            "SELECT detail_status,COUNT(*) AS count FROM scan_item_results WHERE job_id=? GROUP BY detail_status",
+            (job_id,),
+        ).fetchall()
+    counts = {row["detail_status"]: int(row["count"]) for row in rows}
+    no_header = sum(count for status, count in counts.items() if "no_header" in status)
+    reused = sum(count for status, count in counts.items() if status.startswith("reused_"))
+    return {
+        "total": sum(counts.values()),
+        "complete_header": counts.get("checked_complete", 0),
+        "incomplete_header": counts.get("checked_incomplete", 0),
+        "no_header_pass": no_header,
+        "baseline_reused": counts.get("reused_baseline_detail", 0) + counts.get("reused_baseline_no_header", 0),
+        "current_url_reused": counts.get("reused_current_detail", 0) + counts.get("reused_current_no_header", 0),
+        "exception": counts.get("exception", 0),
+        "by_status": counts,
+    }
 
 
 @app.post("/api/jobs/{job_id}/pause")

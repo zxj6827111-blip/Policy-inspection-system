@@ -18,12 +18,34 @@ class ScanTarget:
     district: str
     source_level: str
     source_name: str
+    collector_type: str = "municipal"
+    channel_id: str = ""
+    list_url: str = ""
 
 
 SCAN_TARGETS = {
     "municipal_putuo": ScanTarget("municipal_putuo", "市级平台·普陀区", "普陀区", "市级", "上海市政策文件库"),
     "municipal_chongming": ScanTarget("municipal_chongming", "市级平台·崇明区", "崇明区", "市级", "上海市政策文件库"),
-    "putuo_district": ScanTarget("putuo_district", "区级网站·普陀区", "普陀区", "区级", "普陀区政府网站"),
+    "putuo_government": ScanTarget(
+        "putuo_government", "区级网站·普陀区·区政府文件", "普陀区", "区级", "区政府文件",
+        "putuo", "3", "https://www.shpt.gov.cn/zhengwu/qzfwj-zfwj/index.html",
+    ),
+    "putuo_bureaus": ScanTarget(
+        "putuo_bureaus", "区级网站·普陀区·委办局", "普陀区", "区级", "委办局",
+        "putuo", "6", "https://www.shpt.gov.cn/zhengwu/wbj-zfwj/index.html",
+    ),
+    "putuo_towns": ScanTarget(
+        "putuo_towns", "区级网站·普陀区·街道镇", "普陀区", "区级", "街道镇",
+        "putuo", "1225", "https://www.shpt.gov.cn/zhengwu/jdz-zfwj/index.html",
+    ),
+    "putuo_normative": ScanTarget(
+        "putuo_normative", "区级网站·普陀区·规范性文件", "普陀区", "区级", "规范性文件",
+        "putuo", "1614", "https://www.shpt.gov.cn/zhengwu/gfxwj-zfwj/index.html",
+    ),
+    "putuo_party_government": ScanTarget(
+        "putuo_party_government", "区级网站·普陀区·党政混合信息", "普陀区", "区级", "党政混合信息",
+        "putuo", "1621", "https://www.shpt.gov.cn/zhengwu/dzhhxx-zfwj/index.html",
+    ),
 }
 
 # 保留给旧数据和测试使用的区县映射；新增任务使用 SCAN_TARGETS 的 key。
@@ -42,7 +64,11 @@ def resolve_target(value: str) -> ScanTarget:
     for target in SCAN_TARGETS.values():
         if value == target.label:
             return target
-    legacy = {"普陀区": "municipal_putuo", "崇明区": "municipal_chongming"}
+    legacy = {
+        "普陀区": "municipal_putuo",
+        "崇明区": "municipal_chongming",
+        "区级网站·普陀区": "putuo_government",
+    }
     if value in legacy:
         return SCAN_TARGETS[legacy[value]]
     raise ValueError(f"不支持的扫描目标：{value}")

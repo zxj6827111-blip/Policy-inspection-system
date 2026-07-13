@@ -3,7 +3,7 @@ from datetime import date, datetime
 from openpyxl import load_workbook
 
 from app.db import Database
-from app.domain import Finding, PolicyRecord
+from app.domain import Finding, PolicyListItem, PolicyRecord
 from app.exporter import export_job
 from app.repository import Repository
 
@@ -24,12 +24,23 @@ def test_database_and_excel_export(tmp_path, monkeypatch):
         job_id, record, [Finding("DATE-001", "日期问题", "high", "confirmed", "相隔 22 个工作日，超过20个工作日")]
     )
     repository.record_job_document(job_id, document_id, "普陀区", 1, 0, "processed")
+    repository.record_scan_item(
+        job_id,
+        PolicyListItem(
+            district="普陀区", page_number=1, item_index=0, title="测试文件",
+            url="https://example.test/10001.html", published_date=date(2026, 2, 1),
+            source_site="区级网站·普陀区·区政府文件", source_key="putuo_government", source_channel_id="3",
+        ),
+        detail_status="checked_complete", header_detected=True, source_id="10001",
+        authored_date=date(2026, 1, 1), page_document_number="普府〔2026〕1号",
+        published_date=date(2026, 2, 1), issuing_agency="上海市普陀区人民政府", document_id=document_id,
+    )
     monkeypatch.setattr("app.exporter.EXPORT_DIR", tmp_path)
     output = export_job(db, job_id)
     workbook = load_workbook(output)
-    assert workbook.sheetnames == ["问题汇总", "超期与日期问题", "文号与机构问题", "外链问题", "全量明细", "扫描运行记录"]
-    assert workbook["全量明细"]["D2"].value == "测试文件"
-    assert workbook["全量明细"]["X2"].hyperlink.target == "https://example.test/10001.html"
+    assert workbook.sheetnames == ["问题汇总", "超期与日期问题", "文号与机构问题", "外链问题", "全量明细", "元数据问题", "扫描运行记录"]
+    assert workbook["全量明细"]["F2"].value == "测试文件"
+    assert workbook["全量明细"]["AB2"].hyperlink.target == "https://example.test/10001.html"
     assert workbook["超期与日期问题"]["E2"].value == datetime(2026, 1, 1)
     assert workbook["超期与日期问题"]["G2"].value == 22
     assert workbook["问题汇总"]["E2"].value == "完整"

@@ -5,7 +5,7 @@ from datetime import date, datetime, timedelta, timezone
 import pytest
 
 from app.db import Database
-from app.domain import PolicyListItem, PolicyRecord
+from app.domain import DetailInspection, PolicyListItem, PolicyRecord
 from app.domain import CooldownPause, ItemReviewRequired, SafetyPause
 from app.jobs import JobManager
 from app.repository import Repository
@@ -130,16 +130,30 @@ async def test_incremental_unchanged_document_skips_detail(tmp_path, fake_runtim
     db = Database(tmp_path / "incremental.db")
     db.initialize()
     seed_job = db.create_job(["普陀区"], "full", {}, 0)
-    db.update_job(seed_job, status="completed", coverage_status="complete", completion_kind="full")
+    db.update_job(
+        seed_job, status="completed", coverage_status="complete", completion_kind="full",
+        estimated_total=1, examined_count=1,
+    )
     existing = PolicyRecord(
         district="普陀区", title="文件same", url="https://example.test/same",
         published_date=date(2026, 7, 1), authored_date=date(2026, 7, 1),
     )
-    Repository(db).save_record(seed_job, existing, [])
+    repository = Repository(db)
+    document_id = repository.save_record(seed_job, existing, [])
+    repository.record_scan_item(
+        seed_job,
+        PolicyListItem(
+            district="普陀区", page_number=1, item_index=0, title="文件same",
+            url="https://example.test/same", published_date=date(2026, 7, 1),
+            source_site="市级平台·普陀区", source_key="municipal_putuo",
+        ),
+        detail_status="checked_complete", header_detected=True,
+        authored_date=date(2026, 7, 1), published_date=date(2026, 7, 1), document_id=document_id,
+    )
     fake_runtime.datasets = {"普陀区": [item("普陀区", 0, "same")]}
     manager = JobManager(db)
 
-    job_id = await manager.create_and_start(["普陀区"], "incremental")
+    job_id = await manager.create_and_start(["普陀区"], "incremental", baseline_job_id=seed_job)
     await wait_job(manager, job_id)
     job = db.get_job(job_id)
     assert job["status"] == "completed"
@@ -150,7 +164,111 @@ async def test_incremental_unchanged_document_skips_detail(tmp_path, fake_runtim
     with db.connect() as conn:
         row = conn.execute("SELECT action,reason FROM scan_job_documents WHERE job_id=?", (job_id,)).fetchone()
     assert row["action"] == "skipped"
-    assert "未变化" in row["reason"]
+    assert "一致" in row["reason"]
+
+
+@pytest.mark.asyncio
+async def test_incremental_requires_a_matching_completed_full_baseline(tmp_path):
+    db = Database(tmp_path / "baseline-validation.db")
+    db.initialize()
+    manager = JobManager(db)
+
+    with pytest.raises(ValueError, match="必须选择"):
+        await manager.create_and_start(["普陀区"], "incremental")
+
+    incomplete = db.create_job(["普陀区"], "full", {}, 0)
+    db.update_job(incomplete, status="completed", coverage_status="partial")
+    with pytest.raises(ValueError, match="完整完成"):
+        await manager.create_and_start(["普陀区"], "incremental", baseline_job_id=incomplete)
+
+    other_source = db.create_job(["崇明区"], "full", {}, 0)
+    db.update_job(other_source, status="completed", coverage_status="complete", estimated_total=1, examined_count=1)
+    Repository(db).record_scan_item(
+        other_source,
+        PolicyListItem("崇明区", 1, 0, "崇明文件", "https://example.test/chongming", source_key="municipal_chongming"),
+        detail_status="no_header_pass", header_detected=False,
+    )
+    with pytest.raises(ValueError, match="来源必须"):
+        await manager.create_and_start(["普陀区"], "incremental", baseline_job_id=other_source)
+
+
+@pytest.mark.asyncio
+async def test_incomplete_baseline_metadata_forces_detail_recheck(tmp_path, fake_runtime):
+    db = Database(tmp_path / "baseline-incomplete.db")
+    db.initialize()
+    baseline_job = db.create_job(["普陀区"], "full", {}, 0)
+    db.update_job(
+        baseline_job, status="completed", coverage_status="complete", completion_kind="full",
+        estimated_total=1, examined_count=1,
+    )
+    repository = Repository(db)
+    document_id = repository.save_record(
+        baseline_job,
+        PolicyRecord("普陀区", "文件same", "https://example.test/same", published_date=date(2026, 7, 1)),
+        [],
+    )
+    repository.record_scan_item(
+        baseline_job,
+        PolicyListItem("普陀区", 1, 0, "文件same", "https://example.test/same", date(2026, 7, 1),
+                       source_site="市级平台·普陀区", source_key="municipal_putuo"),
+        detail_status="checked_incomplete", header_detected=True, missing_fields=["发布日期"], document_id=document_id,
+    )
+    fake_runtime.datasets = {"普陀区": [item("普陀区", 0, "same")]}
+    manager = JobManager(db)
+
+    job_id = await manager.create_and_start(["普陀区"], "incremental", baseline_job_id=baseline_job)
+    await wait_job(manager, job_id)
+
+    assert fake_runtime.opened == ["https://example.test/same"]
+    assert db.get_job(job_id)["processed_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_no_header_pass_is_saved_for_every_list_item(tmp_path, fake_runtime, monkeypatch):
+    class HeaderCollector(FakeCollector):
+        async def open_item(self, policy_item):
+            self.opened.append(policy_item.url)
+            if policy_item.item_index == 0:
+                return DetailInspection(record=None, header_detected=False)
+            return await super().open_item(policy_item)
+
+    db = Database(tmp_path / "no-header.db")
+    db.initialize()
+    HeaderCollector.datasets = {"普陀区": [item("普陀区", 0, "no-header"), item("普陀区", 1, "normal")]}
+    monkeypatch.setattr("app.jobs.BrowserCollector", HeaderCollector)
+    manager = JobManager(db)
+    job_id = await manager.create_and_start(["普陀区"], "full")
+    await wait_job(manager, job_id)
+
+    with db.connect() as conn:
+        rows = conn.execute(
+            "SELECT detail_status,header_detected FROM scan_item_results WHERE job_id=? ORDER BY item_index", (job_id,)
+        ).fetchall()
+    assert [tuple(row) for row in rows] == [("no_header_pass", 0), ("checked_complete", 1)]
+
+
+@pytest.mark.asyncio
+async def test_same_url_in_two_sources_is_opened_once_but_exported_twice(tmp_path, fake_runtime):
+    db = Database(tmp_path / "duplicate-url.db")
+    db.initialize()
+    shared_url = "https://example.test/shared"
+    fake_runtime.datasets = {
+        "普陀区": [PolicyListItem("普陀区", 1, 0, "共享文件", shared_url, date(2026, 7, 1))],
+        "崇明区": [PolicyListItem("崇明区", 1, 0, "共享文件", shared_url, date(2026, 7, 1))],
+    }
+    manager = JobManager(db)
+    job_id = await manager.create_and_start(["普陀区", "崇明区"], "full")
+    await wait_job(manager, job_id)
+
+    assert fake_runtime.opened == [shared_url]
+    with db.connect() as conn:
+        rows = conn.execute(
+            "SELECT target_key,detail_status FROM scan_item_results WHERE job_id=? ORDER BY target_key", (job_id,)
+        ).fetchall()
+    assert [tuple(row) for row in rows] == [
+        ("municipal_chongming", "reused_current_detail"),
+        ("municipal_putuo", "checked_complete"),
+    ]
 
 
 @pytest.mark.asyncio

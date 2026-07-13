@@ -112,6 +112,12 @@ def evaluate_record(
     calendar: WorkdayCalendar,
 ) -> list[Finding]:
     findings: list[Finding] = []
+    if record.header_detected and record.missing_metadata_fields:
+        missing = "、".join(record.missing_metadata_fields)
+        findings.append(Finding(
+            "META-001", "元数据问题", "high", "confirmed",
+            f"详情页表头字段缺失或格式无效：{missing}", missing, "", record.url,
+        ))
     page_number = normalize_document_number(record.page_document_number)
     body_numbers = record.body_document_numbers or extract_document_numbers(record.body_text)
 

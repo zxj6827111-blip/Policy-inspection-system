@@ -95,3 +95,15 @@ def test_extract_authored_date_prefers_joint_signature_over_effective_period_dat
 def test_extract_authored_date_returns_none_when_only_effective_period_dates_exist():
     text = "本意见自2025年4月21日起施行，有效期至2026年12月31日。"
     assert extract_authored_date(text, "上海市普陀区市场监督管理局") is None
+
+
+def test_incomplete_detected_header_creates_one_metadata_finding():
+    record = PolicyRecord(
+        "普陀区", "缺字段文件", "https://example.test/meta", header_detected=True,
+        missing_metadata_fields=["发布日期", "成文日期（格式无效）"],
+    )
+    findings = evaluate_record(record, [], WorkdayCalendar())
+    metadata = [finding for finding in findings if finding.rule_code == "META-001"]
+    assert len(metadata) == 1
+    assert "发布日期" in metadata[0].detail
+    assert "成文日期（格式无效）" in metadata[0].detail

@@ -12,8 +12,9 @@ from app.collector import (
     parse_iso_date,
     policy_list_item_from_api,
 )
+from app.config import SCAN_TARGETS
 from app.domain import SafetyPause
-from app.putuo_collector import parse_putuo_date, putuo_list_item_from_api
+from app.putuo_collector import PutuoDistrictCollector, parse_putuo_date, putuo_list_item_from_api
 
 
 def test_parse_list_metadata_values():
@@ -181,6 +182,77 @@ def test_putuo_public_api_record_keeps_source_and_relative_detail_url():
 
 def test_putuo_date_parser_accepts_metadata_format():
     assert parse_putuo_date("2026年07月03日") == date(2026, 7, 3)
+
+
+class PutuoDetailPage:
+    url = "https://www.shpt.gov.cn/zhengwu/zdgkml-qzfwj/2026/188/204477.html"
+
+    def __init__(self, text):
+        self.text = text
+
+    def locator(self, selector):
+        if selector in {"body", "article, .article-content, .TRS_Editor, .content"}:
+            return FakeLocator(self.text)
+        if selector == "h1":
+            return FakeLocator("测试政策标题")
+        if selector == "a":
+            return FakeLocator(items=[])
+        return FakeLocator("", count=0)
+
+
+@pytest.mark.asyncio
+async def test_putuo_detail_extracts_all_seven_header_fields():
+    detail = await PutuoDistrictCollector(None, None, SCAN_TARGETS["putuo_government"])._parse_putuo_detail(
+        PutuoDetailPage(
+            """索引号：SY310107202603028
+主题分类：土地
+公开属性：主动公开
+成文日期：2026年07月03日
+发文字号：普府〔2026〕54号
+发布日期：2026年07月03日
+公开主体：上海市普陀区人民政府
+正文内容"""
+        ),
+        "后备标题",
+    )
+    assert detail.header_detected is True
+    assert detail.missing_fields == []
+    assert detail.invalid_fields == []
+    assert detail.record is not None
+    assert detail.record.source_id == "SY310107202603028"
+    assert detail.record.topic_category == "土地"
+    assert detail.record.disclosure_attribute == "主动公开"
+    assert detail.record.authored_date == detail.record.published_date == date(2026, 7, 3)
+    assert detail.record.page_document_number == "普府〔2026〕54号"
+    assert detail.record.issuing_agency == "上海市普陀区人民政府"
+
+
+@pytest.mark.asyncio
+async def test_putuo_detail_marks_missing_and_invalid_header_fields_without_dropping_record():
+    detail = await PutuoDistrictCollector(None, None, SCAN_TARGETS["putuo_government"])._parse_putuo_detail(
+        PutuoDetailPage(
+            """索引号：SY310107202603028
+主题分类：土地
+公开属性：主动公开
+成文日期：2026年13月40日
+发文字号：普府〔2026〕54号
+发布日期：
+公开主体：上海市普陀区人民政府"""
+        ),
+        "后备标题",
+    )
+    assert detail.record is not None
+    assert detail.missing_fields == ["发布日期"]
+    assert detail.invalid_fields == ["成文日期（格式无效）"]
+
+
+@pytest.mark.asyncio
+async def test_putuo_detail_without_header_is_passed_without_record():
+    detail = await PutuoDistrictCollector(None, None, SCAN_TARGETS["putuo_government"])._parse_putuo_detail(
+        PutuoDetailPage("这是没有七项元数据表头的普通信息页面。"), "后备标题"
+    )
+    assert detail.header_detected is False
+    assert detail.record is None
 
 
 class FakeLocator:

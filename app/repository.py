@@ -26,19 +26,20 @@ class Repository:
                 document_id = int(existing["id"])
                 conn.execute(
                     """UPDATE policy_documents SET district=?,source_id=?,source_site=?,title=?,issuing_agency=?,page_document_number=?,
-                    published_date=?,authored_date=?,body_text=?,content_hash=?,last_seen_job_id=?,last_seen_at=?,
+                    published_date=?,authored_date=?,body_text=?,topic_category=?,disclosure_attribute=?,content_hash=?,last_seen_job_id=?,last_seen_at=?,
                     last_detail_checked_at=? WHERE id=?""",
                     (record.district, record.source_id, record.source_site, record.title, record.issuing_agency, record.page_document_number,
-                     raw["published_date"], raw["authored_date"], record.body_text, content_hash, job_id, now, now, document_id),
+                     raw["published_date"], raw["authored_date"], record.body_text, record.topic_category,
+                     record.disclosure_attribute, content_hash, job_id, now, now, document_id),
                 )
             else:
                 cur = conn.execute(
                     """INSERT INTO policy_documents(district,source_id,source_site,url,title,issuing_agency,page_document_number,
-                    published_date,authored_date,body_text,content_hash,last_detail_checked_at,first_seen_job_id,
-                    last_seen_job_id,first_seen_at,last_seen_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    published_date,authored_date,body_text,topic_category,disclosure_attribute,content_hash,last_detail_checked_at,first_seen_job_id,
+                    last_seen_job_id,first_seen_at,last_seen_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (record.district, record.source_id, record.source_site, record.url, record.title, record.issuing_agency,
                      record.page_document_number, raw["published_date"], raw["authored_date"], record.body_text,
-                     content_hash, now, job_id, job_id, now, now),
+                     record.topic_category, record.disclosure_attribute, content_hash, now, job_id, job_id, now, now),
                 )
                 document_id = int(cur.lastrowid)
             conn.execute(
@@ -53,6 +54,106 @@ class Repository:
                   f.page_value, f.body_value, f.evidence, now) for f in findings],
             )
             return document_id
+
+    def record_scan_item(
+        self, job_id: int, item: PolicyListItem, *, detail_status: str, header_detected: bool = False,
+        source_id: str = "", topic_category: str = "", disclosure_attribute: str = "",
+        authored_date: date | None = None, page_document_number: str = "", published_date: date | None = None,
+        issuing_agency: str = "", missing_fields: list[str] | None = None, document_id: int | None = None,
+        reused_document_id: int | None = None, baseline_job_id: int | None = None, reason: str = "",
+    ) -> None:
+        with self.db.connect() as conn:
+            conn.execute(
+                """INSERT INTO scan_item_results(job_id,target_key,source_label,channel_id,page_number,item_index,title,url,
+                listed_date,detail_status,header_detected,source_id,topic_category,disclosure_attribute,authored_date,
+                page_document_number,published_date,issuing_agency,missing_fields_json,document_id,reused_document_id,
+                baseline_job_id,reason,checked_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(job_id,target_key,page_number,item_index) DO UPDATE SET title=excluded.title,url=excluded.url,
+                listed_date=excluded.listed_date,detail_status=excluded.detail_status,header_detected=excluded.header_detected,
+                source_id=excluded.source_id,topic_category=excluded.topic_category,
+                disclosure_attribute=excluded.disclosure_attribute,authored_date=excluded.authored_date,
+                page_document_number=excluded.page_document_number,published_date=excluded.published_date,
+                issuing_agency=excluded.issuing_agency,missing_fields_json=excluded.missing_fields_json,
+                document_id=excluded.document_id,reused_document_id=excluded.reused_document_id,
+                baseline_job_id=excluded.baseline_job_id,reason=excluded.reason,checked_at=excluded.checked_at""",
+                (
+                    job_id, item.source_key, item.source_site, item.source_channel_id, item.page_number, item.item_index,
+                    item.title, item.url, item.published_date.isoformat() if item.published_date else None, detail_status,
+                    int(header_detected), source_id, topic_category, disclosure_attribute,
+                    authored_date.isoformat() if authored_date else None, page_document_number,
+                    published_date.isoformat() if published_date else None, issuing_agency,
+                    json.dumps(missing_fields or [], ensure_ascii=False), document_id, reused_document_id,
+                    baseline_job_id, reason, utc_now(),
+                ),
+            )
+
+    def baseline_item(self, baseline_job_id: int, item: PolicyListItem) -> dict | None:
+        with self.db.connect() as conn:
+            row = conn.execute(
+                """SELECT * FROM scan_item_results WHERE job_id=? AND target_key=? AND url=?
+                ORDER BY checked_at DESC LIMIT 1""",
+                (baseline_job_id, item.source_key, item.url),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def copy_baseline_findings(self, baseline_job_id: int, job_id: int, document_id: int) -> list[Finding]:
+        with self.db.connect() as conn:
+            rows = conn.execute(
+                """SELECT rule_code,category,severity,review_status,detail,page_value,body_value,evidence
+                FROM rule_findings WHERE job_id=? AND document_id=?""",
+                (baseline_job_id, document_id),
+            ).fetchall()
+            now = utc_now()
+            conn.executemany(
+                """INSERT INTO rule_findings(job_id,document_id,rule_code,category,severity,review_status,detail,
+                page_value,body_value,evidence,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                [
+                    (
+                        job_id, document_id, row["rule_code"], row["category"], row["severity"],
+                        row["review_status"], row["detail"], row["page_value"], row["body_value"],
+                        row["evidence"], now,
+                    )
+                    for row in rows
+                ],
+            )
+        return [
+            Finding(
+                row["rule_code"], row["category"], row["severity"], row["review_status"], row["detail"],
+                row["page_value"], row["body_value"], row["evidence"],
+            ) for row in rows
+        ]
+
+    def copy_baseline_link_checks(self, baseline_job_id: int, job_id: int, document_id: int) -> None:
+        """沿用未变化文件的外链检查结论，保证增量导出仍能呈现既有外链问题。"""
+        with self.db.connect() as conn:
+            rows = conn.execute(
+                """SELECT link_kind,original_url,final_url,status_code,result,error_type,page_title,
+                checked_at,redirect_chain_json FROM link_checks
+                WHERE job_id=? AND document_id=?""",
+                (baseline_job_id, document_id),
+            ).fetchall()
+            conn.executemany(
+                """INSERT INTO link_checks(job_id,document_id,link_kind,original_url,final_url,status_code,result,
+                error_type,page_title,checked_at,redirect_chain_json) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(job_id,document_id,original_url) DO UPDATE SET
+                link_kind=excluded.link_kind,final_url=excluded.final_url,status_code=excluded.status_code,
+                result=excluded.result,error_type=excluded.error_type,page_title=excluded.page_title,
+                checked_at=excluded.checked_at,redirect_chain_json=excluded.redirect_chain_json""",
+                [
+                    (
+                        job_id, document_id, row["link_kind"], row["original_url"], row["final_url"],
+                        row["status_code"], row["result"], row["error_type"], row["page_title"],
+                        row["checked_at"], row["redirect_chain_json"],
+                    )
+                    for row in rows
+                ],
+            )
+
+    def document(self, document_id: int) -> dict | None:
+        with self.db.connect() as conn:
+            row = conn.execute("SELECT * FROM policy_documents WHERE id=?", (document_id,)).fetchone()
+        return dict(row) if row else None
 
     def incremental_decision(
         self, url: str, title: str, published_date: date | None, refresh_days: int = 30,

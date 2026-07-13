@@ -4,7 +4,7 @@ import asyncio
 import json
 from contextlib import suppress
 from dataclasses import asdict
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from chinese_calendar import is_workday
 from playwright.async_api import async_playwright
@@ -12,7 +12,16 @@ from playwright.async_api import async_playwright
 from app.collector import BrowserCollector, LinkChecker
 from app.config import SafetyConfig, ScanTarget, resolve_target
 from app.db import Database, utc_now
-from app.domain import CooldownPause, ItemReviewRequired, JobStatus, PolicyListItem, SafetyPause
+from app.domain import (
+    CooldownPause,
+    DetailInspection,
+    Finding,
+    ItemReviewRequired,
+    JobStatus,
+    PolicyListItem,
+    PolicyRecord,
+    SafetyPause,
+)
 from app.putuo_collector import PutuoDistrictCollector
 from app.repository import Repository
 from app.rules import WorkdayCalendar, evaluate_record
@@ -26,15 +35,52 @@ class JobManager:
         self._tasks: dict[int, asyncio.Task] = {}
         self._guard = asyncio.Lock()
 
-    async def create_and_start(self, districts: list[str], mode: str, max_documents: int = 0) -> int:
+    async def create_and_start(
+        self, districts: list[str], mode: str, max_documents: int = 0, baseline_job_id: int | None = None,
+    ) -> int:
         async with self._guard:
             active = self.db.active_job()
             if active:
                 return int(active["id"])
+            if mode == "incremental":
+                self._validate_incremental_baseline(districts, baseline_job_id)
+            elif baseline_job_id is not None:
+                raise ValueError("全量扫描不能指定基准任务")
             safety = SafetyConfig()
-            job_id = self.db.create_job(districts, mode, asdict(safety), max_documents)
+            job_id = self.db.create_job(districts, mode, asdict(safety), max_documents, baseline_job_id)
             self._tasks[job_id] = asyncio.create_task(self._run(job_id))
             return job_id
+
+    def _validate_incremental_baseline(self, districts: list[str], baseline_job_id: int | None) -> None:
+        if baseline_job_id is None:
+            raise ValueError("增量扫描必须选择一条已完成的全量扫描记录作为基准")
+        baseline = self.db.get_job(baseline_job_id)
+        if not baseline:
+            raise ValueError("所选基准扫描记录不存在")
+        if not (
+            baseline["mode"] == "full"
+            and baseline["status"] == JobStatus.COMPLETED
+            and baseline["coverage_status"] == "complete"
+        ):
+            raise ValueError("所选基准必须是已完整完成的全量扫描任务")
+        with self.db.connect() as conn:
+            item_count = int(conn.execute(
+                "SELECT COUNT(*) FROM scan_item_results WHERE job_id=?", (baseline_job_id,)
+            ).fetchone()[0])
+        if (
+            item_count == 0
+            or item_count != int(baseline["estimated_total"])
+            or item_count != int(baseline["examined_count"])
+        ):
+            raise ValueError("所选全量任务缺少完整的逐条扫描结果，不能作为增量基准")
+        try:
+            baseline_sources = sorted(json.loads(baseline["source_signature"] or "[]"))
+        except json.JSONDecodeError:
+            baseline_sources = []
+        if not baseline_sources:
+            baseline_sources = sorted(json.loads(baseline["districts_json"]))
+        if baseline_sources != sorted(districts):
+            raise ValueError("增量扫描来源必须与所选基准全量扫描完全一致")
 
     async def pause(self, job_id: int, reason: str = "用户手动暂停") -> None:
         job = self.db.get_job(job_id)
@@ -209,6 +255,7 @@ class JobManager:
                 browser = await playwright.chromium.launch(headless=True)
                 try:
                     collectors = []
+                    detail_cache: dict[str, tuple[DetailInspection, int | None]] = {}
                     try:
                         # 先在同一全局限速器下读取每个已选来源的总量，进度不会把未扫描范围误报为完成。
                         for target in targets:
@@ -230,7 +277,8 @@ class JobManager:
                                 rendered_hosts=getattr(collector, "rendered_hosts", None),
                             ) as checker:
                                 await self._scan_target(
-                                    job_id, job, target, target_index, max_documents, collector, checker, calendar
+                                    job_id, job, target, target_index, max_documents, collector, checker, calendar,
+                                    detail_cache,
                                 )
                         for target, collector in collectors:
                             latest = self.db.get_job(job_id)
@@ -302,7 +350,9 @@ class JobManager:
             self.db.add_job_event(job_id, "auto_resume_blocked", str(exc))
 
     def _collector_for_target(self, browser, safety, target: ScanTarget):
-        return PutuoDistrictCollector(browser, safety) if target.key == "putuo_district" else BrowserCollector(browser, safety)
+        if target.collector_type == "putuo":
+            return PutuoDistrictCollector(browser, safety, target)
+        return BrowserCollector(browser, safety)
 
     async def _record_target_total(self, job_id: int, label: str, total: int) -> None:
         current = self.db.get_job(job_id)
@@ -314,8 +364,116 @@ class JobManager:
             total_by_district_json=json.dumps(totals, ensure_ascii=False),
         )
 
+    @staticmethod
+    def _as_date(value: str | None) -> date | None:
+        if not value:
+            return None
+        try:
+            return date.fromisoformat(value)
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _coerce_inspection(value: PolicyRecord | DetailInspection) -> DetailInspection:
+        if isinstance(value, DetailInspection):
+            return value
+        if isinstance(value, PolicyRecord):
+            # 市级采集器仍返回 PolicyRecord；它没有普陀七项表头的适用前提，视为已解析详情。
+            return DetailInspection(record=value, header_detected=True)
+        raise TypeError(f"详情采集器返回了不支持的数据类型：{type(value).__name__}")
+
+    @staticmethod
+    def _prepare_item_source(item: PolicyListItem, target: ScanTarget) -> None:
+        item.source_key = item.source_key or target.key
+        item.source_site = item.source_site or target.label
+        item.source_channel_id = item.source_channel_id or target.channel_id
+
+    @staticmethod
+    def _all_missing_fields(inspection: DetailInspection) -> list[str]:
+        return list(dict.fromkeys([*inspection.missing_fields, *inspection.invalid_fields]))
+
+    def _record_item_result(
+        self,
+        job_id: int,
+        item: PolicyListItem,
+        inspection: DetailInspection,
+        *,
+        detail_status: str,
+        document_id: int | None = None,
+        reused_document_id: int | None = None,
+        baseline_job_id: int | None = None,
+        reason: str = "",
+    ) -> None:
+        record = inspection.record
+        self.repo.record_scan_item(
+            job_id,
+            item,
+            detail_status=detail_status,
+            header_detected=inspection.header_detected,
+            source_id=record.source_id if record else "",
+            topic_category=record.topic_category if record else "",
+            disclosure_attribute=record.disclosure_attribute if record else "",
+            authored_date=record.authored_date if record else None,
+            page_document_number=record.page_document_number if record else "",
+            published_date=record.published_date if record else None,
+            issuing_agency=record.issuing_agency if record else "",
+            missing_fields=self._all_missing_fields(inspection),
+            document_id=document_id,
+            reused_document_id=reused_document_id,
+            baseline_job_id=baseline_job_id,
+            reason=reason,
+        )
+
+    def _inspection_from_baseline(self, item: PolicyListItem, row: dict) -> DetailInspection:
+        status = row["detail_status"]
+        header_detected = bool(row["header_detected"])
+        if status in {"no_header_pass", "reused_current_no_header", "reused_baseline_no_header"}:
+            return DetailInspection(record=None, header_detected=False)
+        try:
+            missing_fields = json.loads(row["missing_fields_json"] or "[]")
+        except json.JSONDecodeError:
+            missing_fields = []
+        record = PolicyRecord(
+            district=item.district,
+            title=item.title,
+            url=item.url,
+            source_id=row["source_id"] or "",
+            issuing_agency=row["issuing_agency"] or "",
+            page_document_number=row["page_document_number"] or "",
+            published_date=self._as_date(row["published_date"]),
+            authored_date=self._as_date(row["authored_date"]),
+            source_site=item.source_site,
+            topic_category=row["topic_category"] or "",
+            disclosure_attribute=row["disclosure_attribute"] or "",
+            header_detected=header_detected,
+            missing_metadata_fields=missing_fields,
+        )
+        return DetailInspection(record=record, header_detected=header_detected, missing_fields=missing_fields)
+
+    @staticmethod
+    def _baseline_document_id(row: dict) -> int | None:
+        value = row.get("document_id") or row.get("reused_document_id")
+        return int(value) if value else None
+
+    def _can_reuse_baseline_item(self, row: dict, item: PolicyListItem) -> tuple[bool, str]:
+        if row["title"].strip() != item.title.strip():
+            return False, "列表标题发生变化"
+        listed_date = item.published_date.isoformat() if item.published_date else None
+        if (row["listed_date"] or None) != listed_date:
+            return False, "列表发布日期发生变化"
+        if row["detail_status"] in {"exception", "checked_incomplete"}:
+            return False, "基线详情异常或表头字段不完整"
+        if row["detail_status"] in {"no_header_pass", "reused_current_no_header", "reused_baseline_no_header"}:
+            return True, "基线无表头 PASS，列表信息未变化"
+        if self._all_missing_fields(self._inspection_from_baseline(item, row)):
+            return False, "基线表头字段不完整"
+        if not self._baseline_document_id(row):
+            return False, "基线没有可复用的详情文档"
+        return True, "与基线的 URL、标题和列表发布日期一致"
+
     async def _scan_target(
-        self, job_id, job, target, target_index, max_documents, collector, checker, calendar
+        self, job_id, job, target, target_index, max_documents, collector, checker, calendar,
+        detail_cache: dict[str, tuple[DetailInspection, int | None]],
     ) -> None:
         latest = self.db.get_job(job_id)
         same_target = target_index == int(latest["current_district_index"])
@@ -326,37 +484,91 @@ class JobManager:
             current_page=start_page, current_item_index=item_index,
         )
         async for item in collector.iter_items(target.district, start_page, item_index):
+            self._prepare_item_source(item, target)
             latest = self.db.get_job(job_id)
             if not latest or latest["status"] != JobStatus.RUNNING:
                 return
             if max_documents and int(latest["batch_examined_count"]) >= max_documents:
                 self._mark_partial_limit(job_id, latest)
                 return
-            skip = False
-            reason = ""
-            document_id = None
-            if job["mode"] == "incremental" and item.url:
-                skip, reason, document_id = self.repo.incremental_decision(
-                    item.url, item.title, item.published_date, job_id=job_id
-                )
-            if skip and document_id is not None:
-                self.repo.record_job_document(
-                    job_id, document_id, target.label, item.page_number, item.item_index, "skipped", reason
+            cached = detail_cache.get(item.url)
+            if cached:
+                inspection, document_id = cached
+                detail_status = "reused_current_no_header" if inspection.record is None else "reused_current_detail"
+                reason = "同一任务中该 URL 已在另一来源完成详情检查，复用当前任务结果"
+                self._record_item_result(
+                    job_id, item, inspection, detail_status=detail_status, document_id=document_id,
+                    reused_document_id=document_id, baseline_job_id=job.get("baseline_job_id"), reason=reason,
                 )
                 self._advance_progress(job_id, target.label, item.page_number, item.item_index, skipped=True)
                 continue
+
+            baseline_job_id = job.get("baseline_job_id") if job["mode"] == "incremental" else None
+            if baseline_job_id and item.url:
+                baseline = self.repo.baseline_item(int(baseline_job_id), item)
+                if baseline:
+                    can_reuse, reason = self._can_reuse_baseline_item(baseline, item)
+                    if can_reuse:
+                        inspection = self._inspection_from_baseline(item, baseline)
+                        document_id = self._baseline_document_id(baseline)
+                        finding_delta = 0
+                        if document_id is not None:
+                            copied_findings = self.repo.copy_baseline_findings(int(baseline_job_id), job_id, document_id)
+                            finding_delta = len(copied_findings)
+                            self.repo.copy_baseline_link_checks(int(baseline_job_id), job_id, document_id)
+                            self.repo.record_job_document(
+                                job_id, document_id, target.label, item.page_number, item.item_index,
+                                "skipped", reason,
+                            )
+                        detail_status = "reused_baseline_no_header" if inspection.record is None else "reused_baseline_detail"
+                        self._record_item_result(
+                            job_id, item, inspection, detail_status=detail_status, document_id=document_id,
+                            reused_document_id=document_id, baseline_job_id=int(baseline_job_id), reason=reason,
+                        )
+                        detail_cache[item.url] = (inspection, document_id)
+                        self._advance_progress(
+                            job_id, target.label, item.page_number, item.item_index,
+                            skipped=True, finding_delta=finding_delta,
+                        )
+                        continue
             try:
-                record = await collector.open_item(item)
+                inspection = self._coerce_inspection(await collector.open_item(item))
             except ItemReviewRequired as exc:
                 self.repo.record_scan_exception(job_id, item, exc.category, str(exc))
+                self._record_item_result(
+                    job_id, item, DetailInspection(record=None, header_detected=False),
+                    detail_status="exception", reason=str(exc), baseline_job_id=baseline_job_id,
+                )
                 self.db.add_job_event(job_id, "exception_queued", str(exc), item.url, category=exc.category)
                 self._advance_progress(
                     job_id, target.label, item.page_number, item.item_index, skipped=True, current_url=item.url,
                 )
                 continue
+            if inspection.record is None:
+                reason = "未发现七项政策表头，按规则 PASS，不进行字段问题检查"
+                self._record_item_result(
+                    job_id, item, inspection, detail_status="no_header_pass", baseline_job_id=baseline_job_id,
+                    reason=reason,
+                )
+                detail_cache[item.url] = (inspection, None)
+                self._advance_progress(
+                    job_id, target.label, item.page_number, item.item_index,
+                    skipped=False, current_url=item.url,
+                )
+                continue
+            record = inspection.record
+            record.district = target.district
+            record.source_site = record.source_site or target.label
+            record.header_detected = inspection.header_detected
+            record.missing_metadata_fields = self._all_missing_fields(inspection)
             agency_rows = self.db.agency_rules(target.district)
             findings = evaluate_record(record, agency_rows, calendar)
             document_id = self.repo.save_record(job_id, record, findings)
+            detail_status = "checked_incomplete" if record.missing_metadata_fields else "checked_complete"
+            reason = (
+                "详情页表头字段不完整，已记录 META-001 并继续既有检查"
+                if record.missing_metadata_fields else "详情页表头完整"
+            )
             self.repo.record_job_document(
                 job_id, document_id, target.label, item.page_number, item.item_index,
                 "checking_links", "关联链接检查进行中",
@@ -368,6 +580,11 @@ class JobManager:
             self.repo.record_job_document(
                 job_id, document_id, target.label, item.page_number, item.item_index, "processed", reason
             )
+            self._record_item_result(
+                job_id, item, inspection, detail_status=detail_status, document_id=document_id,
+                baseline_job_id=baseline_job_id, reason=reason,
+            )
+            detail_cache[item.url] = (inspection, document_id)
             self._advance_progress(
                 job_id, target.label, item.page_number, item.item_index,
                 skipped=False, finding_delta=len(findings), current_url=record.url,
@@ -383,9 +600,28 @@ class JobManager:
             if not latest or latest["status"] != JobStatus.RUNNING:
                 return
             try:
-                record = await collector.open_detail_url(
+                inspection = self._coerce_inspection(await collector.open_detail_url(
                     target.district, exception["url"], exception["title"],
+                ))
+                item = PolicyListItem(
+                    district=target.district, page_number=int(exception["page_number"]),
+                    item_index=int(exception["item_index"]), title=exception["title"], url=exception["url"],
+                    source_site=target.label, source_key=target.key, source_channel_id=target.channel_id,
                 )
+                if inspection.record is None:
+                    self._record_item_result(
+                        job_id, item, inspection, detail_status="no_header_pass",
+                        reason="收尾复测未发现七项政策表头，按规则 PASS",
+                    )
+                    self.repo.resolve_scan_exception(int(exception["id"]))
+                    self._mark_exception_retest_success(job_id, 0)
+                    self.db.add_job_event(job_id, "exception_resolved", "收尾复测无表头 PASS", exception["url"])
+                    continue
+                record = inspection.record
+                record.district = target.district
+                record.source_site = record.source_site or target.label
+                record.header_detected = inspection.header_detected
+                record.missing_metadata_fields = self._all_missing_fields(inspection)
                 findings = evaluate_record(record, self.db.agency_rules(target.district), calendar)
                 document_id = self.repo.save_record(job_id, record, findings)
                 self.repo.record_job_document(
@@ -397,6 +633,12 @@ class JobManager:
                 self.repo.record_job_document(
                     job_id, document_id, target.label, int(exception["page_number"]),
                     int(exception["item_index"]), "retest_processed", "收尾复测成功",
+                )
+                self._record_item_result(
+                    job_id, item, inspection,
+                    detail_status="checked_incomplete" if record.missing_metadata_fields else "checked_complete",
+                    document_id=document_id,
+                    reason="收尾复测成功",
                 )
                 self.repo.resolve_scan_exception(int(exception["id"]))
                 self._mark_exception_retest_success(job_id, len(findings))

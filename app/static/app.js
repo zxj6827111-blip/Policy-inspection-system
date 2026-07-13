@@ -2,6 +2,7 @@ const $ = (selector) => document.querySelector(selector);
 let currentJobId = null;
 let reviewFilter = 'pending';
 let reviewPage = 1;
+let availableBaselines = [];
 
 function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>'"]/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[char]));
@@ -72,7 +73,8 @@ function renderCurrent(job) {
   currentJobId = job.id;
   $('#current-panel').hidden = false;
   $('#job-id').textContent = `#${job.id}`;
-  $('#job-subtitle').textContent = `${JSON.parse(job.districts_json).join('、')} · ${job.mode === 'full' ? '全历史' : '增量'}扫描`;
+  const baselineText = job.baseline_job_id ? ` · 基准 #${job.baseline_job_id}` : '';
+  $('#job-subtitle').textContent = `${JSON.parse(job.districts_json).join('、')} · ${job.mode === 'full' ? '全量' : '增量'}扫描${baselineText}`;
   $('#status').textContent = statusNames[job.status] || job.status;
   $('#status').parentElement.className = `metric-status metric-status-${job.status}`;
   $('#processed').textContent = `${job.examined_count} / ${job.estimated_total || '?'}（详情 ${job.processed_count}，跳过 ${job.skipped_count}）`;
@@ -95,6 +97,13 @@ function renderCurrent(job) {
   $('#stop-btn').disabled = !operation.stop;
   if (!$('#findings-panel').contains(document.activeElement)) renderFindings(job.id).catch(error => toast(error.message));
   renderScanExceptions(job.id).catch(error => toast(error.message));
+  renderItemStats(job.id).catch(error => { $('#item-stats').textContent = '统计读取失败'; });
+}
+
+async function renderItemStats(jobId) {
+  const stats = await api(`/api/jobs/${jobId}/item-stats`);
+  if (currentJobId !== jobId) return;
+  $('#item-stats').textContent = `完整 ${stats.complete_header} · 缺字段 ${stats.incomplete_header} · 无表头 PASS ${stats.no_header_pass} · 基线复用 ${stats.baseline_reused}`;
 }
 
 async function renderScanExceptions(jobId) {
@@ -175,13 +184,129 @@ async function refreshJobs() {
   if (active && (!currentJobId || active.id === currentJobId)) renderCurrent(active);
 }
 
+function baselineSources(job) {
+  try {
+    const signature = JSON.parse(job.source_signature || '[]');
+    return signature.length ? signature : JSON.parse(job.districts_json || '[]');
+  } catch { return []; }
+}
+
+function sourceTargetInputs() {
+  return [...document.querySelectorAll('input[name=target]')];
+}
+
+function syncSourceOptionStates() {
+  document.querySelectorAll('.source-option').forEach(option => {
+    const input = option.querySelector('input[type=checkbox]');
+    option.classList.toggle('is-selected', Boolean(input?.checked));
+  });
+}
+
+function putuoMemberInputs() {
+  return sourceTargetInputs().filter(input => input.hasAttribute('data-putuo-member-target'));
+}
+
+function putuoSourceLabels() {
+  return new Set(putuoMemberInputs().map(input => input.dataset.sourceLabel));
+}
+
+function syncPutuoMergedTarget() {
+  const members = putuoMemberInputs();
+  $('#putuo-merged-target').checked = members.length > 0 && members.every(input => input.checked);
+  syncSourceOptionStates();
+}
+
+function setPutuoMergedTarget(checked) {
+  putuoMemberInputs().forEach(input => { input.checked = checked; });
+  $('#putuo-merged-target').checked = checked;
+  syncSourceOptionStates();
+}
+
+function baselineCanUseMergedControl(job) {
+  const sources = baselineSources(job);
+  const inputs = sourceTargetInputs();
+  const knownSources = new Set(inputs.map(input => input.dataset.sourceLabel));
+  const putuoSources = putuoSourceLabels();
+  const includedPutuoSources = sources.filter(source => putuoSources.has(source));
+  return sources.length > 0
+    && sources.every(source => knownSources.has(source))
+    && (includedPutuoSources.length === 0 || includedPutuoSources.length === putuoSources.size);
+}
+
+function selectableBaselines() {
+  return availableBaselines.filter(baselineCanUseMergedControl);
+}
+
+function renderBaselineOptions() {
+  const select = $('#baseline-select');
+  const previous = select.value;
+  const baselines = selectableBaselines();
+  select.textContent = '';
+  const placeholder = document.createElement('option');
+  placeholder.value = '';
+  placeholder.textContent = baselines.length ? '请选择一条完整全量扫描记录' : '当前没有可用的完整全量扫描记录';
+  select.appendChild(placeholder);
+  for (const job of baselines) {
+    const option = document.createElement('option');
+    option.value = String(job.id);
+    const createdAt = new Date(job.finished_at || job.created_at).toLocaleString('zh-CN', {hour12:false});
+    option.textContent = `#${job.id} · ${baselineSources(job).join('、')} · 已覆盖 ${job.examined_count}/${job.estimated_total} · 问题 ${job.finding_count} · ${createdAt}`;
+    select.appendChild(option);
+  }
+  if (baselines.some(job => String(job.id) === previous)) select.value = previous;
+}
+
+function lockTargetsToBaseline() {
+  const selectedId = Number($('#baseline-select').value || 0);
+  const baseline = selectableBaselines().find(job => job.id === selectedId);
+  const inputs = sourceTargetInputs();
+  if (!baseline) {
+    inputs.forEach(input => { input.disabled = true; });
+    $('#putuo-merged-target').checked = false;
+    $('#putuo-merged-target').disabled = true;
+    $('#baseline-hint').textContent = '请选择完整的全量扫描记录，来源会自动锁定。';
+    return;
+  }
+  const sources = new Set(baselineSources(baseline));
+  inputs.forEach(input => {
+    input.checked = sources.has(input.dataset.sourceLabel);
+    input.disabled = true;
+  });
+  syncPutuoMergedTarget();
+  $('#putuo-merged-target').disabled = true;
+  $('#baseline-hint').textContent = `已锁定 ${sources.size} 个来源；增量结果将严格与任务 #${baseline.id} 比较。`;
+}
+
+function updateModeControls() {
+  const incremental = document.querySelector('[name=mode]').value === 'incremental';
+  $('#baseline-field').hidden = !incremental;
+  $('#baseline-select').disabled = !incremental;
+  document.querySelector('.scan-settings').classList.toggle('with-baseline', incremental);
+  if (incremental) lockTargetsToBaseline();
+  else {
+    sourceTargetInputs().forEach(input => { input.disabled = false; });
+    $('#putuo-merged-target').disabled = false;
+    syncPutuoMergedTarget();
+  }
+  syncSourceOptionStates();
+}
+
+async function loadBaselines() {
+  availableBaselines = await api('/api/baselines');
+  renderBaselineOptions();
+  updateModeControls();
+}
+
 $('#scan-form').addEventListener('submit', async (event) => {
   event.preventDefault();
   const targets = [...document.querySelectorAll('input[name=target]:checked')].map(input => input.value);
   if (!targets.length) return toast('请至少选择一个扫描来源');
   const form = new FormData(event.target);
+  const mode = form.get('mode');
+  const baselineJobId = Number(form.get('baseline_job_id') || 0);
+  if (mode === 'incremental' && !baselineJobId) return toast('请先选择一条完整全量扫描记录作为基准');
   try {
-    const result = await api('/api/jobs', {method:'POST', body:JSON.stringify({targets, mode:form.get('mode'), max_documents:Number(form.get('max_documents') || 0)})});
+    const result = await api('/api/jobs', {method:'POST', body:JSON.stringify({targets, mode, max_documents:Number(form.get('max_documents') || 0), baseline_job_id:baselineJobId || null})});
     currentJobId = result.job_id; await refreshJobs(); toast(`任务 #${result.job_id} 已创建`);
   } catch (error) { toast(error.message); }
 });
@@ -203,6 +328,12 @@ $('#review-prev').addEventListener('click', () => {
 $('#review-next').addEventListener('click', () => {
   if (currentJobId) { reviewPage += 1; renderFindings(currentJobId).catch(error => toast(error.message)); }
 });
+document.querySelector('[name=mode]').addEventListener('change', updateModeControls);
+$('#baseline-select').addEventListener('change', lockTargetsToBaseline);
+$('#putuo-merged-target').addEventListener('change', event => {
+  setPutuoMergedTarget(event.target.checked);
+});
+sourceTargetInputs().forEach(input => input.addEventListener('change', syncSourceOptionStates));
 $('#history-details').addEventListener('toggle', (event) => {
   const hint = event.currentTarget.querySelector('.collapse-hint');
   hint.textContent = event.currentTarget.open ? hint.dataset.expanded : hint.dataset.collapsed;
@@ -210,5 +341,9 @@ $('#history-details').addEventListener('toggle', (event) => {
 });
 
 api('/health').then(() => { $('#health').textContent = '本地服务正常'; }).catch(() => { $('#health').textContent = '服务异常'; });
+loadBaselines().catch(error => {
+  $('#baseline-hint').textContent = `无法加载基准任务：${error.message}`;
+  updateModeControls();
+});
 refreshJobs().catch(error => toast(error.message));
 setInterval(() => refreshJobs().catch(() => {}), 3000);

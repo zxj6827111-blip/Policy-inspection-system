@@ -32,6 +32,8 @@ class PolicyListItem:
     published_date: date | None = None
     related_links: list[RelatedLink] = field(default_factory=list)
     source_site: str = ""
+    source_key: str = ""
+    source_channel_id: str = ""
 
 
 @dataclass
@@ -48,6 +50,18 @@ class PolicyRecord:
     body_document_numbers: list[str] = field(default_factory=list)
     related_links: list[RelatedLink] = field(default_factory=list)
     source_site: str = ""
+    topic_category: str = ""
+    disclosure_attribute: str = ""
+    header_detected: bool = False
+    missing_metadata_fields: list[str] = field(default_factory=list)
+
+
+@dataclass
+class DetailInspection:
+    record: PolicyRecord | None
+    header_detected: bool
+    missing_fields: list[str] = field(default_factory=list)
+    invalid_fields: list[str] = field(default_factory=list)
 
 
 @dataclass

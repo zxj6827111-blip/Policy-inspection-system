@@ -9,15 +9,26 @@ p { margin: 0; color: #657480; font-size: 13px; }
 .health { font-size: 13px; border: 1px solid #6e8798; padding: 6px 9px; border-radius: 4px; }
 main { max-width: 1180px; margin: 0 auto; padding: 26px 24px 50px; }
 section { background: white; border: 1px solid #dfe5e9; margin-bottom: 18px; padding: 20px; }
-.control-band form { display: grid; grid-template-columns: minmax(430px, 1.7fr) minmax(370px, 1.25fr) auto; gap: 16px; align-items: end; }
+.control-band form { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 20px; align-items: start; }
 fieldset { border: 0; margin: 0; padding: 0; }
 legend, .field { display: grid; gap: 7px; font-size: 13px; font-weight: 700; }
-.districts { display: flex; flex-wrap: wrap; gap: 8px; min-height: 40px; align-items: center; }
-.districts label { border: 1px solid #cfd8de; padding: 9px 13px; cursor: pointer; }
+.scan-source-field { position: relative; grid-column: 1 / -1; min-width: 0; padding: 0 0 16px 94px; border-bottom: 1px solid #e0e7eb; }
+.scan-source-field legend { position: absolute; top: 17px; left: 0; margin: 0; }
+.districts { display: flex; flex-wrap: wrap; gap: 8px; min-height: 0; align-items: center; }
+.districts label { border: 1px solid #cfd8de; padding: 9px 13px; cursor: pointer; transition: min-width .18s ease, min-height .18s ease, padding .18s ease, border-color .18s ease, background-color .18s ease, box-shadow .18s ease; }
 .source-option { display: inline-flex; align-items: center; gap: 7px; white-space: nowrap; }
+.source-option input { margin: 0; }
+.source-option-name { font-weight: 700; }
+.source-option--merged .source-coverage { display: none; }
+.source-option.is-selected { border-color: #6d98ad; background: #f2f8fa; box-shadow: inset 3px 0 0 #31566a; }
+.source-option.is-selected:not(.source-option--merged) { min-width: 286px; min-height: 68px; padding: 14px 16px; }
+.source-option--merged.is-selected { display: grid; grid-template-columns: auto auto auto 1fr; column-gap: 7px; row-gap: 5px; min-width: 318px; min-height: 68px; white-space: normal; }
 .source-option em { font-style: normal; color: #657480; font-size: 12px; }
 .source-badge { background: #e6eef2; border: 1px solid #bfccd4; color: #31566a; padding: 1px 5px; font-size: 11px; }
-.scan-settings { display: grid; grid-template-columns: minmax(150px, .8fr) minmax(200px, 1fr); gap: 16px; align-items: start; }
+.source-option--merged.is-selected .source-coverage { display: block; grid-column: 2 / -1; color: #657480; line-height: 1.45; }
+.scan-settings { display: grid; grid-template-columns: minmax(180px, .9fr) minmax(250px, 1.4fr); gap: 16px; align-items: start; }
+.scan-settings.with-baseline { grid-template-columns: minmax(135px, .8fr) minmax(190px, 1.25fr) minmax(135px, .8fr); }
+.scan-settings .field[hidden] { display: none; }
 select, input[type=number] { height: 40px; border: 1px solid #b9c5cc; padding: 0 10px; background: white; font: inherit; }
 .review-note { width: 180px; height: 36px; border: 1px solid #b9c5cc; padding: 0 8px; font: inherit; }
 .review-decision { min-width: 110px; height: 36px; }
@@ -25,7 +36,8 @@ small { font-weight: 400; color: #73818b; }
 button, .button-link { height: 40px; border: 1px solid #9aabb5; background: white; padding: 0 15px; font: inherit; cursor: pointer; border-radius: 4px; color: #17212b; text-decoration: none; display: inline-flex; align-items: center; justify-content: center; }
 button:hover, .button-link:hover { background: #edf3f6; }
 button.primary { background: #c44b37; border-color: #c44b37; color: white; font-weight: 700; }
-.safety-strip { margin-top: 18px; border-top: 1px solid #e4e9ec; padding-top: 14px; display: flex; flex-wrap: wrap; gap: 8px 18px; font-size: 12px; color: #4f606b; }
+.control-band button.primary { min-width: 108px; align-self: end; }
+.safety-strip { margin-top: 18px; border-top: 1px solid #e4e9ec; padding-top: 14px; display: flex; flex-wrap: wrap; gap: 7px 18px; font-size: 12px; color: #4f606b; }
 .safety-strip strong { color: #9b3d2e; }
 .section-heading { display: flex; justify-content: space-between; gap: 16px; align-items: center; margin-bottom: 16px; }
 .history-panel { padding: 0; }
@@ -91,4 +103,9 @@ th { color: #52626d; background: #f5f7f8; }
 .evidence-note { margin: 16px 0 8px; }
 .evidence-body { margin: 0; max-height: 430px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; border: 1px solid #dfe5e9; background: #f8fafb; padding: 14px; font: 13px/1.75 "Microsoft YaHei", "Segoe UI", sans-serif; }
 .evidence-mark { border: 2px solid #c9362b; background: #fff0ef; color: #8b241d; padding: 1px 2px; }
-@media (max-width: 850px) { .control-band form, .scan-settings, .finding-content, .finding-controls { grid-template-columns: 1fr; } .metrics { grid-template-columns: 1fr 1fr; } .topbar { align-items: flex-start; gap: 16px; } .job-operations { justify-items: start; } .operation-hint { text-align: left; } .actions { justify-content: flex-start; } .finding-card-header { flex-direction: column; } .finding-actions { justify-content: flex-start; } .review-toolbar, .review-pagination { align-items: flex-start; flex-direction: column; } }
+@media (max-width: 1050px) {
+  .scan-source-field { padding-left: 0; }
+  .scan-source-field legend { position: static; margin-bottom: 7px; }
+  .control-band button.primary { grid-column: 2; justify-self: start; }
+}
+@media (max-width: 850px) { .control-band form, .scan-settings, .scan-settings.with-baseline, .finding-content, .finding-controls { grid-template-columns: 1fr; } .scan-source-field { display: block; padding: 0 0 16px; border: 0; border-bottom: 1px solid #e0e7eb; } .scan-source-field legend { margin-bottom: 7px; } .source-option.is-selected:not(.source-option--merged) { min-width: 0; } .source-option--merged.is-selected { grid-template-columns: auto auto auto; min-width: 0; } .source-option--merged.is-selected em { grid-column: 2 / -1; } .source-option--merged.is-selected .source-coverage { grid-column: 2 / -1; } .control-band button.primary { grid-column: auto; justify-self: stretch; } .metrics { grid-template-columns: 1fr 1fr; } .topbar { align-items: flex-start; gap: 16px; } .job-operations { justify-items: start; } .operation-hint { text-align: left; } .actions { justify-content: flex-start; } .finding-card-header { flex-direction: column; } .finding-actions { justify-content: flex-start; } .review-toolbar, .review-pagination { align-items: flex-start; flex-direction: column; } }

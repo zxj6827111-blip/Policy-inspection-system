@@ -111,3 +111,60 @@ def test_scan_exceptions_api_only_returns_retest_failures(tmp_path, monkeypatch)
     assert payload["counts"] == {"pending": 0, "resolved": 1, "review_required": 1}
     assert len(payload["items"]) == 1
     assert payload["items"][0]["title"] == "待复测政策"
+
+
+def test_baseline_and_item_stats_apis_expose_completed_full_runs_only(tmp_path, monkeypatch):
+    db = Database(tmp_path / "baseline-api.db")
+    monkeypatch.setattr(main_module, "db", db)
+    monkeypatch.setattr(main_module, "manager", JobManager(db))
+    with TestClient(main_module.app) as client:
+        full_job = db.create_job(["市级平台·普陀区"], "full", {}, 0)
+        db.update_job(full_job, status="completed", coverage_status="complete", estimated_total=2, examined_count=2)
+        partial_job = db.create_job(["市级平台·普陀区"], "full", {}, 0)
+        db.update_job(partial_job, status="completed", coverage_status="partial")
+        repository = Repository(db)
+        first = PolicyListItem(
+            "普陀区", 1, 0, "完整文件", "https://example.test/complete", source_key="municipal_putuo",
+            source_site="市级平台·普陀区",
+        )
+        second = PolicyListItem(
+            "普陀区", 1, 1, "无表头文件", "https://example.test/no-header", source_key="municipal_putuo",
+            source_site="市级平台·普陀区",
+        )
+        repository.record_scan_item(full_job, first, detail_status="checked_complete", header_detected=True)
+        repository.record_scan_item(full_job, second, detail_status="no_header_pass", header_detected=False)
+
+        baselines = client.get("/api/baselines")
+        stats = client.get(f"/api/jobs/{full_job}/item-stats")
+        missing_baseline = client.post(
+            "/api/jobs", json={"targets": ["municipal_putuo"], "mode": "incremental", "max_documents": 0}
+        )
+
+    assert baselines.status_code == 200
+    assert [job["id"] for job in baselines.json()] == [full_job]
+    assert stats.status_code == 200
+    assert stats.json()["complete_header"] == 1
+    assert stats.json()["no_header_pass"] == 1
+    assert missing_baseline.status_code == 400
+    assert "必须选择" in missing_baseline.json()["detail"]
+
+
+def test_index_groups_five_putuo_sources_into_one_visible_selection(tmp_path, monkeypatch):
+    monkeypatch.setattr(main_module, "db", Database(tmp_path / "index.db"))
+    monkeypatch.setattr(main_module, "manager", JobManager(main_module.db))
+    with TestClient(main_module.app) as client:
+        response = client.get("/")
+
+    assert response.status_code == 200
+    html = response.text
+    assert 'id="putuo-merged-target"' in html
+    assert "政策文件（合并扫描）" in html
+    assert html.count("data-putuo-member-target") == 5
+    for target_key in (
+        "putuo_government",
+        "putuo_bureaus",
+        "putuo_towns",
+        "putuo_normative",
+        "putuo_party_government",
+    ):
+        assert f'value="{target_key}"' in html
