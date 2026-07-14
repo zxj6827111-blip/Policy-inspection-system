@@ -74,6 +74,12 @@ class JobManager:
         signature = sorted(districts)
         return [job for job in self.db.list_jobs(1000) if self._job_sources(job) == signature]
 
+    def _active_job_for(self, districts: list[str]) -> dict | None:
+        return next((
+            job for job in self._matching_jobs(districts)
+            if job["status"] in {JobStatus.PENDING, JobStatus.RUNNING, JobStatus.COOLING}
+        ), None)
+
     def eligible_baseline_for(self, districts: list[str]) -> dict | None:
         for job in self.db.eligible_baselines():
             if self._job_sources(job) != sorted(districts):
@@ -132,6 +138,29 @@ class JobManager:
             job_id = self.db.create_job(districts, mode, asdict(safety), max_documents, baseline_job_id)
             self._tasks[job_id] = asyncio.create_task(self._run(job_id))
             return {"job_id": job_id, "action": f"created_{mode}", "mode": mode}
+
+    async def start_full_rebuilds(self, source_groups: list[list[str]]) -> list[dict]:
+        """为选定站点创建新的完整全量任务，不复用或恢复历史任务。"""
+        async with self._guard:
+            for districts in source_groups:
+                active = self._active_job_for(districts)
+                if active:
+                    raise ValueError(
+                        f"{'、'.join(districts)}已有活动任务 #{active['id']}，"
+                        "请先停止该任务，再重新全量扫描"
+                    )
+
+            safety = SafetyConfig()
+            results = []
+            for districts in source_groups:
+                job_id = self.db.create_job(districts, "full", asdict(safety), 0, None)
+                self._tasks[job_id] = asyncio.create_task(self._run(job_id))
+                results.append({
+                    "job_id": job_id,
+                    "action": "created_full_rebuild",
+                    "mode": "full",
+                })
+            return results
 
     def _validate_incremental_baseline(self, districts: list[str], baseline_job_id: int | None) -> None:
         if baseline_job_id is None:
@@ -198,6 +227,9 @@ class JobManager:
             job = self.db.get_job(job_id)
             if not job or job["status"] not in {JobStatus.PAUSED, JobStatus.PARTIAL, JobStatus.COOLING, JobStatus.FAILED}:
                 raise ValueError("该任务当前不能恢复")
+            active = self._active_job_for(self._job_sources(job))
+            if active and int(active["id"]) != job_id:
+                raise ValueError(f"同站点已有活动任务 #{active['id']}，不能同时恢复旧任务")
             self._resume_locked(job, automatic=automatic)
 
     def _resume_locked(self, job: dict, *, automatic: bool) -> None:

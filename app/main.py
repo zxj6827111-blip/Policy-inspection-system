@@ -45,6 +45,10 @@ class StartSiteJobsRequest(BaseModel):
     max_documents: int = Field(default=0, ge=0, le=100000)
 
 
+class RebuildSiteJobsRequest(BaseModel):
+    site_keys: list[str] = Field(default_factory=list)
+
+
 class ReviewRequest(BaseModel):
     decision: str
     note: str = Field(default="", max_length=500)
@@ -124,6 +128,32 @@ async def start_site_jobs(payload: StartSiteJobsRequest):
             raise HTTPException(409, f"{site.label}：{exc}") from exc
         results.append({"site_key": site.key, "site_label": site.label, **result})
     return {"jobs": results}
+
+
+@app.post("/api/site-jobs/full-rebuild")
+async def rebuild_site_jobs(payload: RebuildSiteJobsRequest):
+    site_keys = list(dict.fromkeys(payload.site_keys))
+    if not site_keys:
+        raise HTTPException(400, "请至少选择一个扫描站点")
+    if len(site_keys) != len(payload.site_keys):
+        raise HTTPException(400, "同一扫描站点只能选择一次")
+    if len(site_keys) > len(SCAN_SITES):
+        raise HTTPException(400, "扫描站点数量超出范围")
+    try:
+        selected_sites = [(resolve_site(site_key), targets_for_site(site_key)) for site_key in site_keys]
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    source_groups = [[target.label for target in targets] for _, targets in selected_sites]
+    try:
+        created = await manager.start_full_rebuilds(source_groups)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {
+        "jobs": [
+            {"site_key": site.key, "site_label": site.label, **result}
+            for (site, _), result in zip(selected_sites, created, strict=True)
+        ]
+    }
 
 
 @app.get("/api/jobs/{job_id}")

@@ -35,8 +35,10 @@ select, input[type=number] { height: 40px; border: 1px solid #b9c5cc; padding: 0
 small { font-weight: 400; color: #73818b; }
 button, .button-link { height: 40px; border: 1px solid #9aabb5; background: white; padding: 0 15px; font: inherit; cursor: pointer; border-radius: 4px; color: #17212b; text-decoration: none; display: inline-flex; align-items: center; justify-content: center; }
 button:hover, .button-link:hover { background: #edf3f6; }
+button:disabled { cursor: not-allowed; opacity: .55; }
 button.primary { background: #c44b37; border-color: #c44b37; color: white; font-weight: 700; }
-.control-band button.primary { min-width: 108px; align-self: end; }
+.scan-actions { display: flex; flex-wrap: wrap; gap: 8px; align-self: end; justify-content: flex-end; }
+.scan-actions button { min-width: 132px; white-space: nowrap; }
 .safety-strip { margin-top: 18px; border-top: 1px solid #e4e9ec; padding-top: 14px; display: flex; flex-wrap: wrap; gap: 7px 18px; font-size: 12px; color: #4f606b; }
 .safety-strip strong { color: #9b3d2e; }
 .section-heading { display: flex; justify-content: space-between; gap: 16px; align-items: center; margin-bottom: 16px; }
@@ -128,7 +130,7 @@ th { color: #52626d; background: #f5f7f8; }
   .scan-source-field { padding-left: 0; }
   .scan-source-field legend { position: static; margin-bottom: 7px; }
   .scan-sites { grid-template-columns: 1fr 1fr; }
-  .control-band button.primary { grid-column: 2; justify-self: start; }
+  .scan-actions { grid-column: 2; justify-self: start; }
 }
 @media (max-width: 850px) {
   .control-band form, .scan-settings, .finding-content, .finding-controls { grid-template-columns: 1fr; }
@@ -136,7 +138,7 @@ th { color: #52626d; background: #f5f7f8; }
   .scan-source-field legend { margin-bottom: 7px; }
   .scan-sites { grid-template-columns: 1fr; }
   .site-option { min-height: 0; }
-  .control-band button.primary { grid-column: auto; justify-self: stretch; }
+  .scan-actions { grid-column: auto; justify-self: stretch; display: grid; grid-template-columns: 1fr 1fr; }
   .metrics { grid-template-columns: 1fr 1fr; }
   .topbar { align-items: flex-start; gap: 16px; }
   .job-operations { justify-items: start; }
@@ -152,4 +154,7 @@ th { color: #52626d; background: #f5f7f8; }
   .history-table td { display: grid; gap: 5px; border: 0; padding: 0; }
   .history-table td::before { content: attr(data-label); color: #657480; font-size: 11px; }
   .history-table .history-source, .history-table .history-progress-cell { grid-column: 1 / -1; }
+}
+@media (max-width: 480px) {
+  .scan-actions { grid-template-columns: 1fr; }
 }

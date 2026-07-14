@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>上海区级政策文件安全巡检系统</title>
-  <link rel="stylesheet" href="/static/app.css?v=20260714-site-jobs-2">
+  <link rel="stylesheet" href="/static/app.css?v=20260714-full-rebuild-1">
 </head>
 <body>
   <header class="topbar">
@@ -48,7 +48,10 @@
             <small>同一域名的任务自动排队，分别保留进度和结果。</small>
           </div>
         </div>
-        <button type="submit" class="primary">启动所选站点</button>
+        <div class="scan-actions">
+          <button type="submit" class="primary" id="auto-start-btn" disabled>启动所选站点</button>
+          <button type="button" id="full-rebuild-btn" disabled>重新全量扫描</button>
+        </div>
       </form>
       <div class="safety-strip">
         <strong>固定安全节奏</strong>
@@ -145,6 +148,6 @@
     <pre id="evidence-body" class="evidence-body"></pre>
   </dialog>
   <div id="toast" role="status"></div>
-  <script src="/static/app.js?v=20260714-site-jobs-2"></script>
+  <script src="/static/app.js?v=20260714-full-rebuild-1"></script>
 </body>
 </html>

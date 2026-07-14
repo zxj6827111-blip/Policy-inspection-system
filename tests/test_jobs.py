@@ -484,6 +484,21 @@ def test_process_restart_preserves_cursor_limit_and_marks_partial(tmp_path):
     assert (job["current_district_index"], job["current_page"], job["current_item_index"]) == (1, 3, 7)
 
 
+@pytest.mark.asyncio
+async def test_resume_rejects_old_job_when_same_site_has_active_rebuild(tmp_path):
+    db = Database(tmp_path / "resume-active-rebuild.db")
+    db.initialize()
+    old_job = db.create_job(["市级平台·普陀区"], "incremental", {}, 3)
+    db.update_job(old_job, status="partial", coverage_status="partial", completion_kind="limit")
+    active_rebuild = db.create_job(["市级平台·普陀区"], "full", {}, 0)
+
+    with pytest.raises(ValueError, match=rf"活动任务 #{active_rebuild}"):
+        await JobManager(db).resume(old_job)
+
+    assert db.get_job(old_job)["status"] == "partial"
+    assert db.get_job(active_rebuild)["status"] == "pending"
+
+
 def test_unfinished_link_checkpoint_forces_resume_and_link_results_are_idempotent(tmp_path):
     db = Database(tmp_path / "links-resume.db")
     db.initialize()

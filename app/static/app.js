@@ -2,6 +2,7 @@ const $ = (selector) => document.querySelector(selector);
 let currentJobId = null;
 let reviewFilter = 'pending';
 let reviewPage = 1;
+let scanActionsBusy = false;
 
 function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>'"]/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[char]));
@@ -207,11 +208,28 @@ function scanSiteInputs() {
   return [...document.querySelectorAll('input[name=site_key]')];
 }
 
+function selectedSiteKeys() {
+  return scanSiteInputs().filter(input => input.checked).map(input => input.value);
+}
+
+function setScanActionsBusy(busy) {
+  scanActionsBusy = busy;
+  const hasSelection = selectedSiteKeys().length > 0;
+  $('#auto-start-btn').disabled = busy || !hasSelection;
+  $('#full-rebuild-btn').disabled = busy || !hasSelection;
+}
+
+function clearSiteSelection() {
+  scanSiteInputs().forEach(input => { input.checked = false; });
+  syncSiteOptionStates();
+}
+
 function syncSiteOptionStates() {
   document.querySelectorAll('.site-option').forEach(option => {
     const input = option.querySelector('input[type=checkbox]');
     option.classList.toggle('is-selected', Boolean(input?.checked));
   });
+  setScanActionsBusy(scanActionsBusy);
 }
 
 function renderSiteStatuses(sites) {
@@ -240,18 +258,41 @@ function renderSiteStatuses(sites) {
 
 $('#scan-form').addEventListener('submit', async (event) => {
   event.preventDefault();
-  const siteKeys = scanSiteInputs().filter(input => input.checked).map(input => input.value);
+  const siteKeys = selectedSiteKeys();
   if (!siteKeys.length) return toast('请至少选择一个扫描站点');
   const form = new FormData(event.target);
+  setScanActionsBusy(true);
   try {
     const result = await api('/api/site-jobs', {method:'POST', body:JSON.stringify({site_keys:siteKeys, max_documents:Number(form.get('max_documents') || 0)})});
     currentJobId = result.jobs[0]?.job_id || null;
-    scanSiteInputs().forEach(input => { input.checked = false; });
-    syncSiteOptionStates();
+    clearSiteSelection();
     await refreshJobs();
     const jobNames = result.jobs.map(job => `${job.site_label} #${job.job_id}`).join('、');
     toast(`已启动：${jobNames}`);
   } catch (error) { toast(error.message); }
+  finally { setScanActionsBusy(false); }
+});
+
+$('#full-rebuild-btn').addEventListener('click', async () => {
+  const siteKeys = selectedSiteKeys();
+  if (!siteKeys.length) return toast('请至少选择一个扫描站点');
+  const confirmed = window.confirm(
+    `将为所选 ${siteKeys.length} 个站点创建新的全量任务，从第一条开始重新检查全部页面、政策解读、阅办联动和附件。\n\n` +
+    '本次不受“最多文件数”限制；旧基线和历史结果会保留。是否继续？'
+  );
+  if (!confirmed) return;
+  setScanActionsBusy(true);
+  try {
+    const result = await api('/api/site-jobs/full-rebuild', {
+      method:'POST', body:JSON.stringify({site_keys:siteKeys}),
+    });
+    currentJobId = result.jobs[0]?.job_id || null;
+    clearSiteSelection();
+    await refreshJobs();
+    const jobNames = result.jobs.map(job => `${job.site_label} #${job.job_id}`).join('、');
+    toast(`已创建全量重扫：${jobNames}`);
+  } catch (error) { toast(error.message); }
+  finally { setScanActionsBusy(false); }
 });
 
 async function command(action) { if (!currentJobId) return; try { await api(`/api/jobs/${currentJobId}/${action}`, {method:'POST'}); await refreshJobs(); } catch (error) { toast(error.message); } }
@@ -272,6 +313,7 @@ $('#review-next').addEventListener('click', () => {
   if (currentJobId) { reviewPage += 1; renderFindings(currentJobId).catch(error => toast(error.message)); }
 });
 scanSiteInputs().forEach(input => input.addEventListener('change', syncSiteOptionStates));
+syncSiteOptionStates();
 $('#history-details').addEventListener('toggle', (event) => {
   const hint = event.currentTarget.querySelector('.collapse-hint');
   hint.textContent = event.currentTarget.open ? hint.dataset.expanded : hint.dataset.collapsed;
