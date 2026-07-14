@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from contextlib import suppress
+from contextlib import AsyncExitStack, suppress
 from dataclasses import asdict
 from datetime import date, datetime, timedelta, timezone
 
@@ -34,12 +34,18 @@ class JobManager:
         self.repo = Repository(db)
         self._tasks: dict[int, asyncio.Task] = {}
         self._guard = asyncio.Lock()
+        self._host_locks: dict[str, asyncio.Lock] = {}
+        self._run_slots = asyncio.Semaphore(2)
 
     async def create_and_start(
         self, districts: list[str], mode: str, max_documents: int = 0, baseline_job_id: int | None = None,
     ) -> int:
         async with self._guard:
-            active = self.db.active_job()
+            active = next((
+                job for job in self.db.list_jobs(1000)
+                if job["status"] in {JobStatus.PENDING, JobStatus.RUNNING, JobStatus.COOLING}
+                and self._job_sources(job) == sorted(districts)
+            ), None)
             if active:
                 return int(active["id"])
             if mode == "incremental":
@@ -50,6 +56,82 @@ class JobManager:
             job_id = self.db.create_job(districts, mode, asdict(safety), max_documents, baseline_job_id)
             self._tasks[job_id] = asyncio.create_task(self._run(job_id))
             return job_id
+
+    @staticmethod
+    def _job_sources(job: dict) -> list[str]:
+        try:
+            sources = json.loads(job.get("source_signature") or "[]")
+        except (TypeError, json.JSONDecodeError):
+            sources = []
+        if not sources:
+            try:
+                sources = json.loads(job["districts_json"])
+            except (KeyError, TypeError, json.JSONDecodeError):
+                sources = []
+        return sorted(str(source) for source in sources)
+
+    def _matching_jobs(self, districts: list[str]) -> list[dict]:
+        signature = sorted(districts)
+        return [job for job in self.db.list_jobs(1000) if self._job_sources(job) == signature]
+
+    def eligible_baseline_for(self, districts: list[str]) -> dict | None:
+        for job in self.db.eligible_baselines():
+            if self._job_sources(job) != sorted(districts):
+                continue
+            try:
+                self._validate_incremental_baseline(districts, int(job["id"]))
+            except ValueError:
+                continue
+            return job
+        return None
+
+    def automatic_plan(self, districts: list[str]) -> dict:
+        baseline = self.eligible_baseline_for(districts)
+        matching = self._matching_jobs(districts)
+        latest = matching[0] if matching else None
+        resumable = {
+            JobStatus.PENDING, JobStatus.RUNNING, JobStatus.COOLING,
+            JobStatus.PAUSED, JobStatus.PARTIAL, JobStatus.FAILED,
+        }
+        if (
+            latest
+            and latest["status"] in resumable
+            and (not baseline or int(latest["id"]) > int(baseline["id"]))
+        ):
+            action = "existing" if latest["status"] in {
+                JobStatus.PENDING, JobStatus.RUNNING, JobStatus.COOLING,
+            } else "resume"
+            return {
+                "action": action,
+                "mode": latest["mode"],
+                "baseline_job_id": latest["baseline_job_id"],
+                "job": latest,
+                "baseline": baseline,
+            }
+        return {
+            "action": "create",
+            "mode": "incremental" if baseline else "full",
+            "baseline_job_id": int(baseline["id"]) if baseline else None,
+            "job": latest,
+            "baseline": baseline,
+        }
+
+    async def start_automatic(self, districts: list[str], max_documents: int = 0) -> dict:
+        async with self._guard:
+            plan = self.automatic_plan(districts)
+            if plan["action"] == "existing":
+                return {"job_id": int(plan["job"]["id"]), "action": "existing", "mode": plan["mode"]}
+            if plan["action"] == "resume":
+                self._resume_locked(plan["job"], automatic=False)
+                return {"job_id": int(plan["job"]["id"]), "action": "resumed", "mode": plan["mode"]}
+            mode = plan["mode"]
+            baseline_job_id = plan["baseline_job_id"]
+            if mode == "incremental":
+                self._validate_incremental_baseline(districts, baseline_job_id)
+            safety = SafetyConfig()
+            job_id = self.db.create_job(districts, mode, asdict(safety), max_documents, baseline_job_id)
+            self._tasks[job_id] = asyncio.create_task(self._run(job_id))
+            return {"job_id": job_id, "action": f"created_{mode}", "mode": mode}
 
     def _validate_incremental_baseline(self, districts: list[str], baseline_job_id: int | None) -> None:
         if baseline_job_id is None:
@@ -113,24 +195,25 @@ class JobManager:
 
     async def resume(self, job_id: int, *, automatic: bool = False) -> None:
         async with self._guard:
-            active = self.db.active_job()
-            if active and int(active["id"]) != job_id:
-                raise ValueError("已有扫描任务正在运行")
             job = self.db.get_job(job_id)
             if not job or job["status"] not in {JobStatus.PAUSED, JobStatus.PARTIAL, JobStatus.COOLING, JobStatus.FAILED}:
                 raise ValueError("该任务当前不能恢复")
-            if job["cooldown_until"] and not automatic:
-                cooldown_until = datetime.fromisoformat(job["cooldown_until"])
-                manual_allowed = job["status"] == JobStatus.PAUSED and not self._is_cooldown_reason(job["pause_reason"])
-                if datetime.now(timezone.utc) < cooldown_until and not manual_allowed:
-                    raise ValueError(f"安全冷却尚未结束，请在 {cooldown_until.astimezone().isoformat()} 后恢复")
-            self.db.update_job(
-                job_id, status=JobStatus.PENDING, pause_reason="", last_error="", cooldown_until=None,
-                finished_at=None, batch_examined_count=0, completion_kind="",
-                resumed_count=int(job["resumed_count"]) + 1,
-            )
-            self.db.add_job_event(job_id, "resumed", "冷却结束自动恢复" if automatic else "用户手动恢复")
-            self._tasks[job_id] = asyncio.create_task(self._run(job_id))
+            self._resume_locked(job, automatic=automatic)
+
+    def _resume_locked(self, job: dict, *, automatic: bool) -> None:
+        job_id = int(job["id"])
+        if job["cooldown_until"] and not automatic:
+            cooldown_until = datetime.fromisoformat(job["cooldown_until"])
+            manual_allowed = job["status"] == JobStatus.PAUSED and not self._is_cooldown_reason(job["pause_reason"])
+            if datetime.now(timezone.utc) < cooldown_until and not manual_allowed:
+                raise ValueError(f"安全冷却尚未结束，请在 {cooldown_until.astimezone().isoformat()} 后恢复")
+        self.db.update_job(
+            job_id, status=JobStatus.PENDING, pause_reason="", last_error="", cooldown_until=None,
+            finished_at=None, batch_examined_count=0, completion_kind="",
+            resumed_count=int(job["resumed_count"]) + 1,
+        )
+        self.db.add_job_event(job_id, "resumed", "冷却结束自动恢复" if automatic else "用户手动恢复")
+        self._tasks[job_id] = asyncio.create_task(self._run(job_id))
 
     def recover_interrupted(self) -> None:
         with self.db.connect() as conn:
@@ -236,6 +319,33 @@ class JobManager:
             )
 
     async def _run(self, job_id: int) -> None:
+        try:
+            job = self.db.get_job(job_id)
+            if not job:
+                return
+            targets = [resolve_target(value) for value in json.loads(job["districts_json"])]
+            hosts = sorted({
+                "www.shpt.gov.cn" if target.collector_type == "putuo" else "www.shanghai.gov.cn"
+                for target in targets
+            })
+            waiting_hosts = [host for host in hosts if self._host_locks.setdefault(host, asyncio.Lock()).locked()]
+            if waiting_hosts:
+                self.db.update_job(job_id, pause_reason=f"等待同域任务释放：{'、'.join(waiting_hosts)}")
+                self.db.add_job_event(job_id, "queued", f"等待同域任务：{'、'.join(waiting_hosts)}")
+            async with AsyncExitStack() as stack:
+                for host in hosts:
+                    await stack.enter_async_context(self._host_locks.setdefault(host, asyncio.Lock()))
+                async with self._run_slots:
+                    latest = self.db.get_job(job_id)
+                    if not latest or latest["status"] != JobStatus.PENDING:
+                        return
+                    self.db.update_job(job_id, pause_reason="")
+                    await self._run_acquired(job_id)
+        finally:
+            if self._tasks.get(job_id) is asyncio.current_task():
+                self._tasks.pop(job_id, None)
+
+    async def _run_acquired(self, job_id: int) -> None:
         job = self.db.get_job(job_id)
         if not job:
             return
@@ -326,9 +436,6 @@ class JobManager:
                 finished_at=utc_now(), coverage_status="partial", completion_kind="failed",
             )
             self.db.add_job_event(job_id, "failed", f"{type(exc).__name__}: {exc}")
-        finally:
-            if self._tasks.get(job_id) is asyncio.current_task():
-                self._tasks.pop(job_id, None)
 
     @staticmethod
     def _is_cooldown_reason(reason: str) -> bool:

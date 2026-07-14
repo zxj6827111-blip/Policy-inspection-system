@@ -415,7 +415,12 @@ class Database:
 
     def list_jobs(self, limit: int = 30) -> list[dict[str, Any]]:
         with self.connect() as conn:
-            rows = conn.execute("SELECT * FROM scan_jobs ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+            rows = conn.execute(
+                """SELECT j.*,
+                (SELECT COUNT(*) FROM scan_item_results s WHERE s.job_id=j.id) AS scan_item_count
+                FROM scan_jobs j ORDER BY j.id DESC LIMIT ?""",
+                (limit,),
+            ).fetchall()
             return [dict(row) for row in rows]
 
     def active_job(self) -> dict[str, Any] | None:

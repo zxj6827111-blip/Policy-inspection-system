@@ -9,7 +9,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
-from app.config import BASE_DIR, SCAN_TARGETS, SafetyConfig, resolve_target
+from app.config import BASE_DIR, SCAN_SITES, SafetyConfig, resolve_site, resolve_target, targets_for_site
 from app.db import Database, utc_now
 from app.exporter import export_job
 from app.jobs import JobManager
@@ -40,6 +40,11 @@ class CreateJobRequest(BaseModel):
     baseline_job_id: int | None = Field(default=None, ge=1)
 
 
+class StartSiteJobsRequest(BaseModel):
+    site_keys: list[str] = Field(default_factory=list)
+    max_documents: int = Field(default=0, ge=0, le=100000)
+
+
 class ReviewRequest(BaseModel):
     decision: str
     note: str = Field(default="", max_length=500)
@@ -50,7 +55,7 @@ async def index(request: Request):
     return templates.TemplateResponse(
         request=request,
         name="index.html",
-        context={"targets": list(SCAN_TARGETS.values()), "safety": SafetyConfig()},
+        context={"sites": list(SCAN_SITES.values()), "safety": SafetyConfig()},
     )
 
 
@@ -68,6 +73,57 @@ async def list_jobs():
 async def list_baselines():
     """仅返回可作为增量依据的完整全量扫描任务。"""
     return db.eligible_baselines()
+
+
+def _site_status(site_key: str) -> dict:
+    site = resolve_site(site_key)
+    labels = [target.label for target in targets_for_site(site_key)]
+    plan = manager.automatic_plan(labels)
+    latest = plan["job"]
+    baseline = plan["baseline"]
+    return {
+        "key": site.key,
+        "label": site.label,
+        "district": site.district,
+        "source_level": site.source_level,
+        "source_name": site.source_name,
+        "host": site.host,
+        "target_count": len(site.target_keys),
+        "target_labels": labels,
+        "next_action": plan["action"],
+        "next_mode": plan["mode"],
+        "baseline_job_id": int(baseline["id"]) if baseline else None,
+        "latest_job": latest,
+    }
+
+
+@app.get("/api/scan-sites")
+async def list_scan_sites():
+    return [_site_status(site_key) for site_key in SCAN_SITES]
+
+
+@app.post("/api/site-jobs")
+async def start_site_jobs(payload: StartSiteJobsRequest):
+    site_keys = list(dict.fromkeys(payload.site_keys))
+    if not site_keys:
+        raise HTTPException(400, "请至少选择一个扫描站点")
+    if len(site_keys) != len(payload.site_keys):
+        raise HTTPException(400, "同一扫描站点只能选择一次")
+    if len(site_keys) > len(SCAN_SITES):
+        raise HTTPException(400, "扫描站点数量超出范围")
+    try:
+        selected_sites = [(resolve_site(site_key), targets_for_site(site_key)) for site_key in site_keys]
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    results = []
+    for site, targets in selected_sites:
+        try:
+            labels = [target.label for target in targets]
+            result = await manager.start_automatic(labels, payload.max_documents)
+        except ValueError as exc:
+            raise HTTPException(409, f"{site.label}：{exc}") from exc
+        results.append({"site_key": site.key, "site_label": site.label, **result})
+    return {"jobs": results}
 
 
 @app.get("/api/jobs/{job_id}")

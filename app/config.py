@@ -23,6 +23,17 @@ class ScanTarget:
     list_url: str = ""
 
 
+@dataclass(frozen=True)
+class ScanSite:
+    key: str
+    label: str
+    district: str
+    source_level: str
+    source_name: str
+    target_keys: tuple[str, ...]
+    host: str
+
+
 SCAN_TARGETS = {
     "municipal_putuo": ScanTarget("municipal_putuo", "市级平台·普陀区", "普陀区", "市级", "上海市政策文件库"),
     "municipal_chongming": ScanTarget("municipal_chongming", "市级平台·崇明区", "崇明区", "市级", "上海市政策文件库"),
@@ -45,6 +56,29 @@ SCAN_TARGETS = {
     "putuo_party_government": ScanTarget(
         "putuo_party_government", "区级网站·普陀区·党政混合信息", "普陀区", "区级", "党政混合信息",
         "putuo", "1621", "https://www.shpt.gov.cn/zhengwu/dzhhxx-zfwj/index.html",
+    ),
+}
+
+
+SCAN_SITES = {
+    "putuo_district": ScanSite(
+        "putuo_district", "区级网站·普陀区", "普陀区", "区级", "政策文件（五类栏目）",
+        (
+            "putuo_government",
+            "putuo_bureaus",
+            "putuo_towns",
+            "putuo_normative",
+            "putuo_party_government",
+        ),
+        "www.shpt.gov.cn",
+    ),
+    "municipal_putuo": ScanSite(
+        "municipal_putuo", "市级平台·普陀区", "普陀区", "市级", "上海市政策文件库",
+        ("municipal_putuo",), "www.shanghai.gov.cn",
+    ),
+    "municipal_chongming": ScanSite(
+        "municipal_chongming", "市级平台·崇明区", "崇明区", "市级", "上海市政策文件库",
+        ("municipal_chongming",), "www.shanghai.gov.cn",
     ),
 }
 
@@ -72,6 +106,18 @@ def resolve_target(value: str) -> ScanTarget:
     if value in legacy:
         return SCAN_TARGETS[legacy[value]]
     raise ValueError(f"不支持的扫描目标：{value}")
+
+
+def resolve_site(value: str) -> ScanSite:
+    try:
+        return SCAN_SITES[value]
+    except KeyError as exc:
+        raise ValueError(f"不支持的扫描站点：{value}") from exc
+
+
+def targets_for_site(value: str) -> list[ScanTarget]:
+    site = resolve_site(value)
+    return [SCAN_TARGETS[key] for key in site.target_keys]
 
 
 @dataclass(frozen=True)

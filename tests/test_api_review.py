@@ -1,3 +1,5 @@
+import json
+
 from fastapi.testclient import TestClient
 
 import app.main as main_module
@@ -149,7 +151,7 @@ def test_baseline_and_item_stats_apis_expose_completed_full_runs_only(tmp_path, 
     assert "必须选择" in missing_baseline.json()["detail"]
 
 
-def test_index_groups_five_putuo_sources_into_one_visible_selection(tmp_path, monkeypatch):
+def test_index_exposes_three_fixed_sites_without_manual_mode_or_baseline(tmp_path, monkeypatch):
     monkeypatch.setattr(main_module, "db", Database(tmp_path / "index.db"))
     monkeypatch.setattr(main_module, "manager", JobManager(main_module.db))
     with TestClient(main_module.app) as client:
@@ -157,14 +159,87 @@ def test_index_groups_five_putuo_sources_into_one_visible_selection(tmp_path, mo
 
     assert response.status_code == 200
     html = response.text
-    assert 'id="putuo-merged-target"' in html
-    assert "政策文件（合并扫描）" in html
-    assert html.count("data-putuo-member-target") == 5
-    for target_key in (
-        "putuo_government",
-        "putuo_bureaus",
-        "putuo_towns",
-        "putuo_normative",
-        "putuo_party_government",
-    ):
-        assert f'value="{target_key}"' in html
+    assert html.count('name="site_key"') == 3
+    assert 'value="putuo_district"' in html
+    assert 'value="municipal_putuo"' in html
+    assert 'value="municipal_chongming"' in html
+    assert "区政府、委办局、街道镇、规范性文件、党政混合信息" in html
+    assert 'name="mode"' not in html
+    assert 'name="baseline_job_id"' not in html
+
+
+def test_site_jobs_create_separate_fixed_jobs_and_choose_mode_automatically(tmp_path, monkeypatch):
+    db = Database(tmp_path / "site-jobs.db")
+    manager = JobManager(db)
+    monkeypatch.setattr(main_module, "db", db)
+    monkeypatch.setattr(main_module, "manager", manager)
+
+    async def no_run(_job_id):
+        return None
+
+    monkeypatch.setattr(manager, "_run", no_run)
+    with TestClient(main_module.app) as client:
+        baseline = db.create_job(["市级平台·普陀区"], "full", {}, 0)
+        db.update_job(baseline, status="completed", coverage_status="complete", estimated_total=1, examined_count=1)
+        Repository(db).record_scan_item(
+            baseline,
+            PolicyListItem(
+                "普陀区", 1, 0, "基线文件", "https://example.test/baseline",
+                source_key="municipal_putuo", source_site="市级平台·普陀区",
+            ),
+            detail_status="checked_complete",
+        )
+
+        response = client.post(
+            "/api/site-jobs",
+            json={"site_keys": ["municipal_putuo", "putuo_district"], "max_documents": 0},
+        )
+        history = client.get("/api/jobs")
+
+    assert response.status_code == 200
+    assert history.status_code == 200
+    assert next(job for job in history.json() if job["id"] == baseline)["scan_item_count"] == 1
+    results = response.json()["jobs"]
+    assert [result["site_key"] for result in results] == ["municipal_putuo", "putuo_district"]
+    assert [result["mode"] for result in results] == ["incremental", "full"]
+    municipal_job = db.get_job(results[0]["job_id"])
+    district_job = db.get_job(results[1]["job_id"])
+    assert municipal_job["baseline_job_id"] == baseline
+    assert json.loads(municipal_job["districts_json"]) == ["市级平台·普陀区"]
+    assert json.loads(district_job["districts_json"]) == [
+        "区级网站·普陀区·区政府文件",
+        "区级网站·普陀区·委办局",
+        "区级网站·普陀区·街道镇",
+        "区级网站·普陀区·规范性文件",
+        "区级网站·普陀区·党政混合信息",
+    ]
+
+
+def test_site_job_resumes_unfinished_initialization_instead_of_creating_duplicate(tmp_path, monkeypatch):
+    db = Database(tmp_path / "site-resume.db")
+    manager = JobManager(db)
+    monkeypatch.setattr(main_module, "db", db)
+    monkeypatch.setattr(main_module, "manager", manager)
+
+    async def no_run(_job_id):
+        return None
+
+    monkeypatch.setattr(manager, "_run", no_run)
+    with TestClient(main_module.app) as client:
+        original = db.create_job(["市级平台·崇明区"], "full", {}, 3)
+        db.update_job(original, status="partial", coverage_status="partial", examined_count=3, estimated_total=374)
+        response = client.post(
+            "/api/site-jobs", json={"site_keys": ["municipal_chongming"], "max_documents": 0}
+        )
+
+    assert response.status_code == 200
+    result = response.json()["jobs"][0]
+    assert result == {
+        "site_key": "municipal_chongming",
+        "site_label": "市级平台·崇明区",
+        "job_id": original,
+        "action": "resumed",
+        "mode": "full",
+    }
+    assert len(db.list_jobs()) == 1
+    assert db.get_job(original)["status"] == "pending"

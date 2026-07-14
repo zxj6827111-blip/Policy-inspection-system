@@ -2,7 +2,6 @@ const $ = (selector) => document.querySelector(selector);
 let currentJobId = null;
 let reviewFilter = 'pending';
 let reviewPage = 1;
-let availableBaselines = [];
 
 function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>'"]/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[char]));
@@ -60,7 +59,7 @@ const statusNames = {pending:'等待启动', running:'扫描中', paused:'等待
 
 function operationState(job) {
   if (job.status === 'running') return {hint: '正在扫描中。可暂停以保留当前位置，或停止本任务。', pause: true, resume: false, stop: true};
-  if (job.status === 'pending') return {hint: '任务正在准备启动。', pause: true, resume: false, stop: true};
+  if (job.status === 'pending') return {hint: job.pause_reason || '任务正在准备启动。', pause: true, resume: false, stop: true};
   if (job.status === 'cooling') return {hint: '访问风险冷却中，倒计时结束后将自动继续扫描。', pause: false, resume: false, stop: true};
   if (job.status === 'paused' && job.completion_kind === 'exception_queued') return {hint: '单条详情页异常已入队，剩余政策可继续扫描；全量结束后系统会统一复测。', pause: false, resume: true, stop: true};
   if (job.status === 'paused') return {hint: '扫描因数据校验或手动操作暂停；确认后可重新检查并恢复。', pause: false, resume: true, stop: true};
@@ -170,144 +169,88 @@ async function openEvidence(findingId) {
 }
 
 async function refreshJobs() {
-  const jobs = await api('/api/jobs');
+  const [jobs, sites] = await Promise.all([api('/api/jobs'), api('/api/scan-sites')]);
+  renderSiteStatuses(sites);
   const body = $('#jobs-body'); body.innerHTML = '';
   for (const job of jobs) {
     const tr = document.createElement('tr');
     const districts = JSON.parse(job.districts_json).join('、');
     const createdAt = new Date(job.created_at).toLocaleString('zh-CN', {hour12:false});
-    tr.innerHTML = `<td><button class="job-open" data-id="${job.id}">#${job.id}</button></td><td>${districts}</td><td>${job.mode === 'full' ? '全历史' : '增量'}</td><td><span class="status-pill status-${job.status}">${statusNames[job.status] || job.status}</span></td><td>${job.examined_count} / ${job.estimated_total || '?'}（复用/跳过 ${job.skipped_count}）</td><td>${job.finding_count}</td><td>${createdAt}</td><td><a href="/api/jobs/${job.id}/export">Excel</a></td>`;
+    const baselineText = job.mode === 'incremental'
+      ? (job.baseline_job_id ? `<small>基线 #${job.baseline_job_id}</small>` : '<small>旧记录无基线</small>')
+      : '<small>建立基线</small>';
+    tr.innerHTML = `<td data-label="任务"><button class="job-open" data-id="${job.id}">#${job.id}</button></td><td data-label="站点" class="history-source">${escapeHtml(districts)}</td><td data-label="模式" class="history-mode"><strong>${job.mode === 'full' ? '全量初始化' : '增量复查'}</strong>${baselineText}</td><td data-label="状态"><span class="status-pill status-${job.status}">${statusNames[job.status] || job.status}</span></td><td data-label="完整进度" class="history-progress-cell">${renderHistoryProgress(job)}</td><td data-label="问题">${job.finding_count}</td><td data-label="创建时间" class="history-time">${escapeHtml(createdAt)}</td><td data-label="结果"><a href="/api/jobs/${job.id}/export">Excel</a></td>`;
     body.appendChild(tr);
   }
   document.querySelectorAll('.job-open').forEach(button => button.addEventListener('click', async () => renderCurrent(await api(`/api/jobs/${button.dataset.id}`))));
   const active = jobs.find(job => ['pending','running','paused','partial','cooling','failed'].includes(job.status));
-  if (active && (!currentJobId || active.id === currentJobId)) renderCurrent(active);
+  const selected = jobs.find(job => job.id === currentJobId);
+  if (selected) renderCurrent(selected);
+  else if (active) renderCurrent(active);
 }
 
-function baselineSources(job) {
-  try {
-    const signature = JSON.parse(job.source_signature || '[]');
-    return signature.length ? signature : JSON.parse(job.districts_json || '[]');
-  } catch { return []; }
+function renderHistoryProgress(job) {
+  const examined = Number(job.examined_count || 0);
+  const total = Number(job.estimated_total || 0);
+  const processed = Number(job.processed_count || 0);
+  const skipped = Number(job.skipped_count || 0);
+  const recorded = Number(job.scan_item_count || 0);
+  const remaining = total ? Math.max(0, total - examined) : null;
+  const percent = total ? Math.min(100, examined / total * 100) : 0;
+  const percentText = total ? `${percent.toFixed(percent >= 10 ? 0 : 1)}%` : '待估算';
+  const incomplete = job.status === 'completed' && recorded !== examined;
+  const warning = incomplete ? '<em class="history-progress-warning">逐条记录不完整</em>' : '';
+  return `<div class="history-progress"><div class="history-progress-head"><strong>${examined} / ${total || '?'}</strong><span>${percentText}</span></div><div class="history-progress-track" aria-label="扫描进度 ${percentText}"><span style="width:${percent}%"></span></div><small>逐条记录 ${recorded} · 详情 ${processed} · 复用/跳过 ${skipped} · 剩余 ${remaining ?? '?'}</small>${warning}</div>`;
 }
 
-function sourceTargetInputs() {
-  return [...document.querySelectorAll('input[name=target]')];
+function scanSiteInputs() {
+  return [...document.querySelectorAll('input[name=site_key]')];
 }
 
-function syncSourceOptionStates() {
-  document.querySelectorAll('.source-option').forEach(option => {
+function syncSiteOptionStates() {
+  document.querySelectorAll('.site-option').forEach(option => {
     const input = option.querySelector('input[type=checkbox]');
     option.classList.toggle('is-selected', Boolean(input?.checked));
   });
 }
 
-function putuoMemberInputs() {
-  return sourceTargetInputs().filter(input => input.hasAttribute('data-putuo-member-target'));
-}
-
-function putuoSourceLabels() {
-  return new Set(putuoMemberInputs().map(input => input.dataset.sourceLabel));
-}
-
-function syncPutuoMergedTarget() {
-  const members = putuoMemberInputs();
-  $('#putuo-merged-target').checked = members.length > 0 && members.every(input => input.checked);
-  syncSourceOptionStates();
-}
-
-function setPutuoMergedTarget(checked) {
-  putuoMemberInputs().forEach(input => { input.checked = checked; });
-  $('#putuo-merged-target').checked = checked;
-  syncSourceOptionStates();
-}
-
-function baselineCanUseMergedControl(job) {
-  const sources = baselineSources(job);
-  const inputs = sourceTargetInputs();
-  const knownSources = new Set(inputs.map(input => input.dataset.sourceLabel));
-  const putuoSources = putuoSourceLabels();
-  const includedPutuoSources = sources.filter(source => putuoSources.has(source));
-  return sources.length > 0
-    && sources.every(source => knownSources.has(source))
-    && (includedPutuoSources.length === 0 || includedPutuoSources.length === putuoSources.size);
-}
-
-function selectableBaselines() {
-  return availableBaselines.filter(baselineCanUseMergedControl);
-}
-
-function renderBaselineOptions() {
-  const select = $('#baseline-select');
-  const previous = select.value;
-  const baselines = selectableBaselines();
-  select.textContent = '';
-  const placeholder = document.createElement('option');
-  placeholder.value = '';
-  placeholder.textContent = baselines.length ? '请选择一条完整全量扫描记录' : '当前没有可用的完整全量扫描记录';
-  select.appendChild(placeholder);
-  for (const job of baselines) {
-    const option = document.createElement('option');
-    option.value = String(job.id);
-    const createdAt = new Date(job.finished_at || job.created_at).toLocaleString('zh-CN', {hour12:false});
-    option.textContent = `#${job.id} · ${baselineSources(job).join('、')} · 已覆盖 ${job.examined_count}/${job.estimated_total} · 问题 ${job.finding_count} · ${createdAt}`;
-    select.appendChild(option);
+function renderSiteStatuses(sites) {
+  for (const site of sites) {
+    const runtime = $(`#site-runtime-${site.key}`);
+    if (!runtime) continue;
+    const job = site.latest_job;
+    if (site.next_action === 'existing' && job) {
+      runtime.textContent = `任务 #${job.id} · ${statusNames[job.status] || job.status} · ${job.examined_count}/${job.estimated_total || '?'}`;
+      runtime.className = `site-runtime site-runtime-${job.status}`;
+    } else if (site.next_action === 'resume' && job) {
+      runtime.textContent = `任务 #${job.id} · ${statusNames[job.status] || job.status} · 选择后继续原任务`;
+      runtime.className = `site-runtime site-runtime-${job.status}`;
+    } else if (site.next_mode === 'incremental') {
+      runtime.textContent = `基线 #${site.baseline_job_id} 已就绪 · 下次自动增量`;
+      runtime.className = 'site-runtime site-runtime-ready';
+    } else if (job && job.mode === 'full' && job.status === 'completed') {
+      runtime.textContent = `任务 #${job.id} 的逐条记录不完整 · 需重新全量`;
+      runtime.className = 'site-runtime site-runtime-invalid';
+    } else {
+      runtime.textContent = '尚未建立完整基线 · 首次自动全量';
+      runtime.className = 'site-runtime site-runtime-new';
+    }
   }
-  if (baselines.some(job => String(job.id) === previous)) select.value = previous;
-}
-
-function lockTargetsToBaseline() {
-  const selectedId = Number($('#baseline-select').value || 0);
-  const baseline = selectableBaselines().find(job => job.id === selectedId);
-  const inputs = sourceTargetInputs();
-  if (!baseline) {
-    inputs.forEach(input => { input.disabled = true; });
-    $('#putuo-merged-target').checked = false;
-    $('#putuo-merged-target').disabled = true;
-    $('#baseline-hint').textContent = '请选择完整的全量扫描记录，来源会自动锁定。';
-    return;
-  }
-  const sources = new Set(baselineSources(baseline));
-  inputs.forEach(input => {
-    input.checked = sources.has(input.dataset.sourceLabel);
-    input.disabled = true;
-  });
-  syncPutuoMergedTarget();
-  $('#putuo-merged-target').disabled = true;
-  $('#baseline-hint').textContent = `已锁定 ${sources.size} 个来源；增量结果将严格与任务 #${baseline.id} 比较。`;
-}
-
-function updateModeControls() {
-  const incremental = document.querySelector('[name=mode]').value === 'incremental';
-  $('#baseline-field').hidden = !incremental;
-  $('#baseline-select').disabled = !incremental;
-  document.querySelector('.scan-settings').classList.toggle('with-baseline', incremental);
-  if (incremental) lockTargetsToBaseline();
-  else {
-    sourceTargetInputs().forEach(input => { input.disabled = false; });
-    $('#putuo-merged-target').disabled = false;
-    syncPutuoMergedTarget();
-  }
-  syncSourceOptionStates();
-}
-
-async function loadBaselines() {
-  availableBaselines = await api('/api/baselines');
-  renderBaselineOptions();
-  updateModeControls();
 }
 
 $('#scan-form').addEventListener('submit', async (event) => {
   event.preventDefault();
-  const targets = [...document.querySelectorAll('input[name=target]:checked')].map(input => input.value);
-  if (!targets.length) return toast('请至少选择一个扫描来源');
+  const siteKeys = scanSiteInputs().filter(input => input.checked).map(input => input.value);
+  if (!siteKeys.length) return toast('请至少选择一个扫描站点');
   const form = new FormData(event.target);
-  const mode = form.get('mode');
-  const baselineJobId = Number(form.get('baseline_job_id') || 0);
-  if (mode === 'incremental' && !baselineJobId) return toast('请先选择一条完整全量扫描记录作为基准');
   try {
-    const result = await api('/api/jobs', {method:'POST', body:JSON.stringify({targets, mode, max_documents:Number(form.get('max_documents') || 0), baseline_job_id:baselineJobId || null})});
-    currentJobId = result.job_id; await refreshJobs(); toast(`任务 #${result.job_id} 已创建`);
+    const result = await api('/api/site-jobs', {method:'POST', body:JSON.stringify({site_keys:siteKeys, max_documents:Number(form.get('max_documents') || 0)})});
+    currentJobId = result.jobs[0]?.job_id || null;
+    scanSiteInputs().forEach(input => { input.checked = false; });
+    syncSiteOptionStates();
+    await refreshJobs();
+    const jobNames = result.jobs.map(job => `${job.site_label} #${job.job_id}`).join('、');
+    toast(`已启动：${jobNames}`);
   } catch (error) { toast(error.message); }
 });
 
@@ -328,12 +271,7 @@ $('#review-prev').addEventListener('click', () => {
 $('#review-next').addEventListener('click', () => {
   if (currentJobId) { reviewPage += 1; renderFindings(currentJobId).catch(error => toast(error.message)); }
 });
-document.querySelector('[name=mode]').addEventListener('change', updateModeControls);
-$('#baseline-select').addEventListener('change', lockTargetsToBaseline);
-$('#putuo-merged-target').addEventListener('change', event => {
-  setPutuoMergedTarget(event.target.checked);
-});
-sourceTargetInputs().forEach(input => input.addEventListener('change', syncSourceOptionStates));
+scanSiteInputs().forEach(input => input.addEventListener('change', syncSiteOptionStates));
 $('#history-details').addEventListener('toggle', (event) => {
   const hint = event.currentTarget.querySelector('.collapse-hint');
   hint.textContent = event.currentTarget.open ? hint.dataset.expanded : hint.dataset.collapsed;
@@ -341,9 +279,5 @@ $('#history-details').addEventListener('toggle', (event) => {
 });
 
 api('/health').then(() => { $('#health').textContent = '本地服务正常'; }).catch(() => { $('#health').textContent = '服务异常'; });
-loadBaselines().catch(error => {
-  $('#baseline-hint').textContent = `无法加载基准任务：${error.message}`;
-  updateModeControls();
-});
 refreshJobs().catch(error => toast(error.message));
 setInterval(() => refreshJobs().catch(() => {}), 3000);

@@ -4,13 +4,13 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>上海区级政策文件安全巡检系统</title>
-  <link rel="stylesheet" href="/static/app.css">
+  <link rel="stylesheet" href="/static/app.css?v=20260714-site-jobs-2">
 </head>
 <body>
   <header class="topbar">
     <div>
       <h1>上海区级政策文件安全巡检系统</h1>
-      <p>本地运行 · 串行访问 · 风控信号自动暂停</p>
+      <p>本地运行 · 受控并行 · 同域串行 · 风控信号自动暂停</p>
     </div>
     <span class="health" id="health">正在检查服务</span>
   </header>
@@ -19,45 +19,36 @@
     <section class="control-band">
       <form id="scan-form">
         <fieldset class="scan-source-field">
-          <legend>扫描来源</legend>
-          <div class="districts source-targets">
-            {% set putuo_targets = targets | selectattr('collector_type', 'equalto', 'putuo') | list %}
-            {% if putuo_targets %}
-            <label class="source-option source-option--merged is-selected">
-              <input type="checkbox" id="putuo-merged-target" data-putuo-merged-target checked>
-              <span class="source-option-name">普陀区</span><small class="source-badge">区级</small><em>政策文件（合并扫描）</em>
-              <small class="source-coverage">区政府、委办局、街道镇、规范性文件、党政混合信息</small>
-            </label>
-            {% for target in putuo_targets %}
-            <input type="checkbox" name="target" value="{{ target.key }}" data-source-label="{{ target.label }}" data-putuo-member-target checked hidden>
-            {% endfor %}
-            {% endif %}
-            {% for target in targets if target.collector_type != 'putuo' %}
-            <label class="source-option"><input type="checkbox" name="target" value="{{ target.key }}" data-source-label="{{ target.label }}" {% if target.collector_type == 'putuo' %}checked{% endif %}>
-              <span>{{ target.district }}</span><small class="source-badge">{{ target.source_level }}</small><em>{{ target.source_name }}</em>
+          <legend>扫描站点</legend>
+          <div class="scan-sites">
+            {% for site in sites %}
+            <label class="site-option" data-site-key="{{ site.key }}">
+              <input type="checkbox" name="site_key" value="{{ site.key }}">
+              <span class="site-main">
+                <strong>{{ site.district }}</strong>
+                <small class="source-badge">{{ site.source_level }}</small>
+                <span>{{ site.source_name }}</span>
+              </span>
+              {% if site.key == 'putuo_district' %}
+              <small class="site-coverage">区政府、委办局、街道镇、规范性文件、党政混合信息</small>
+              {% endif %}
+              <span class="site-runtime" id="site-runtime-{{ site.key }}">正在读取站点状态…</span>
             </label>
             {% endfor %}
           </div>
         </fieldset>
         <div class="scan-settings">
-          <label class="field">扫描模式
-            <select name="mode">
-              <option value="full">全量建立基线</option>
-              <option value="incremental">基于全量记录的增量扫描</option>
-            </select>
-          </label>
-          <label class="field" id="baseline-field" hidden>基准全量扫描记录
-            <select name="baseline_job_id" id="baseline-select" disabled>
-              <option value="">正在加载可用基线…</option>
-            </select>
-            <small id="baseline-hint">增量扫描会锁定为基准任务的同一组来源。</small>
-          </label>
           <label class="field">本次最多文件数
             <input type="number" name="max_documents" value="0" min="0" step="1">
             <small>0 表示扫描全部条目。设为非 0 仅用于试扫，未完整完成的任务不能作为增量基线。</small>
           </label>
+          <div class="parallel-policy" aria-label="并行调度规则">
+            <strong>并行调度</strong>
+            <span>不同域名最多同时运行 2 个任务</span>
+            <small>同一域名的任务自动排队，分别保留进度和结果。</small>
+          </div>
         </div>
-        <button type="submit" class="primary">开始扫描</button>
+        <button type="submit" class="primary">启动所选站点</button>
       </form>
       <div class="safety-strip">
         <strong>固定安全节奏</strong>
@@ -130,8 +121,8 @@
         <div class="history-content">
           <div class="section-heading"><p>点击任务编号可查看详情、恢复扫描或导出结果。</p><button id="refresh-btn" type="button" title="刷新任务列表">↻</button></div>
           <div class="table-wrap">
-            <table>
-              <thead><tr><th>ID</th><th>区县</th><th>模式</th><th>状态</th><th>进度</th><th>问题</th><th>创建时间</th><th>结果</th></tr></thead>
+            <table class="history-table">
+              <thead><tr><th>ID</th><th>站点</th><th>模式</th><th>状态</th><th>完整进度</th><th>问题</th><th>创建时间</th><th>结果</th></tr></thead>
               <tbody id="jobs-body"></tbody>
             </table>
           </div>
@@ -154,6 +145,6 @@
     <pre id="evidence-body" class="evidence-body"></pre>
   </dialog>
   <div id="toast" role="status"></div>
-  <script src="/static/app.js"></script>
+  <script src="/static/app.js?v=20260714-site-jobs-2"></script>
 </body>
 </html>

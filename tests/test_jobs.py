@@ -617,3 +617,58 @@ async def test_single_detail_exception_is_retested_after_scan_without_stopping_j
     with db.connect() as conn:
         exception = conn.execute("SELECT status,retry_count FROM scan_exceptions WHERE job_id=?", (job_id,)).fetchone()
     assert dict(exception) == {"status": "resolved", "retry_count": 1}
+
+
+@pytest.mark.asyncio
+async def test_scheduler_runs_different_hosts_in_parallel_and_same_host_serially(tmp_path, monkeypatch):
+    cross_db = Database(tmp_path / "cross-host.db")
+    cross_db.initialize()
+    cross_manager = JobManager(cross_db)
+    active = 0
+    max_active = 0
+    both_started = asyncio.Event()
+
+    async def cross_host_run(_job_id):
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        if active == 2:
+            both_started.set()
+        try:
+            await asyncio.wait_for(both_started.wait(), timeout=1)
+        finally:
+            active -= 1
+
+    monkeypatch.setattr(cross_manager, "_run_acquired", cross_host_run)
+    cross_ids = [
+        await cross_manager.create_and_start(["市级平台·普陀区"], "full"),
+        await cross_manager.create_and_start(["区级网站·普陀区·区政府文件"], "full"),
+    ]
+    cross_tasks = [cross_manager._tasks[job_id] for job_id in cross_ids]
+    await asyncio.gather(*cross_tasks)
+    assert max_active == 2
+
+    same_db = Database(tmp_path / "same-host.db")
+    same_db.initialize()
+    same_manager = JobManager(same_db)
+    started = []
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+
+    async def same_host_run(job_id):
+        started.append(job_id)
+        if len(started) == 1:
+            first_started.set()
+            await release_first.wait()
+
+    monkeypatch.setattr(same_manager, "_run_acquired", same_host_run)
+    first_id = await same_manager.create_and_start(["市级平台·普陀区"], "full")
+    first_task = same_manager._tasks[first_id]
+    await asyncio.wait_for(first_started.wait(), timeout=1)
+    second_id = await same_manager.create_and_start(["市级平台·崇明区"], "full")
+    second_task = same_manager._tasks[second_id]
+    await asyncio.sleep(0)
+    assert started == [first_id]
+    release_first.set()
+    await asyncio.gather(first_task, second_task)
+    assert started == [first_id, second_id]
