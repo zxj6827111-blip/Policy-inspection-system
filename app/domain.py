@@ -20,6 +20,13 @@ class JobStatus(StrEnum):
 class RelatedLink:
     kind: str
     url: str
+    source_area: str = ""
+    link_text: str = ""
+    source_page_url: str = ""
+    interaction_type: str = "click"
+    visible: bool = True
+    element_index: int = -1
+    check_result: dict | None = None
 
 
 @dataclass

@@ -1,3 +1,4 @@
+import sqlite3
 from datetime import date, datetime
 
 from openpyxl import load_workbook
@@ -37,6 +38,51 @@ def test_database_and_excel_export(tmp_path, monkeypatch):
         authored_date=date(2026, 1, 1), page_document_number="普府〔2026〕1号",
         published_date=date(2026, 2, 1), issuing_agency="上海市普陀区人民政府", document_id=document_id,
     )
+    repository.save_link_check(
+        job_id,
+        document_id,
+        {
+            "kind": "政策解读",
+            "url": "https://example.test/read-missing",
+            "final_url": "https://example.test/read-missing",
+            "status_code": 404,
+            "result": "broken",
+            "error_type": "http_error",
+            "source_area": "详情页侧栏",
+            "link_text": "政策解读",
+            "source_page_url": record.url,
+            "evidence": "HTTP 404",
+        },
+    )
+    repository.save_link_check(
+        job_id,
+        document_id,
+        {
+            "kind": "阅办联动",
+            "url": "https://example.test/restricted",
+            "final_url": "https://example.test/restricted",
+            "status_code": 403,
+            "result": "review_required",
+            "error_type": "access_restricted",
+            "source_area": "列表页",
+            "link_text": "阅办联动",
+            "source_page_url": "https://example.test/list",
+            "review_status": "manual_review",
+            "evidence": "访问限制，待人工复核",
+        },
+    )
+    repository.save_link_check(
+        job_id,
+        document_id,
+        {
+            "kind": "阅办联动",
+            "url": "https://api.example.test/legacy-hidden",
+            "final_url": "https://api.example.test/legacy-hidden",
+            "status_code": 404,
+            "result": "broken",
+            "error_type": "http_error",
+        },
+    )
     monkeypatch.setattr("app.exporter.EXPORT_DIR", tmp_path)
     output = export_job(db, job_id)
     workbook = load_workbook(output)
@@ -51,6 +97,145 @@ def test_database_and_excel_export(tmp_path, monkeypatch):
     assert workbook["问题汇总"]["A2"].value == "区级网站·普陀区·区政府文件"
     assert workbook["问题汇总"]["B2"].value == "日期问题"
     assert workbook["问题汇总"]["C2"].value == 1
+    assert workbook["外链问题"].max_row == 2
+    assert workbook["外链问题"]["E2"].value == "详情页侧栏"
+    assert workbook["外链问题"]["F2"].value == "政策解读"
+    assert workbook["外链问题"]["H2"].hyperlink.target == "https://example.test/read-missing"
+
+
+def test_old_link_checks_schema_migrates_before_occurrence_index(tmp_path):
+    path = tmp_path / "legacy.db"
+    with sqlite3.connect(path) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE link_checks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id INTEGER NOT NULL,
+                document_id INTEGER NOT NULL,
+                link_kind TEXT NOT NULL,
+                original_url TEXT NOT NULL,
+                final_url TEXT NOT NULL DEFAULT '',
+                status_code INTEGER,
+                result TEXT NOT NULL,
+                error_type TEXT NOT NULL DEFAULT '',
+                page_title TEXT NOT NULL DEFAULT '',
+                checked_at TEXT NOT NULL
+            );
+            CREATE UNIQUE INDEX uq_link_check_per_job_url
+                ON link_checks(job_id, document_id, original_url);
+            INSERT INTO link_checks(
+                job_id,document_id,link_kind,original_url,result,checked_at
+            ) VALUES(1,1,'阅办联动','https://api.example.test/hidden','broken','2026-07-14');
+            CREATE TABLE scan_item_results (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id INTEGER NOT NULL,
+                target_key TEXT NOT NULL,
+                source_label TEXT NOT NULL,
+                channel_id TEXT NOT NULL DEFAULT '',
+                page_number INTEGER NOT NULL,
+                item_index INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                url TEXT NOT NULL,
+                listed_date TEXT,
+                detail_status TEXT NOT NULL,
+                header_detected INTEGER NOT NULL DEFAULT 0,
+                source_id TEXT NOT NULL DEFAULT '',
+                topic_category TEXT NOT NULL DEFAULT '',
+                disclosure_attribute TEXT NOT NULL DEFAULT '',
+                authored_date TEXT,
+                page_document_number TEXT NOT NULL DEFAULT '',
+                published_date TEXT,
+                issuing_agency TEXT NOT NULL DEFAULT '',
+                missing_fields_json TEXT NOT NULL DEFAULT '[]',
+                document_id INTEGER,
+                reused_document_id INTEGER,
+                baseline_job_id INTEGER,
+                reason TEXT NOT NULL DEFAULT '',
+                checked_at TEXT NOT NULL,
+                UNIQUE(job_id,target_key,page_number,item_index)
+            );
+            INSERT INTO scan_item_results(
+                job_id,target_key,source_label,page_number,item_index,title,url,detail_status,checked_at
+            ) VALUES(1,'municipal_putuo','legacy',1,0,'legacy','https://example.test/legacy',
+                     'checked_complete','2026-07-14');
+            """
+        )
+
+    db = Database(path)
+    db.initialize()
+    db.initialize()
+
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT source_area,source_page_url,visible,review_status FROM link_checks"
+        ).fetchone()
+        indexes = {item["name"] for item in conn.execute("PRAGMA index_list(link_checks)")}
+        old_item_version = conn.execute(
+            "SELECT link_check_version FROM scan_item_results WHERE title='legacy'"
+        ).fetchone()[0]
+    assert row["source_area"] == row["source_page_url"] == ""
+    assert row["visible"] == 0
+    assert row["review_status"] == "legacy_hidden"
+    assert "uq_link_check_per_job_url" not in indexes
+    assert "uq_link_check_per_occurrence" in indexes
+    assert old_item_version == 0
+
+
+def test_copy_baseline_links_keeps_page_evidence_but_skips_legacy_hidden(tmp_path):
+    db = Database(tmp_path / "copy-links.db")
+    db.initialize()
+    baseline_job = db.create_job(["普陀区"], "full", {})
+    current_job = db.create_job(["普陀区"], "incremental", {}, baseline_job_id=baseline_job)
+    repository = Repository(db)
+    document_id = repository.save_record(
+        baseline_job,
+        PolicyRecord("普陀区", "测试", "https://example.test/policy"),
+        [],
+    )
+    common = {
+        "kind": "政策解读",
+        "final_url": "https://example.test/link",
+        "status_code": 200,
+        "result": "ok",
+        "source_area": "详情页侧栏",
+        "source_page_url": "https://example.test/policy",
+    }
+    repository.save_link_check(
+        baseline_job, document_id,
+        {**common, "url": "https://example.test/confirmed", "link_text": "图文解读"},
+    )
+    repository.save_link_check(
+        baseline_job, document_id,
+        {
+            **common,
+            "url": "https://example.test/manual",
+            "link_text": "视频解读",
+            "result": "review_required",
+            "review_status": "manual_review",
+        },
+    )
+    repository.save_link_check(
+        baseline_job, document_id,
+        {
+            **common,
+            "url": "https://api.example.test/legacy",
+            "link_text": "接口关系",
+            "visible": False,
+            "review_status": "legacy_hidden",
+        },
+    )
+
+    repository.copy_baseline_link_checks(baseline_job, current_job, document_id)
+
+    with db.connect() as conn:
+        rows = conn.execute(
+            "SELECT original_url,review_status FROM link_checks WHERE job_id=? ORDER BY original_url",
+            (current_job,),
+        ).fetchall()
+    assert [(row["original_url"], row["review_status"]) for row in rows] == [
+        ("https://example.test/confirmed", "confirmed"),
+        ("https://example.test/manual", "manual_review"),
+    ]
 
 
 def test_export_deduplicates_metadata_problem_sheet_by_url(tmp_path, monkeypatch):

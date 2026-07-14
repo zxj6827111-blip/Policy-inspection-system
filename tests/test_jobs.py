@@ -168,6 +168,110 @@ async def test_incremental_unchanged_document_skips_detail(tmp_path, fake_runtim
 
 
 @pytest.mark.asyncio
+async def test_legacy_hidden_baseline_link_forces_detail_recheck(tmp_path, fake_runtime):
+    db = Database(tmp_path / "legacy-baseline.db")
+    db.initialize()
+    baseline_job = db.create_job(["普陀区"], "full", {}, 0)
+    db.update_job(
+        baseline_job, status="completed", coverage_status="complete", completion_kind="full",
+        estimated_total=1, examined_count=1,
+    )
+    repository = Repository(db)
+    url = "https://example.test/same"
+    document_id = repository.save_record(
+        baseline_job,
+        PolicyRecord(
+            "普陀区", "文件same", url,
+            published_date=date(2026, 7, 1), authored_date=date(2026, 7, 1),
+        ),
+        [],
+    )
+    repository.record_scan_item(
+        baseline_job,
+        PolicyListItem(
+            "普陀区", 1, 0, "文件same", url, date(2026, 7, 1),
+            source_site="市级平台·普陀区", source_key="municipal_putuo",
+        ),
+        detail_status="checked_complete", header_detected=True,
+        authored_date=date(2026, 7, 1), published_date=date(2026, 7, 1), document_id=document_id,
+    )
+    repository.save_link_check(
+        baseline_job,
+        document_id,
+        {
+            "kind": "阅办联动",
+            "url": "https://api.example.test/hidden",
+            "result": "broken",
+            "visible": False,
+            "review_status": "legacy_hidden",
+        },
+    )
+    fake_runtime.datasets = {"普陀区": [item("普陀区", 0, "same")]}
+    manager = JobManager(db)
+
+    job_id = await manager.create_and_start(["普陀区"], "incremental", baseline_job_id=baseline_job)
+    await wait_job(manager, job_id)
+
+    job = db.get_job(job_id)
+    assert fake_runtime.opened == [url]
+    assert job["processed_count"] == 1
+    assert job["skipped_count"] == 0
+    with db.connect() as conn:
+        copied = conn.execute("SELECT COUNT(*) FROM link_checks WHERE job_id=?", (job_id,)).fetchone()[0]
+    assert copied == 0
+
+
+@pytest.mark.asyncio
+async def test_legacy_baseline_without_link_rows_forces_detail_recheck(tmp_path, fake_runtime):
+    db = Database(tmp_path / "legacy-no-links.db")
+    db.initialize()
+    baseline_job = db.create_job(["普陀区"], "full", {}, 0)
+    db.update_job(
+        baseline_job, status="completed", coverage_status="complete", completion_kind="full",
+        estimated_total=1, examined_count=1,
+    )
+    repository = Repository(db)
+    url = "https://example.test/same"
+    document_id = repository.save_record(
+        baseline_job,
+        PolicyRecord(
+            "普陀区", "文件same", url,
+            published_date=date(2026, 7, 1), authored_date=date(2026, 7, 1),
+        ),
+        [],
+    )
+    repository.record_scan_item(
+        baseline_job,
+        PolicyListItem(
+            "普陀区", 1, 0, "文件same", url, date(2026, 7, 1),
+            source_site="市级平台·普陀区", source_key="municipal_putuo",
+        ),
+        detail_status="checked_complete", header_detected=True,
+        authored_date=date(2026, 7, 1), published_date=date(2026, 7, 1), document_id=document_id,
+    )
+    with db.connect() as conn:
+        conn.execute(
+            "UPDATE scan_item_results SET link_check_version=0 WHERE job_id=?",
+            (baseline_job,),
+        )
+    fake_runtime.datasets = {"普陀区": [item("普陀区", 0, "same")]}
+    manager = JobManager(db)
+
+    job_id = await manager.create_and_start(["普陀区"], "incremental", baseline_job_id=baseline_job)
+    await wait_job(manager, job_id)
+
+    job = db.get_job(job_id)
+    assert fake_runtime.opened == [url]
+    assert job["processed_count"] == 1
+    assert job["skipped_count"] == 0
+    with db.connect() as conn:
+        version = conn.execute(
+            "SELECT link_check_version FROM scan_item_results WHERE job_id=?", (job_id,)
+        ).fetchone()[0]
+    assert version == 1
+
+
+@pytest.mark.asyncio
 async def test_incremental_requires_a_matching_completed_full_baseline(tmp_path):
     db = Database(tmp_path / "baseline-validation.db")
     db.initialize()
@@ -400,12 +504,14 @@ def test_unfinished_link_checkpoint_forces_resume_and_link_results_are_idempoten
     result = {
         "kind": "附件", "url": "https://example.test/a.pdf", "final_url": "https://example.test/a.pdf",
         "status_code": 200, "result": "ok", "redirect_chain": ["https://example.test/a.pdf"],
+        "source_area": "列表页", "link_text": "附件下载", "source_page_url": "https://example.test/list",
     }
     repository.save_link_check(job_id, document_id, result)
     repository.save_link_check(job_id, document_id, result)
+    repository.save_link_check(job_id, document_id, {**result, "source_area": "详情页正文"})
     with db.connect() as conn:
         count = conn.execute("SELECT COUNT(*) FROM link_checks WHERE job_id=?", (job_id,)).fetchone()[0]
-    assert count == 1
+    assert count == 2
 
 
 @pytest.mark.asyncio

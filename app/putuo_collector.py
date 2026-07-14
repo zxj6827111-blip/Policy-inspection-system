@@ -8,7 +8,7 @@ from urllib.parse import urljoin, urlparse
 
 from playwright.async_api import Browser, Page
 
-from app.collector import BrowserCollector, is_attachment_url, parse_iso_date
+from app.collector import BrowserCollector, parse_iso_date
 from app.config import PUTUO_DISTRICT_URL, ScanTarget
 from app.domain import DetailInspection, PolicyListItem, PolicyRecord, RelatedLink, SafetyPause
 from app.rules import extract_document_numbers
@@ -199,7 +199,10 @@ class PutuoDistrictCollector(BrowserCollector):
         try:
             await self.safe_goto(detail_page, item.url)
             await detail_page.wait_for_timeout(1000)
-            return await self._parse_putuo_detail(detail_page, item.title)
+            detail = await self._parse_putuo_detail(detail_page, item.title)
+            if detail.record is not None:
+                await self._precheck_detail_links(detail_page, detail.record.related_links)
+            return detail
         finally:
             await detail_page.close()
 
@@ -209,7 +212,10 @@ class PutuoDistrictCollector(BrowserCollector):
         try:
             await self.safe_goto(detail_page, url)
             await detail_page.wait_for_timeout(1000)
-            return await self._parse_putuo_detail(detail_page, fallback_title)
+            detail = await self._parse_putuo_detail(detail_page, fallback_title)
+            if detail.record is not None:
+                await self._precheck_detail_links(detail_page, detail.record.related_links)
+            return detail
         finally:
             await detail_page.close()
 
@@ -253,22 +259,7 @@ class PutuoDistrictCollector(BrowserCollector):
             invalid_fields.append("发布日期（格式无效）")
         body_locator = page.locator("article, .article-content, .TRS_Editor, .content")
         body_text = await body_locator.first.inner_text() if await body_locator.count() else text
-        links: list[RelatedLink] = []
-        anchors = await page.locator("a").evaluate_all(
-            "els => els.map(a => ({text:(a.innerText||'').trim(), href:a.href})).filter(x => x.href)"
-        )
-        for link in anchors:
-            label = link["text"]
-            href = urljoin(page.url, link["href"])
-            kind = ""
-            if "政策解读" in label:
-                kind = "政策解读"
-            elif "阅办联动" in label:
-                kind = "阅办联动"
-            elif is_attachment_url(href):
-                kind = "附件"
-            if kind and href != page.url and all(existing.url != href for existing in links):
-                links.append(RelatedLink(kind, href))
+        links = await self._extract_detail_links(page, page.url)
         record = PolicyRecord(
             district="普陀区", title=title, url=page.url,
             source_id=values["索引号"],

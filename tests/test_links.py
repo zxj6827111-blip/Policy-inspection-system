@@ -6,7 +6,7 @@ from playwright.async_api import TimeoutError as PlaywrightTimeout
 
 from app.collector import LinkChecker
 from app.config import SafetyConfig
-from app.domain import SafetyPause
+from app.domain import RelatedLink, SafetyPause
 from app.safety import SafetyController
 
 
@@ -83,8 +83,71 @@ async def test_network_error_types_after_bounded_retries(exception, error_type):
         result = await checker.check("阅办联动", "https://links.test/error")
     finally:
         await checker.client.aclose()
-    assert result["result"] == "error"
+    assert result["result"] == ("review_required" if error_type == "timeout" else "error")
     assert result["error_type"] == error_type
+    if error_type == "timeout":
+        assert result["review_status"] == "manual_review"
+
+
+@pytest.mark.asyncio
+async def test_one_failed_related_link_does_not_trigger_main_scan_cooldown():
+    calls = 0
+
+    def handler(_request):
+        nonlocal calls
+        calls += 1
+        raise httpx.ConnectError("offline")
+
+    safety = SafetyController(SafetyConfig(), sleep=FakeSleep(), rng=random.Random(1))
+    checker = LinkChecker(safety, resolver=lambda _host: ["1.1.1.1"])
+    checker.client = httpx.AsyncClient(transport=httpx.MockTransport(handler), follow_redirects=False)
+    try:
+        result = await checker.check("阅办联动", "https://links.test/offline")
+    finally:
+        await checker.client.aclose()
+
+    assert calls == 3
+    assert result["result"] == "error"
+    assert result["error_type"] == "connection"
+
+
+@pytest.mark.asyncio
+async def test_other_transport_error_is_recorded_without_stopping_scan():
+    def handler(_request):
+        raise httpx.RemoteProtocolError("peer closed connection")
+
+    checker = checker_with(handler)
+    try:
+        result = await checker.check("附件", "https://links.test/unstable")
+    finally:
+        await checker.client.aclose()
+
+    assert result["result"] == "review_required"
+    assert result["error_type"] == "transport"
+    assert result["review_status"] == "manual_review"
+
+
+@pytest.mark.asyncio
+async def test_direct_link_result_keeps_visible_page_evidence():
+    related = RelatedLink(
+        "阅办联动",
+        "https://links.test/apply",
+        source_area="详情页侧栏",
+        link_text="在线办理",
+        source_page_url="https://www.shanghai.gov.cn/zhengce/detail?id=1",
+    )
+    checker = checker_with(
+        lambda _request: httpx.Response(200, headers={"Content-Type": "text/plain"}, content=b"ok")
+    )
+    try:
+        result = await checker.check(related.kind, related.url, related)
+    finally:
+        await checker.client.aclose()
+
+    assert result["result"] == "ok"
+    assert result["source_area"] == "详情页侧栏"
+    assert result["link_text"] == "在线办理"
+    assert result["source_page_url"] == related.source_page_url
 
 
 @pytest.mark.asyncio
@@ -130,8 +193,8 @@ async def test_http_to_https_broken_link_is_recorded_without_requesting_robots_t
 @pytest.mark.parametrize(
     ("status", "body", "error_type"),
     [
-        (403, b"forbidden", "http_error"),
-        (429, b"too many requests", "http_error"),
+        (403, b"forbidden", "access_restricted"),
+        (429, b"too many requests", "access_restricted"),
         (200, "<html>请输入验证码后继续</html>".encode(), "access_restricted"),
     ],
 )
@@ -143,12 +206,21 @@ async def test_external_access_restriction_is_recorded_without_cooling(status, b
         result = await checker.check("阅办联动", "https://links.test/restricted")
     finally:
         await checker.client.aclose()
-    assert result["result"] == "broken"
+    assert result["result"] == "review_required"
     assert result["error_type"] == error_type
+    assert result["review_status"] == "manual_review"
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("url", ["http://127.0.0.1/private", "http://169.254.169.254/latest", "http://[::1]/"])
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://127.0.0.1/private",
+        "http://169.254.169.254/latest",
+        "http://198.18.0.58/fake-ip-must-not-be-literal",
+        "http://[::1]/",
+    ],
+)
 async def test_private_or_local_destinations_are_rejected_before_request(url):
     called = False
 
@@ -166,6 +238,48 @@ async def test_private_or_local_destinations_are_rejected_before_request(url):
         await checker.client.aclose()
     assert called is False
     assert result["result"] == "error"
+    assert result["error_type"] == "unsafe_destination"
+
+
+@pytest.mark.asyncio
+async def test_tun_fake_ip_is_allowed_only_when_resolved_from_public_hostname():
+    called = False
+
+    def handler(_request):
+        nonlocal called
+        called = True
+        return httpx.Response(200, headers={"Content-Type": "text/plain"}, content=b"ok")
+
+    safety = SafetyController(SafetyConfig(), sleep=FakeSleep(), rng=random.Random(1))
+    checker = LinkChecker(safety, resolver=lambda _host: ["198.18.0.58"])
+    checker.client = httpx.AsyncClient(transport=httpx.MockTransport(handler), follow_redirects=False)
+    try:
+        result = await checker.check("阅办联动", "https://services.example.test/apply")
+    finally:
+        await checker.client.aclose()
+
+    assert called is True
+    assert result["result"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_local_hostname_is_rejected_even_when_tun_returns_fake_ip():
+    called = False
+
+    def handler(_request):
+        nonlocal called
+        called = True
+        return httpx.Response(200, content=b"unexpected")
+
+    safety = SafetyController(SafetyConfig(), sleep=FakeSleep(), rng=random.Random(1))
+    checker = LinkChecker(safety, resolver=lambda _host: ["198.18.0.58"])
+    checker.client = httpx.AsyncClient(transport=httpx.MockTransport(handler), follow_redirects=False)
+    try:
+        result = await checker.check("阅办联动", "https://portal.internal/apply")
+    finally:
+        await checker.client.aclose()
+
+    assert called is False
     assert result["error_type"] == "unsafe_destination"
 
 
@@ -231,8 +345,9 @@ async def test_rendered_link_timeout_is_recorded_without_raising():
         rendered_checker=rendered,
     )
     result = await checker.check("附件", "https://www.shanghai.gov.cn/gwk/resource/file?filename=test.pdf")
-    assert result["result"] == "error"
+    assert result["result"] == "review_required"
     assert result["error_type"] == "timeout"
+    assert result["review_status"] == "manual_review"
 
 
 @pytest.mark.asyncio

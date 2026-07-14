@@ -103,7 +103,10 @@ def export_job(db: Database, job_id: int) -> Path:
         ).fetchall()
         links = conn.execute(
             """SELECT l.*,d.district,d.source_site,d.title,d.url AS document_url FROM link_checks l
-            JOIN policy_documents d ON d.id=l.document_id WHERE l.job_id=? AND l.result!='ok'
+            JOIN policy_documents d ON d.id=l.document_id
+            WHERE l.job_id=? AND l.visible=1 AND l.review_status='confirmed'
+              AND TRIM(COALESCE(l.source_area,''))!='' AND TRIM(COALESCE(l.source_page_url,''))!=''
+              AND l.result IN ('broken','error')
             ORDER BY d.district,d.id,l.id""", (job_id,)
         ).fetchall()
         documents = conn.execute(
@@ -219,10 +222,21 @@ def export_job(db: Database, job_id: int) -> Path:
                          finding["detail"], finding["evidence"], finding["review_status"], finding["url"]))
     _write_sheet(workbook, "文号与机构问题", ["栏目名称", "区县", "文件ID", "标题", "成文日期", "文号类型", "文号年份", "文号编号", "组合文号", "文号来源", "发文机构", "正文值", "问题类型", "问题详情", "证据", "复核状态", "链接"], doc_rows)
 
-    link_rows = [(r["source_site"] or "市级平台", r["district"], r["title"], r["link_kind"], r["original_url"], r["final_url"],
-                  r["status_code"], r["result"], r["error_type"], r["redirect_chain_json"], r["page_title"],
-                  r["checked_at"], r["document_url"]) for r in links]
-    _write_sheet(workbook, "外链问题", ["来源", "区县", "文件标题", "关联类型", "原始URL", "最终URL", "状态码", "检查结果", "错误类型", "重定向链", "页面标题", "检查时间", "文件链接"], link_rows)
+    link_rows = [
+        (
+            r["source_site"] or "市级平台", r["district"], r["title"], r["link_kind"], r["source_area"],
+            r["link_text"], r["source_page_url"], r["original_url"], r["final_url"], r["status_code"],
+            r["result"], r["error_type"], r["evidence"], r["redirect_chain_json"], r["page_title"],
+            r["checked_at"], r["document_url"],
+        )
+        for r in links
+    ]
+    _write_sheet(
+        workbook, "外链问题",
+        ["来源", "区县", "文件标题", "关联类型", "页面位置", "控件文字", "控件所在页面", "原始URL",
+         "最终URL", "状态码", "检查结果", "错误类型", "错误证据", "重定向链", "页面标题", "检查时间", "文件链接"],
+        link_rows,
+    )
 
     status_names = {
         "checked_complete": "表头完整，已检查",

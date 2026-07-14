@@ -23,7 +23,7 @@ from app.domain import (
     SafetyPause,
 )
 from app.putuo_collector import PutuoDistrictCollector
-from app.repository import Repository
+from app.repository import PAGE_LINK_CHECK_VERSION, Repository
 from app.rules import WorkdayCalendar, evaluate_record
 from app.safety import SafetyController
 
@@ -505,8 +505,12 @@ class JobManager:
         listed_date = item.published_date.isoformat() if item.published_date else None
         if (row["listed_date"] or None) != listed_date:
             return False, "列表发布日期发生变化"
+        if int(row.get("link_check_version") or 0) < PAGE_LINK_CHECK_VERSION:
+            return False, "基线尚未按页面可见链接规则检查，必须重新打开详情核验"
         if row["detail_status"] in {"exception", "checked_incomplete"}:
             return False, "基线详情异常或表头字段不完整"
+        if row.get("has_legacy_hidden_links"):
+            return False, "基线含无页面位置证据的历史链接，必须重新打开详情核验"
         if row["detail_status"] in {"no_header_pass", "reused_current_no_header", "reused_baseline_no_header"}:
             return True, "基线无表头 PASS，列表信息未变化"
         if self._all_missing_fields(self._inspection_from_baseline(item, row)):
@@ -548,7 +552,7 @@ class JobManager:
                 continue
 
             current_item = self.repo.current_job_item(job_id, item.url) if item.url else None
-            if current_item:
+            if current_item and int(current_item.get("link_check_version") or 0) >= PAGE_LINK_CHECK_VERSION:
                 inspection = self._inspection_from_baseline(item, current_item)
                 document_id = self._baseline_document_id(current_item)
                 same_position = (
@@ -650,7 +654,7 @@ class JobManager:
             )
             self.db.update_job(job_id, current_url=record.url)
             for related in record.related_links:
-                link_result = await checker.check(related.kind, related.url)
+                link_result = await checker.check(related.kind, related.url, related)
                 self.repo.save_link_check(job_id, document_id, link_result)
             self.repo.record_job_document(
                 job_id, document_id, target.label, item.page_number, item.item_index, "processed", reason
@@ -704,7 +708,9 @@ class JobManager:
                     int(exception["item_index"]), "retest_checking_links", "收尾复测成功，补充关联链接检查",
                 )
                 for related in record.related_links:
-                    self.repo.save_link_check(job_id, document_id, await checker.check(related.kind, related.url))
+                    self.repo.save_link_check(
+                        job_id, document_id, await checker.check(related.kind, related.url, related)
+                    )
                 self.repo.record_job_document(
                     job_id, document_id, target.label, int(exception["page_number"]),
                     int(exception["item_index"]), "retest_processed", "收尾复测成功",

@@ -5,6 +5,7 @@ from playwright.async_api import TimeoutError as PlaywrightTimeout
 
 from app.collector import (
     BrowserCollector,
+    attachment_payload_error,
     comparable_title,
     extract_labeled_value,
     is_attachment_url,
@@ -13,7 +14,7 @@ from app.collector import (
     policy_list_item_from_api,
 )
 from app.config import SCAN_TARGETS
-from app.domain import SafetyPause
+from app.domain import RelatedLink, SafetyPause
 from app.putuo_collector import PutuoDistrictCollector, parse_putuo_date, putuo_list_item_from_api
 
 
@@ -130,7 +131,7 @@ def test_public_list_record_missing_identity_pauses():
         policy_list_item_from_api({"title": "测试文件"}, "普陀区", 1, 0)
 
 
-def test_public_list_record_carries_policy_explanation_and_service_links():
+def test_public_list_record_ignores_hidden_api_related_links():
     item = policy_list_item_from_api(
         {
             "title": "测试文件",
@@ -143,10 +144,7 @@ def test_public_list_record_carries_policy_explanation_and_service_links():
         1,
         0,
     )
-    assert [(link.kind, link.url) for link in item.related_links] == [
-        ("政策解读", "https://www.shanghai.gov.cn/zhengce/detail?id=abc123&key=relates"),
-        ("阅办联动", "https://example.test/service"),
-    ]
+    assert item.related_links == []
 
 
 def test_attachment_extension_in_download_query_is_detected():
@@ -378,6 +376,9 @@ class FakeLocator:
     def first(self):
         return self
 
+    def locator(self, _selector):
+        return self
+
     async def evaluate_all(self, _expression):
         return self.items
 
@@ -393,10 +394,11 @@ class FakeDetailPage:
             return FakeLocator(self.text)
         if selector == "h1":
             return FakeLocator("测试政策标题")
-        if selector == "article, .article-content, .policy-content, .TRS_Editor":
-            return FakeLocator(self.text)
-        if selector == "a":
-            return FakeLocator(items=[
+        if selector in {
+            "article, .article-content, .policy-content, .TRS_Editor",
+            "article, .article-content, .policy-content, .TRS_Editor, .content, .article, .detail-content, .pages_content, .zw",
+        }:
+            return FakeLocator(self.text, items=[
                 {"text": "政策解读", "href": "https://www.shanghai.gov.cn/read/1"},
                 {"text": "附件", "href": "https://www.shanghai.gov.cn/file/a.pdf"},
             ])
@@ -418,6 +420,289 @@ async def test_parse_complete_dynamic_detail_and_business_id():
     assert record.page_document_number == "普府〔2026〕55号"
     assert record.published_date == record.authored_date == date(2026, 7, 3)
     assert [link.kind for link in record.related_links] == ["政策解读", "附件"]
+    assert [link.source_area for link in record.related_links] == ["详情页正文", "详情页正文"]
+
+
+@pytest.mark.asyncio
+async def test_detail_controls_use_section_heading_and_attachment_url_for_classification():
+    links = await BrowserCollector(None, None)._extract_visible_links_from_locator(
+        FakeLocator(items=[
+            {
+                "index": 0,
+                "text": "视频解读：《政策公开讲》政策引路",
+                "context": "政策解读",
+                "href": "",
+            },
+            {
+                "index": 1,
+                "text": "附件1《申报指南》.pdf",
+                "context": "相关附件",
+                "href": "https://www.shanghai.gov.cn/gwk/resource/file?filename=guide.pdf",
+            },
+        ]),
+        "https://www.shanghai.gov.cn/detail",
+        "详情页侧栏",
+    )
+    assert [(link.kind, link.link_text, link.element_index) for link in links] == [
+        ("政策解读", "视频解读：《政策公开讲》政策引路", 0),
+        ("附件", "附件1《申报指南》.pdf", 1),
+    ]
+
+
+class FakeListTrigger:
+    def __init__(self, page, kind):
+        self.page = page
+        self.kind = kind
+        self.click_count = 0
+
+    async def is_visible(self):
+        return True
+
+    async def get_attribute(self, name):
+        return self.kind if name == "alt" else None
+
+    async def scroll_into_view_if_needed(self, **_kwargs):
+        return None
+
+    async def click(self, **_kwargs):
+        self.click_count += 1
+        self.page.current_kind = self.kind
+        self.page.popover_open = True
+
+
+class FakeTriggerLocator:
+    def __init__(self, triggers):
+        self.triggers = triggers
+
+    async def count(self):
+        return len(self.triggers)
+
+    def nth(self, index):
+        return self.triggers[index]
+
+
+class FakePopoverItem:
+    def __init__(self, page, index):
+        self.page = page
+        self.index = index
+
+    async def inner_text(self):
+        return self.page.items[self.page.current_kind][self.index]
+
+    async def is_visible(self):
+        return self.page.popover_open
+
+    async def wait_for(self, **_kwargs):
+        if not self.page.popover_open:
+            raise PlaywrightTimeout("popover is hidden")
+
+
+class FakePopoverLocator:
+    def __init__(self, page):
+        self.page = page
+
+    async def count(self):
+        if not self.page.popover_open or not self.page.current_kind:
+            return 0
+        return len(self.page.items[self.page.current_kind])
+
+    @property
+    def first(self):
+        return self.nth(0)
+
+    def nth(self, index):
+        return FakePopoverItem(self.page, index)
+
+
+class FakeKeyboard:
+    def __init__(self, page):
+        self.page = page
+
+    async def press(self, _key):
+        self.page.popover_open = False
+
+
+class FakePopoverPage:
+    def __init__(self):
+        self.items = {
+            "政策解读": ["视频解读一", "图文解读二"],
+            "阅办联动": ["服务业发展引导资金申报"],
+        }
+        self.current_kind = ""
+        self.popover_open = False
+        self.keyboard = FakeKeyboard(self)
+        self.triggers = [FakeListTrigger(self, kind) for kind in self.items]
+
+    def locator(self, _selector):
+        return FakePopoverLocator(self)
+
+    async def wait_for_timeout(self, _milliseconds):
+        return None
+
+
+class FakeListContainer:
+    def __init__(self, page):
+        self.page = page
+
+    def locator(self, _selector):
+        return FakeTriggerLocator(self.page.triggers)
+
+
+@pytest.mark.asyncio
+async def test_list_related_icons_expand_popover_and_check_each_visible_item():
+    page = FakePopoverPage()
+    collector = BrowserCollector(None, None)
+
+    async def fake_check(_page, _locator, related):
+        # 真实 Ant Popover 在打开新标签后可能仍保持可见，下一类图标必须主动切换。
+        page.popover_open = True
+        slug = f"{related.kind}-{related.link_text}"
+        url = f"https://www.shanghai.gov.cn/checked/{slug}"
+        return {
+            "kind": related.kind,
+            "url": url,
+            "final_url": url,
+            "result": "ok",
+            "error_type": "",
+        }
+
+    collector._check_related_click = fake_check
+    links = await collector._extract_and_check_list_popovers(
+        page,
+        FakeListContainer(page),
+        "https://www.shanghai.gov.cn/zhengce/more?siteId=all",
+    )
+
+    assert [(link.kind, link.link_text) for link in links] == [
+        ("政策解读", "视频解读一"),
+        ("政策解读", "图文解读二"),
+        ("阅办联动", "服务业发展引导资金申报"),
+    ]
+    assert all(link.url.startswith("https://www.shanghai.gov.cn/checked/") for link in links)
+    assert all(link.check_result["result"] == "ok" for link in links)
+    assert [trigger.click_count for trigger in page.triggers] == [2, 1]
+
+
+def test_attachment_payload_validation_detects_common_bad_files():
+    assert attachment_payload_error("https://example.test/a.pdf", "application/pdf", b"%PDF-1.7")[0] == ""
+    assert attachment_payload_error("https://example.test/a.pdf", "text/html", b"<html>error</html>")[0] == "html_error"
+    assert attachment_payload_error("https://example.test/a.pdf", "application/pdf", b"not a pdf")[0] == "invalid_pdf"
+    assert attachment_payload_error("https://example.test/a.docx", "", b"not a zip")[0] == "invalid_office_file"
+
+
+class FakeDownload:
+    def __init__(self, url, path, failure=None):
+        self.url = url
+        self._path = path
+        self._failure = failure
+
+    async def failure(self):
+        return self._failure
+
+    async def path(self):
+        return str(self._path)
+
+
+@pytest.mark.asyncio
+async def test_downloaded_attachment_html_error_is_broken(tmp_path):
+    downloaded = tmp_path / "bad.pdf"
+    downloaded.write_bytes(b"<html>not a file</html>")
+    related = RelatedLink("附件", "https://example.test/bad.pdf", source_area="详情页正文", link_text="附件")
+    result = await BrowserCollector(None, None)._classify_download(
+        FakeDownload("https://example.test/bad.pdf", downloaded),
+        related,
+    )
+    assert result["result"] == "broken"
+    assert result["error_type"] == "html_error"
+    assert result["source_area"] == "详情页正文"
+
+
+class FakeClickRoute:
+    def __init__(self, url, resource_type="document"):
+        self.request = type("Request", (), {"resource_type": resource_type, "url": url})()
+        self.continued = False
+        self.aborted = False
+
+    async def continue_(self):
+        self.continued = True
+
+    async def abort(self, _error_code=None):
+        self.aborted = True
+
+
+class FakeClickContext:
+    def __init__(self):
+        self.handler = None
+        self.unrouted = False
+        self.routes = []
+
+    def on(self, *_args):
+        return None
+
+    def remove_listener(self, *_args):
+        return None
+
+    async def route(self, pattern, handler):
+        assert pattern == "**/*"
+        self.handler = handler
+
+    async def unroute(self, pattern, handler):
+        assert pattern == "**/*"
+        assert handler is self.handler
+        self.unrouted = True
+
+    async def wait_for_event(self, *_args, **_kwargs):
+        raise PlaywrightTimeout("no popup")
+
+
+class FakeClickPage:
+    url = "https://www.shanghai.gov.cn/zhengce/detail"
+
+    async def wait_for_event(self, *_args, **_kwargs):
+        raise PlaywrightTimeout("no download")
+
+    async def wait_for_timeout(self, _milliseconds):
+        return None
+
+
+class FakeClickLocator:
+    def __init__(self, context):
+        self.context = context
+
+    async def scroll_into_view_if_needed(self, **_kwargs):
+        return None
+
+    async def click(self, **_kwargs):
+        for url, resource_type in (
+            ("https://1.1.1.1/start", "document"),
+            ("http://127.0.0.1/private", "fetch"),
+        ):
+            route = FakeClickRoute(url, resource_type)
+            self.context.routes.append(route)
+            await self.context.handler(route)
+
+
+@pytest.mark.asyncio
+async def test_browser_click_blocks_private_redirect_before_request():
+    context = FakeClickContext()
+    collector = BrowserCollector(None, FakePutuoApiSafety())
+    collector.context = context
+    related = RelatedLink(
+        "阅办联动", "", source_area="列表页", link_text="在线办理",
+        source_page_url="https://www.shanghai.gov.cn/zhengce/more",
+    )
+
+    result = await collector._check_related_click(
+        FakeClickPage(), FakeClickLocator(context), related
+    )
+
+    assert result["result"] == "error"
+    assert result["error_type"] == "unsafe_destination"
+    assert context.routes[0].continued is True
+    assert context.routes[0].aborted is False
+    assert context.routes[1].continued is False
+    assert context.routes[1].aborted is True
+    assert context.unrouted is True
 
 
 @pytest.mark.asyncio

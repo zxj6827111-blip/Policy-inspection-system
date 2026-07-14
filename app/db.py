@@ -116,6 +116,13 @@ CREATE TABLE IF NOT EXISTS link_checks (
     page_title TEXT NOT NULL DEFAULT '',
     checked_at TEXT NOT NULL,
     redirect_chain_json TEXT NOT NULL DEFAULT '[]',
+    source_area TEXT NOT NULL DEFAULT '',
+    link_text TEXT NOT NULL DEFAULT '',
+    source_page_url TEXT NOT NULL DEFAULT '',
+    interaction_type TEXT NOT NULL DEFAULT '',
+    visible INTEGER NOT NULL DEFAULT 1 CHECK(visible IN (0, 1)),
+    review_status TEXT NOT NULL DEFAULT 'confirmed',
+    evidence TEXT NOT NULL DEFAULT '',
     FOREIGN KEY(job_id) REFERENCES scan_jobs(id),
     FOREIGN KEY(document_id) REFERENCES policy_documents(id)
 );
@@ -159,6 +166,7 @@ CREATE TABLE IF NOT EXISTS scan_item_results (
     document_id INTEGER,
     reused_document_id INTEGER,
     baseline_job_id INTEGER,
+    link_check_version INTEGER NOT NULL DEFAULT 1,
     reason TEXT NOT NULL DEFAULT '',
     checked_at TEXT NOT NULL,
     UNIQUE(job_id, target_key, page_number, item_index),
@@ -201,9 +209,6 @@ CREATE TABLE IF NOT EXISTS scan_exceptions (
     UNIQUE(job_id, url),
     FOREIGN KEY(job_id) REFERENCES scan_jobs(id)
 );
-
-CREATE UNIQUE INDEX IF NOT EXISTS uq_link_check_per_job_url
-ON link_checks(job_id, document_id, original_url);
 
 CREATE TABLE IF NOT EXISTS review_decisions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -284,13 +289,30 @@ class Database:
                 "topic_category": "TEXT NOT NULL DEFAULT ''",
                 "disclosure_attribute": "TEXT NOT NULL DEFAULT ''",
             },
-            "link_checks": {"redirect_chain_json": "TEXT NOT NULL DEFAULT '[]'"},
+            "scan_item_results": {
+                "link_check_version": "INTEGER NOT NULL DEFAULT 0",
+            },
+            "link_checks": {
+                "redirect_chain_json": "TEXT NOT NULL DEFAULT '[]'",
+                "source_area": "TEXT NOT NULL DEFAULT ''",
+                "link_text": "TEXT NOT NULL DEFAULT ''",
+                "source_page_url": "TEXT NOT NULL DEFAULT ''",
+                "interaction_type": "TEXT NOT NULL DEFAULT ''",
+                "visible": "INTEGER NOT NULL DEFAULT 1",
+                "review_status": "TEXT NOT NULL DEFAULT 'confirmed'",
+                "evidence": "TEXT NOT NULL DEFAULT ''",
+            },
         }
         for table, columns in additions.items():
             existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
             for name, definition in columns.items():
                 if name not in existing:
                     conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+        # 旧版接口抓取结果没有页面位置证据，不得进入客户导出或增量基线复用。
+        conn.execute(
+            """UPDATE link_checks SET visible=0,review_status='legacy_hidden'
+            WHERE TRIM(COALESCE(source_area,''))='' OR TRIM(COALESCE(source_page_url,''))=''"""
+        )
         # 旧版本曾把限量试扫误标为 completed；只修正没有新完成标记的遗留任务。
         conn.execute(
             """UPDATE scan_jobs SET status='partial',coverage_status='partial',completion_kind='legacy_incomplete',
@@ -316,8 +338,9 @@ class Database:
                 id INTEGER PRIMARY KEY AUTOINCREMENT, job_id INTEGER NOT NULL, event_type TEXT NOT NULL,
                 message TEXT NOT NULL DEFAULT '', url TEXT NOT NULL DEFAULT '', details_json TEXT NOT NULL DEFAULT '{}',
                 created_at TEXT NOT NULL, FOREIGN KEY(job_id) REFERENCES scan_jobs(id));
-            CREATE UNIQUE INDEX IF NOT EXISTS uq_link_check_per_job_url
-                ON link_checks(job_id, document_id, original_url);
+            DROP INDEX IF EXISTS uq_link_check_per_job_url;
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_link_check_per_occurrence
+                ON link_checks(job_id, document_id, original_url, source_area, source_page_url, link_text);
             CREATE TABLE IF NOT EXISTS scan_item_results (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, job_id INTEGER NOT NULL, target_key TEXT NOT NULL,
                 source_label TEXT NOT NULL, channel_id TEXT NOT NULL DEFAULT '', page_number INTEGER NOT NULL,
@@ -327,7 +350,8 @@ class Database:
                 disclosure_attribute TEXT NOT NULL DEFAULT '', authored_date TEXT, page_document_number TEXT NOT NULL DEFAULT '',
                 published_date TEXT, issuing_agency TEXT NOT NULL DEFAULT '', missing_fields_json TEXT NOT NULL DEFAULT '[]',
                 document_id INTEGER, reused_document_id INTEGER, baseline_job_id INTEGER, reason TEXT NOT NULL DEFAULT '',
-                checked_at TEXT NOT NULL, UNIQUE(job_id,target_key,page_number,item_index));
+                link_check_version INTEGER NOT NULL DEFAULT 1, checked_at TEXT NOT NULL,
+                UNIQUE(job_id,target_key,page_number,item_index));
             CREATE INDEX IF NOT EXISTS idx_scan_item_results_baseline_lookup
                 ON scan_item_results(job_id,target_key,url);
             """

@@ -2,6 +2,8 @@
 __pycache__/
 .pytest_cache/
 .pytest-*/
+.playwright-cli/
+.playwright-mcp/
 .artifact-work/
 .codegraph/
 .codex/
