@@ -299,6 +299,7 @@ class JobManager:
             latest = self.db.get_job(job_id)
             if not latest or latest["status"] != JobStatus.RUNNING:
                 return
+            self._validate_complete_coverage(job_id)
             completion_kind = "incremental" if job["mode"] == "incremental" else "full"
             self.db.update_job(
                 job_id, status=JobStatus.COMPLETED, finished_at=utc_now(), current_url="",
@@ -357,12 +358,55 @@ class JobManager:
     async def _record_target_total(self, job_id: int, label: str, total: int) -> None:
         current = self.db.get_job(job_id)
         totals = json.loads(current["total_by_district_json"] or "{}")
+        examined = json.loads(current["examined_by_district_json"] or "{}")
+        previous_total = totals.get(label)
+        if (
+            previous_total is not None
+            and int(examined.get(label, 0)) > 0
+            and int(previous_total) != int(total)
+        ):
+            raise SafetyPause(
+                f"{label} 列表总量在任务恢复后发生变化：原 {previous_total} 条，现 {total} 条"
+            )
         totals[label] = total
+        examined.setdefault(label, 0)
         self.db.update_job(
             job_id,
             estimated_total=sum(int(value) for value in totals.values()),
             total_by_district_json=json.dumps(totals, ensure_ascii=False),
+            examined_by_district_json=json.dumps(examined, ensure_ascii=False),
         )
+
+    def _validate_complete_coverage(self, job_id: int) -> None:
+        """只有列表总量、进度计数和逐条结果完全一致时才允许任务完成。"""
+        current = self.db.get_job(job_id)
+        if not current:
+            raise SafetyPause("扫描任务在完成校验时不存在")
+        estimated = int(current["estimated_total"])
+        examined = int(current["examined_count"])
+        item_count = self.repo.scan_item_count(job_id)
+        processed = int(current["processed_count"])
+        skipped = int(current["skipped_count"])
+        try:
+            totals = {key: int(value) for key, value in json.loads(
+                current["total_by_district_json"] or "{}"
+            ).items()}
+            examined_by_source = {key: int(value) for key, value in json.loads(
+                current["examined_by_district_json"] or "{}"
+            ).items()}
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise SafetyPause("扫描覆盖校验失败：分来源计数格式无效") from exc
+        mismatches = []
+        if examined != estimated:
+            mismatches.append(f"已覆盖 {examined} / 预计 {estimated}")
+        if item_count != examined:
+            mismatches.append(f"逐条结果 {item_count} / 已覆盖 {examined}")
+        if processed + skipped != examined:
+            mismatches.append(f"详情 {processed} + 复用/跳过 {skipped} != 已覆盖 {examined}")
+        if totals != examined_by_source:
+            mismatches.append("分来源已覆盖数量与接口总量不一致")
+        if mismatches:
+            raise SafetyPause("扫描覆盖校验失败，任务未标记完成：" + "；".join(mismatches))
 
     @staticmethod
     def _as_date(value: str | None) -> date | None:
@@ -501,6 +545,37 @@ class JobManager:
                     reused_document_id=document_id, baseline_job_id=job.get("baseline_job_id"), reason=reason,
                 )
                 self._advance_progress(job_id, target.label, item.page_number, item.item_index, skipped=True)
+                continue
+
+            current_item = self.repo.current_job_item(job_id, item.url) if item.url else None
+            if current_item:
+                inspection = self._inspection_from_baseline(item, current_item)
+                document_id = self._baseline_document_id(current_item)
+                same_position = (
+                    current_item["target_key"] == item.source_key
+                    and int(current_item["page_number"]) == item.page_number
+                    and int(current_item["item_index"]) == item.item_index
+                )
+                performed_statuses = {"checked_complete", "checked_incomplete", "no_header_pass"}
+                already_performed_here = same_position and current_item["detail_status"] in performed_statuses
+                if already_performed_here:
+                    detail_status = current_item["detail_status"]
+                    reason = "任务恢复时发现该条详情结果已落库，直接恢复进度"
+                else:
+                    detail_status = (
+                        "reused_current_no_header" if inspection.record is None else "reused_current_detail"
+                    )
+                    reason = "同一任务中该 URL 已完成详情检查，复用数据库中的当前任务结果"
+                self._record_item_result(
+                    job_id, item, inspection, detail_status=detail_status, document_id=document_id,
+                    reused_document_id=None if already_performed_here else document_id,
+                    baseline_job_id=job.get("baseline_job_id"), reason=reason,
+                )
+                detail_cache[item.url] = (inspection, document_id)
+                self._advance_progress(
+                    job_id, target.label, item.page_number, item.item_index,
+                    skipped=not already_performed_here,
+                )
                 continue
 
             baseline_job_id = job.get("baseline_job_id") if job["mode"] == "incremental" else None

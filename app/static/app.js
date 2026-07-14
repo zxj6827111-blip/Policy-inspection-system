@@ -77,7 +77,7 @@ function renderCurrent(job) {
   $('#job-subtitle').textContent = `${JSON.parse(job.districts_json).join('、')} · ${job.mode === 'full' ? '全量' : '增量'}扫描${baselineText}`;
   $('#status').textContent = statusNames[job.status] || job.status;
   $('#status').parentElement.className = `metric-status metric-status-${job.status}`;
-  $('#processed').textContent = `${job.examined_count} / ${job.estimated_total || '?'}（详情 ${job.processed_count}，跳过 ${job.skipped_count}）`;
+  $('#processed').textContent = `${job.examined_count} / ${job.estimated_total || '?'}（详情 ${job.processed_count}，复用/跳过 ${job.skipped_count}）`;
   $('#finding-count').textContent = job.finding_count;
   $('#position').textContent = `${job.current_district || '-'} / ${job.current_page || '-'}`;
   $('#current-url').textContent = job.current_url || '-';
@@ -176,7 +176,7 @@ async function refreshJobs() {
     const tr = document.createElement('tr');
     const districts = JSON.parse(job.districts_json).join('、');
     const createdAt = new Date(job.created_at).toLocaleString('zh-CN', {hour12:false});
-    tr.innerHTML = `<td><button class="job-open" data-id="${job.id}">#${job.id}</button></td><td>${districts}</td><td>${job.mode === 'full' ? '全历史' : '增量'}</td><td><span class="status-pill status-${job.status}">${statusNames[job.status] || job.status}</span></td><td>${job.examined_count} / ${job.estimated_total || '?'}（跳过 ${job.skipped_count}）</td><td>${job.finding_count}</td><td>${createdAt}</td><td><a href="/api/jobs/${job.id}/export">Excel</a></td>`;
+    tr.innerHTML = `<td><button class="job-open" data-id="${job.id}">#${job.id}</button></td><td>${districts}</td><td>${job.mode === 'full' ? '全历史' : '增量'}</td><td><span class="status-pill status-${job.status}">${statusNames[job.status] || job.status}</span></td><td>${job.examined_count} / ${job.estimated_total || '?'}（复用/跳过 ${job.skipped_count}）</td><td>${job.finding_count}</td><td>${createdAt}</td><td><a href="/api/jobs/${job.id}/export">Excel</a></td>`;
     body.appendChild(tr);
   }
   document.querySelectorAll('.job-open').forEach(button => button.addEventListener('click', async () => renderCurrent(await api(`/api/jobs/${button.dataset.id}`))));

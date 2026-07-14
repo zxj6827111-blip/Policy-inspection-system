@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from datetime import date
+from math import ceil
 from urllib import robotparser
 from urllib.parse import urljoin, urlparse
 
@@ -77,6 +78,7 @@ class PutuoDistrictCollector(BrowserCollector):
         self.list_url = target.list_url or PUTUO_DISTRICT_URL
         self.channel_id = target.channel_id or "3"
         self._total_pages = 0
+        self._total_count: int | None = None
         self._current_page = 1
 
     @property
@@ -110,7 +112,7 @@ class PutuoDistrictCollector(BrowserCollector):
                     "pageSize": PUTUO_PAGE_SIZE,
                     "orderFields": ["display_date"],
                     "orderTypes": ["desc"],
-                    "pageNum": page_number,
+                    "pageNo": page_number,
                 },
                 timeout=45_000,
                 fail_on_status_code=False,
@@ -122,11 +124,43 @@ class PutuoDistrictCollector(BrowserCollector):
                 raise SafetyPause(f"普陀区官网列表接口返回 HTTP {status}")
             payload = await response.json()
             data = payload.get("data", payload)
-            records = data.get("list") if isinstance(data, dict) else None
-            total_pages = data.get("totalPage") if isinstance(data, dict) else None
-            if not isinstance(records, list) or not total_pages:
+            if not isinstance(data, dict):
                 raise SafetyPause("普陀区官网列表接口数据结构发生变化，采集器需要更新")
-            self._total_pages = int(total_pages)
+            records = data.get("list")
+            try:
+                response_page = int(data["pageNo"])
+                total_pages = int(data["totalPage"])
+                total_count = int(data["totalCount"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise SafetyPause("普陀区官网列表接口缺少有效的 pageNo/totalPage/totalCount") from exc
+            if not isinstance(records, list) or total_count < 0 or total_pages < 0:
+                raise SafetyPause("普陀区官网列表接口数据结构发生变化，采集器需要更新")
+            expected_pages = ceil(total_count / PUTUO_PAGE_SIZE) if total_count else 0
+            if response_page != page_number:
+                raise SafetyPause(
+                    f"普陀区官网列表接口页码校验失败：请求第 {page_number} 页，返回第 {response_page} 页"
+                )
+            if total_pages != expected_pages:
+                raise SafetyPause(
+                    f"普陀区官网列表接口总量校验失败：totalCount={total_count}，totalPage={total_pages}"
+                )
+            if total_count and not 1 <= page_number <= total_pages:
+                raise SafetyPause(f"普陀区官网列表接口返回了无效页码：{page_number}/{total_pages}")
+            expected_rows = (
+                PUTUO_PAGE_SIZE if page_number < total_pages
+                else total_count - PUTUO_PAGE_SIZE * (total_pages - 1)
+            ) if total_count else 0
+            if len(records) != expected_rows:
+                raise SafetyPause(
+                    f"普陀区官网列表第 {page_number} 页条数异常：应为 {expected_rows} 条，实际 {len(records)} 条"
+                )
+            if self._total_count is not None and (
+                total_count != self._total_count or total_pages != self._total_pages
+            ):
+                raise SafetyPause("普陀区官网列表总量在扫描期间发生变化，已暂停以避免生成不完整结果")
+            self._total_count = total_count
+            self._total_pages = total_pages
+            self._estimated_total = total_count
             self._current_page = page_number
             self._current_records = records
             return records
@@ -145,13 +179,6 @@ class PutuoDistrictCollector(BrowserCollector):
         records = await self._fetch_page(1)
         if not records:
             raise SafetyPause("普陀区官网区政府文件列表为空，已停止扫描")
-        # 接口仅公开页数。读取最后一页可得精确总数，随后恢复第一页供扫描使用。
-        if self._total_pages > 1:
-            last_records = await self._fetch_page(self._total_pages)
-            self._estimated_total = (self._total_pages - 1) * PUTUO_PAGE_SIZE + len(last_records)
-            await self._fetch_page(1)
-        else:
-            self._estimated_total = len(records)
 
     async def iter_items(self, district: str, start_page: int = 1, start_item_index: int = -1):
         await self.select_district(district)
@@ -191,7 +218,26 @@ class PutuoDistrictCollector(BrowserCollector):
         title_locator = page.locator("h1")
         title = (await title_locator.first.inner_text()).strip() if await title_locator.count() else fallback_title
         values = {label: extract_putuo_header_value(text, label) for label in METADATA_LABELS}
-        header_detected = any(
+        metadata_pairs = await page.locator(
+            ".article-info .col-md-7, .article-info .col-md-5"
+        ).evaluate_all(
+            """els => els.map(el => {
+                const values = Array.from(el.querySelectorAll('span'))
+                    .map(span => (span.innerText || '').trim());
+                return {label: values[0] || '', value: values.slice(1).join(' ').trim()};
+            })"""
+        )
+        dom_header_detected = False
+        for pair in metadata_pairs:
+            label = re.sub(r"[\s:：]+$", "", str(pair.get("label") or "").strip())
+            label = re.sub(r"\s+", "", label)
+            if label not in values:
+                continue
+            dom_header_detected = True
+            dom_value = str(pair.get("value") or "").strip()
+            if dom_value:
+                values[label] = dom_value
+        header_detected = dom_header_detected or any(
             re.search(rf"{re.escape(label)}[ \t]*[:：]", text) for label in METADATA_LABELS
         )
         if not header_detected:

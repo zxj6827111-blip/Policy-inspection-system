@@ -187,8 +187,9 @@ def test_putuo_date_parser_accepts_metadata_format():
 class PutuoDetailPage:
     url = "https://www.shpt.gov.cn/zhengwu/zdgkml-qzfwj/2026/188/204477.html"
 
-    def __init__(self, text):
+    def __init__(self, text, metadata_items=None):
         self.text = text
+        self.metadata_items = metadata_items or []
 
     def locator(self, selector):
         if selector in {"body", "article, .article-content, .TRS_Editor, .content"}:
@@ -197,6 +198,8 @@ class PutuoDetailPage:
             return FakeLocator("测试政策标题")
         if selector == "a":
             return FakeLocator(items=[])
+        if selector == ".article-info .col-md-7, .article-info .col-md-5":
+            return FakeLocator(items=self.metadata_items)
         return FakeLocator("", count=0)
 
 
@@ -225,6 +228,110 @@ async def test_putuo_detail_extracts_all_seven_header_fields():
     assert detail.record.authored_date == detail.record.published_date == date(2026, 7, 3)
     assert detail.record.page_document_number == "普府〔2026〕54号"
     assert detail.record.issuing_agency == "上海市普陀区人民政府"
+
+
+@pytest.mark.asyncio
+async def test_putuo_detail_extracts_metadata_from_adjacent_spans():
+    metadata_items = [
+        {"label": "索引号：", "value": "SY310107202601607"},
+        {"label": "主题分类：", "value": "其他"},
+        {"label": "公开属性：", "value": "主动公开"},
+        {"label": "成文日期：", "value": "2026年04月09日"},
+        {"label": "发文字号：", "value": "普委〔2026〕37号"},
+        {"label": "发布日期：", "value": "2026年04月30日"},
+        {"label": "公开主体：", "value": "中共上海市普陀区委员会 上海市普陀区人民政府"},
+    ]
+    detail = await PutuoDistrictCollector(None, None, SCAN_TARGETS["putuo_party_government"])._parse_putuo_detail(
+        PutuoDetailPage(
+            """索引号：
+SY310107202601607
+主题分类：
+其他
+公开属性：
+主动公开
+成文日期：
+2026年04月09日
+发文字号：
+普委〔2026〕37号
+发布日期：
+2026年04月30日
+公开主体：
+中共上海市普陀区委员会 上海市普陀区人民政府""",
+            metadata_items,
+        ),
+        "后备标题",
+    )
+
+    assert detail.missing_fields == []
+    assert detail.invalid_fields == []
+    assert detail.record is not None
+    assert detail.record.source_id == "SY310107202601607"
+    assert detail.record.authored_date == date(2026, 4, 9)
+    assert detail.record.published_date == date(2026, 4, 30)
+    assert detail.record.page_document_number == "普委〔2026〕37号"
+    assert detail.record.issuing_agency == "中共上海市普陀区委员会 上海市普陀区人民政府"
+
+
+class FakePutuoApiResponse:
+    status = 200
+
+    def __init__(self, payload):
+        self.payload = payload
+        self.disposed = False
+
+    async def text(self):
+        return "ok"
+
+    async def json(self):
+        return self.payload
+
+    async def dispose(self):
+        self.disposed = True
+
+
+class FakePutuoApiRequest:
+    def __init__(self, payload):
+        self.payload = payload
+        self.data = None
+
+    async def post(self, _url, *, data, timeout, fail_on_status_code):
+        self.data = data
+        assert timeout == 45_000
+        assert fail_on_status_code is False
+        return FakePutuoApiResponse(self.payload)
+
+
+class FakePutuoApiSafety:
+    async def before_request(self):
+        return None
+
+    def after_request(self, *_args, **_kwargs):
+        return None
+
+
+@pytest.mark.asyncio
+async def test_putuo_api_uses_page_no_and_accepts_exact_last_page_count():
+    payload = {"data": {"list": [{"id": 16}], "pageNo": 2, "totalPage": 2, "totalCount": 16}}
+    collector = PutuoDistrictCollector(None, FakePutuoApiSafety(), SCAN_TARGETS["putuo_government"])
+    request = FakePutuoApiRequest(payload)
+    collector.context = type("Context", (), {"request": request})()
+
+    records = await collector._fetch_page(2)
+
+    assert records == [{"id": 16}]
+    assert request.data["pageNo"] == 2
+    assert "pageNum" not in request.data
+    assert await collector.estimated_total() == 16
+
+
+@pytest.mark.asyncio
+async def test_putuo_api_rejects_response_page_mismatch():
+    payload = {"data": {"list": [{"id": 1}], "pageNo": 1, "totalPage": 2, "totalCount": 16}}
+    collector = PutuoDistrictCollector(None, FakePutuoApiSafety(), SCAN_TARGETS["putuo_government"])
+    collector.context = type("Context", (), {"request": FakePutuoApiRequest(payload)})()
+
+    with pytest.raises(SafetyPause, match="页码校验失败"):
+        await collector._fetch_page(2)
 
 
 @pytest.mark.asyncio

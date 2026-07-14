@@ -97,6 +97,25 @@ class Repository:
             ).fetchone()
         return dict(row) if row else None
 
+    def current_job_item(self, job_id: int, url: str) -> dict | None:
+        """恢复任务时复用已落库的详情结果，避免同一 URL 再次访问目标站。"""
+        with self.db.connect() as conn:
+            row = conn.execute(
+                """SELECT * FROM scan_item_results
+                WHERE job_id=? AND url=? AND detail_status!='exception'
+                ORDER BY CASE WHEN detail_status IN
+                    ('checked_complete','checked_incomplete','no_header_pass') THEN 0 ELSE 1 END,
+                    checked_at DESC LIMIT 1""",
+                (job_id, url),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def scan_item_count(self, job_id: int) -> int:
+        with self.db.connect() as conn:
+            return int(conn.execute(
+                "SELECT COUNT(*) FROM scan_item_results WHERE job_id=?", (job_id,)
+            ).fetchone()[0])
+
     def copy_baseline_findings(self, baseline_job_id: int, job_id: int, document_id: int) -> list[Finding]:
         with self.db.connect() as conn:
             rows = conn.execute(

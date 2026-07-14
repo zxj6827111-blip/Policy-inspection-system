@@ -10,7 +10,7 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 from chinese_calendar import is_workday
 
-from app.config import EXPORT_DIR, ensure_directories
+from app.config import EXPORT_DIR, ensure_directories, resolve_target
 from app.db import Database
 from app.rules import DOC_NUMBER_RE, WorkdayCalendar, normalize_document_number
 
@@ -132,45 +132,72 @@ def export_job(db: Database, job_id: int) -> Path:
 
     workbook = Workbook()
     workbook.remove(workbook.active)
-    categories: dict[tuple[str, str], int] = {}
-    for finding in findings:
-        key = (finding["district"], finding["category"])
-        categories[key] = categories.get(key, 0) + 1
     findings_by_document: dict[int, list] = {}
     for finding in findings:
         findings_by_document.setdefault(int(finding["document_id"]), []).append(finding)
+    categories: dict[tuple[str, str], int] = {}
+    mapped_findings: set[int] = set()
+    seen_source_findings: set[tuple[str, str, int]] = set()
+    for item_result in item_results:
+        document_id = item_result["effective_document_id"]
+        if not document_id:
+            continue
+        for finding in findings_by_document.get(int(document_id), []):
+            identity = (item_result["source_label"], item_result["url"], int(finding["id"]))
+            if identity in seen_source_findings:
+                continue
+            seen_source_findings.add(identity)
+            mapped_findings.add(int(finding["id"]))
+            key = (item_result["source_label"], finding["category"])
+            categories[key] = categories.get(key, 0) + 1
+    for finding in findings:
+        if int(finding["id"]) in mapped_findings:
+            continue
+        source = finding["source_site"] or finding["district"]
+        key = (source, finding["category"])
+        categories[key] = categories.get(key, 0) + 1
     coverage_label = "完整" if job["coverage_status"] == "complete" else "未完成"
     remaining = max(int(job["estimated_total"]) - int(job["examined_count"]), 0)
-    districts = json.loads(job["districts_json"])
+    selected_values = json.loads(job["districts_json"])
+    sources = []
+    for value in selected_values:
+        try:
+            label = resolve_target(value).label
+        except ValueError:
+            label = value
+        if label not in sources:
+            sources.append(label)
     totals_by_district = json.loads(job["total_by_district_json"] or "{}")
     examined_by_district = json.loads(job["examined_by_district_json"] or "{}")
     actions_by_district: dict[str, dict[str, int]] = {}
     for row in action_rows:
         actions_by_district.setdefault(row["district"], {})[row["action"]] = int(row["count"])
-    if len(districts) == 1:
-        district = districts[0]
-        totals_by_district.setdefault(district, int(job["estimated_total"]))
-        examined_by_district.setdefault(district, int(job["examined_count"]))
+    if len(sources) == 1:
+        source = sources[0]
+        totals_by_district.setdefault(source, int(job["estimated_total"]))
+        examined_by_district.setdefault(source, int(job["examined_count"]))
     summary_rows = []
-    for district in districts:
-        district_categories = [(category, count) for (name, category), count in sorted(categories.items()) if name == district]
-        if not district_categories:
-            district_categories = [("无已发现问题", 0)]
-        district_total = int(totals_by_district.get(district, 0))
-        district_examined = int(examined_by_district.get(district, 0))
-        district_actions = actions_by_district.get(district, {})
-        district_processed = int(district_actions.get("processed", 0))
-        district_skipped = int(district_actions.get("skipped", 0))
-        district_remaining = max(district_total - district_examined, 0)
-        for category, count in district_categories:
+    for source in sources:
+        source_categories = [
+            (category, count) for (name, category), count in sorted(categories.items()) if name == source
+        ]
+        if not source_categories:
+            source_categories = [("无已发现问题", 0)]
+        source_total = int(totals_by_district.get(source, 0))
+        source_examined = int(examined_by_district.get(source, 0))
+        source_actions = actions_by_district.get(source, {})
+        source_processed = int(source_actions.get("processed", 0))
+        source_skipped = int(source_actions.get("skipped", 0))
+        source_remaining = max(source_total - source_examined, 0)
+        for category, count in source_categories:
             summary_rows.append((
-                district, category, count, job["status"], coverage_label, district_examined,
-                district_processed, district_skipped, district_total, district_remaining,
+                source, category, count, job["status"], coverage_label, source_examined,
+                source_processed, source_skipped, source_total, source_remaining,
                 job["pause_reason"] or job["last_error"],
             ))
     _write_sheet(
         workbook, "问题汇总",
-        ["区县", "问题类型", "数量", "扫描状态", "扫描完整度", "已覆盖", "详情检查", "增量跳过",
+        ["扫描来源", "问题类型", "数量", "扫描状态", "扫描完整度", "已覆盖", "详情检查", "复用/跳过",
          "预计总数", "预计剩余", "暂停/未完成原因"], summary_rows,
     )
 
@@ -208,7 +235,7 @@ def export_job(db: Database, job_id: int) -> Path:
         "exception": "详情异常，待复测",
     }
     all_rows = []
-    metadata_rows = []
+    metadata_by_url: dict[str, tuple[int, tuple]] = {}
     for item_result in item_results:
         document_id = item_result["effective_document_id"]
         doc_findings = findings_by_document.get(int(document_id), []) if document_id else []
@@ -233,10 +260,15 @@ def export_job(db: Database, job_id: int) -> Path:
             item_result["baseline_job_id"] or "", item_result["reason"], item_result["url"],
         ))
         if missing_fields:
-            metadata_rows.append((
+            metadata_row = (
                 item_result["source_label"], item_result["channel_id"], item_result["title"], item_result["source_id"],
                 "、".join(missing_fields), item_result["detail_status"], item_result["reason"], item_result["url"],
-            ))
+            )
+            priority = 2 if item_result["detail_status"] == "checked_incomplete" else 1
+            current = metadata_by_url.get(item_result["url"])
+            if current is None or priority > current[0]:
+                metadata_by_url[item_result["url"]] = (priority, metadata_row)
+    metadata_rows = [row for _priority, row in metadata_by_url.values()]
     _write_sheet(
         workbook, "全量明细",
         ["来源 Sheet", "栏目 ID", "列表页码", "列表序号", "列表发布日期", "标题", "表头状态", "索引号", "主题分类",
@@ -260,7 +292,7 @@ def export_job(db: Database, job_id: int) -> Path:
     run_rows.extend((job["id"], event["event_type"], job["mode"], job["status"], coverage_label,
                      job["completion_kind"], event["created_at"], "", "", "", "", "", "", "", "", "", "", "",
                      "", "", event["message"], "", event["details_json"], event["url"], event["id"]) for event in events)
-    _write_sheet(workbook, "扫描运行记录", ["任务ID", "记录类型", "模式", "状态", "扫描完整度", "结束类型", "记录时间", "开始时间", "结束时间", "已覆盖", "详情检查", "增量跳过", "预计总数", "预计剩余", "访问次数", "重试次数", "强休息次数", "恢复次数", "当前区县", "当前页", "说明", "最后错误", "参数/详情", "URL", "事件ID"], run_rows)
+    _write_sheet(workbook, "扫描运行记录", ["任务ID", "记录类型", "模式", "状态", "扫描完整度", "结束类型", "记录时间", "开始时间", "结束时间", "已覆盖", "详情检查", "复用/跳过", "预计总数", "预计剩余", "访问次数", "重试次数", "强休息次数", "恢复次数", "当前区县", "当前页", "说明", "最后错误", "参数/详情", "URL", "事件ID"], run_rows)
 
     output = EXPORT_DIR / f"政策巡检结果_任务{job_id}_{datetime.now():%Y%m%d_%H%M%S}.xlsx"
     workbook.save(output)

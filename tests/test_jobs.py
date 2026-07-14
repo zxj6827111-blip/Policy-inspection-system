@@ -272,6 +272,62 @@ async def test_same_url_in_two_sources_is_opened_once_but_exported_twice(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_resume_reuses_current_job_detail_saved_before_progress_advance(tmp_path, fake_runtime):
+    db = Database(tmp_path / "resume-detail.db")
+    db.initialize()
+    job_id = db.create_job(["普陀区"], "full", {}, 0)
+    db.update_job(job_id, status="paused", coverage_status="partial")
+    policy_item = item("普陀区", 0, "saved")
+    policy_item.source_site = "市级平台·普陀区"
+    policy_item.source_key = "municipal_putuo"
+    record = PolicyRecord(
+        district="普陀区", title=policy_item.title, url=policy_item.url,
+        published_date=policy_item.published_date, authored_date=policy_item.published_date,
+    )
+    repository = Repository(db)
+    document_id = repository.save_record(job_id, record, [])
+    repository.record_scan_item(
+        job_id, policy_item, detail_status="checked_complete", header_detected=True,
+        authored_date=record.authored_date, published_date=record.published_date,
+        document_id=document_id,
+    )
+    fake_runtime.datasets = {"普陀区": [policy_item]}
+    manager = JobManager(db)
+
+    await manager.resume(job_id)
+    await wait_job(manager, job_id)
+
+    job = db.get_job(job_id)
+    assert job["status"] == "completed"
+    assert job["examined_count"] == job["processed_count"] == 1
+    assert job["skipped_count"] == 0
+    assert fake_runtime.opened == []
+
+
+@pytest.mark.asyncio
+async def test_reported_total_mismatch_cannot_be_marked_completed(tmp_path, fake_runtime, monkeypatch):
+    class IncompleteCoverageCollector(FakeCollector):
+        async def estimated_total(self):
+            return len(self.datasets[self.current_district]) + 1
+
+    db = Database(tmp_path / "coverage-mismatch.db")
+    db.initialize()
+    IncompleteCoverageCollector.datasets = {"普陀区": [item("普陀区", 0, "only")]}
+    IncompleteCoverageCollector.opened = []
+    monkeypatch.setattr("app.jobs.BrowserCollector", IncompleteCoverageCollector)
+    manager = JobManager(db)
+
+    job_id = await manager.create_and_start(["普陀区"], "full")
+    await wait_job(manager, job_id)
+
+    job = db.get_job(job_id)
+    assert job["status"] == "paused"
+    assert job["coverage_status"] == "partial"
+    assert job["completion_kind"] == "data_pause"
+    assert "扫描覆盖校验失败" in job["pause_reason"]
+
+
+@pytest.mark.asyncio
 async def test_multi_district_total_is_sum_and_progress_is_auditable(tmp_path, fake_runtime):
     db = Database(tmp_path / "districts.db")
     db.initialize()
