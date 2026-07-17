@@ -99,6 +99,14 @@ async def wait_job(manager, job_id):
     await task
 
 
+def disable_request_throttle(monkeypatch):
+    """单元测试不触发真实 5 秒访问间隔；生产 SafetyConfig 不变。"""
+    async def _no_wait(self):
+        return None
+
+    monkeypatch.setattr("app.safety.SafetyController.before_request", _no_wait)
+
+
 @pytest.mark.asyncio
 async def test_limited_scan_is_partial_and_resume_keeps_limit(tmp_path, fake_runtime):
     db = Database(tmp_path / "jobs.db")
@@ -687,3 +695,839 @@ async def test_scheduler_runs_different_hosts_in_parallel_and_same_host_serially
     release_first.set()
     await asyncio.gather(first_task, second_task)
     assert started == [first_id, second_id]
+
+
+@pytest.mark.asyncio
+async def test_putuo_capped_scan_refreshes_real_total_before_complete(tmp_path, monkeypatch):
+    disable_request_throttle(monkeypatch)
+    """截断分页结束后，应用实际唯一条数覆盖 10000 上限并完成校验。"""
+    from app.putuo_collector import PutuoDistrictCollector, PUTUO_QUERY_CONTRACT
+
+    page_size = 3
+    cap = 10  # residual on last page = 1, but page 4 returns 3
+    pages = {
+        1: {
+            "list": [{"id": i, "doc_flag": "1", "title": f"t{i}", "url": f"/{i}.html"} for i in range(1, 4)],
+            "pageNo": 1, "totalPage": 4, "totalCount": cap,
+        },
+        2: {
+            "list": [{"id": i, "doc_flag": "1", "title": f"t{i}", "url": f"/{i}.html"} for i in range(4, 7)],
+            "pageNo": 2, "totalPage": 4, "totalCount": cap,
+        },
+        3: {
+            "list": [{"id": i, "doc_flag": "1", "title": f"t{i}", "url": f"/{i}.html"} for i in range(7, 10)],
+            "pageNo": 3, "totalPage": 4, "totalCount": cap,
+        },
+        4: {
+            "list": [{"id": i, "doc_flag": "1", "title": f"t{i}", "url": f"/{i}.html"} for i in range(10, 13)],
+            "pageNo": 4, "totalPage": 4, "totalCount": cap,
+        },
+        5: {
+            "list": [{"id": i, "doc_flag": "1", "title": f"t{i}", "url": f"/{i}.html"} for i in range(13, 15)],
+            "pageNo": 4, "totalPage": 4, "totalCount": cap,
+        },
+        6: {"list": [], "pageNo": 0, "totalPage": 0, "totalCount": 0},
+    }
+
+    class MultiPageRequest:
+        async def post(self, _url, *, data, timeout, fail_on_status_code):
+            from tests.test_collector_parsing import FakePutuoApiResponse
+            return FakePutuoApiResponse({"data": pages[int(data["pageNo"])]})
+
+    class CappedCollector(PutuoDistrictCollector):
+        def __init__(self, browser, safety, target):
+            super().__init__(
+                browser, safety, target,
+                page_size=page_size, api_total_cap=cap, capped_max_extra_pages=20,
+            )
+            self.page = object()
+            self.context = type("Context", (), {"request": MultiPageRequest()})()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def check_robots(self):
+            return None
+
+        async def safe_goto(self, page, url):
+            return None
+
+        async def open_item(self, item):
+            return PolicyRecord(
+                district=item.district, title=item.title, url=item.url,
+                published_date=item.published_date or date(2026, 7, 1),
+                authored_date=item.published_date or date(2026, 7, 1),
+            )
+
+    db = Database(tmp_path / "putuo-capped-complete.db")
+    db.initialize()
+    monkeypatch.setattr("app.jobs.async_playwright", lambda: FakePlaywrightContext())
+    monkeypatch.setattr("app.jobs.PutuoDistrictCollector", CappedCollector)
+    manager = JobManager(db)
+    job_id = await manager.create_and_start(["区级网站·普陀区·委办局"], "full")
+    await wait_job(manager, job_id)
+    job = db.get_job(job_id)
+    assert job["status"] == "completed"
+    assert job["coverage_status"] == "complete"
+    assert job["examined_count"] == 14
+    assert job["estimated_total"] == 14
+    assert json.loads(job["total_by_district_json"]) == {"区级网站·普陀区·委办局": 14}
+    assert json.loads(job["examined_by_district_json"]) == {"区级网站·普陀区·委办局": 14}
+    assert json.loads(job["safety_json"])["query_contract"] == PUTUO_QUERY_CONTRACT
+
+
+@pytest.mark.asyncio
+async def test_putuo_capped_unresolved_cannot_complete(tmp_path, monkeypatch):
+    disable_request_throttle(monkeypatch)
+    from app.putuo_collector import PutuoDistrictCollector
+
+    page_size = 3
+    cap = 10
+    repeated = {
+        "list": [{"id": i, "doc_flag": "1", "title": f"t{i}", "url": f"/{i}.html"} for i in range(10, 13)],
+        "pageNo": 4, "totalPage": 4, "totalCount": cap,
+    }
+    pages = {
+        1: {
+            "list": [{"id": i, "doc_flag": "1", "title": f"t{i}", "url": f"/{i}.html"} for i in range(1, 4)],
+            "pageNo": 1, "totalPage": 4, "totalCount": cap,
+        },
+        2: {
+            "list": [{"id": i, "doc_flag": "1", "title": f"t{i}", "url": f"/{i}.html"} for i in range(4, 7)],
+            "pageNo": 2, "totalPage": 4, "totalCount": cap,
+        },
+        3: {
+            "list": [{"id": i, "doc_flag": "1", "title": f"t{i}", "url": f"/{i}.html"} for i in range(7, 10)],
+            "pageNo": 3, "totalPage": 4, "totalCount": cap,
+        },
+        4: repeated,
+        5: repeated,  # beyond declared, full page of already-seen ids
+    }
+
+    class MultiPageRequest:
+        async def post(self, _url, *, data, timeout, fail_on_status_code):
+            from tests.test_collector_parsing import FakePutuoApiResponse
+            return FakePutuoApiResponse({"data": pages[int(data["pageNo"])]})
+
+    class CappedCollector(PutuoDistrictCollector):
+        def __init__(self, browser, safety, target):
+            super().__init__(
+                browser, safety, target,
+                page_size=page_size, api_total_cap=cap, capped_max_extra_pages=20,
+            )
+            self.page = object()
+            self.context = type("Context", (), {"request": MultiPageRequest()})()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def check_robots(self):
+            return None
+
+        async def safe_goto(self, page, url):
+            return None
+
+        async def open_item(self, item):
+            return PolicyRecord(
+                district=item.district, title=item.title, url=item.url,
+                published_date=item.published_date or date(2026, 7, 1),
+                authored_date=item.published_date or date(2026, 7, 1),
+            )
+
+    db = Database(tmp_path / "putuo-capped-unresolved.db")
+    db.initialize()
+    monkeypatch.setattr("app.jobs.async_playwright", lambda: FakePlaywrightContext())
+    monkeypatch.setattr("app.jobs.PutuoDistrictCollector", CappedCollector)
+    manager = JobManager(db)
+    job_id = await manager.create_and_start(["区级网站·普陀区·委办局"], "full")
+    await wait_job(manager, job_id)
+    job = db.get_job(job_id)
+    assert job["status"] == "paused"
+    assert job["coverage_status"] == "partial"
+    assert "重复返回已扫描记录" in job["pause_reason"]
+
+
+@pytest.mark.asyncio
+async def test_old_putuo_query_contract_blocks_resume_and_baseline(tmp_path, fake_runtime, monkeypatch):
+    disable_request_throttle(monkeypatch)
+    from app.putuo_collector import PUTUO_QUERY_CONTRACT
+
+    db = Database(tmp_path / "putuo-contract.db")
+    db.initialize()
+    manager = JobManager(db)
+
+    old_job = db.create_job(
+        ["区级网站·普陀区·区政府文件"],
+        "full",
+        {"min_delay_seconds": 5, "query_contract": "putuo-legacy-v1"},
+        0,
+    )
+    db.update_job(old_job, status="paused", coverage_status="partial", pause_reason="旧暂停")
+    with pytest.raises(ValueError, match="查询契约已失效"):
+        await manager.resume(old_job)
+
+    old_baseline = db.create_job(
+        ["区级网站·普陀区·区政府文件"],
+        "full",
+        {"min_delay_seconds": 5},
+        0,
+    )
+    db.update_job(
+        old_baseline, status="completed", coverage_status="complete", completion_kind="full",
+        estimated_total=1, examined_count=1,
+    )
+    with db.connect() as conn:
+        conn.execute(
+            """INSERT INTO scan_item_results(
+                job_id,target_key,source_label,channel_id,page_number,item_index,title,url,detail_status,header_detected,checked_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                old_baseline, "putuo_government", "区级网站·普陀区·区政府文件", "3",
+                1, 0, "t", "https://www.shpt.gov.cn/a.html", "checked_complete", 1, "2026-07-17T00:00:00+00:00",
+            ),
+        )
+    with pytest.raises(ValueError, match="查询契约已过期"):
+        await manager.create_and_start(
+            ["区级网站·普陀区·区政府文件"], "incremental", baseline_job_id=old_baseline,
+        )
+
+    # 新任务应写入当前契约
+    fake_runtime.datasets = {
+        "普陀区": [item("普陀区", 0, "only")],
+    }
+    # putuo collector path: patch PutuoDistrictCollector to Fake-like
+    class SimplePutuo(FakeCollector):
+        def __init__(self, browser, safety, target):
+            super().__init__(browser, safety)
+            self.target = target
+            self._total = 1
+
+        async def estimated_total(self):
+            return 1
+
+        async def iter_items(self, district, start_page=1, start_item_index=-1):
+            yield PolicyListItem(
+                district="普陀区", page_number=1, item_index=0, title="only",
+                url="https://www.shpt.gov.cn/only.html", published_date=date(2026, 7, 1),
+                source_site=self.target.label, source_key=self.target.key,
+            )
+
+        async def open_item(self, policy_item):
+            return PolicyRecord(
+                district=policy_item.district, title=policy_item.title, url=policy_item.url,
+                published_date=policy_item.published_date, authored_date=policy_item.published_date,
+            )
+
+    import app.jobs as jobs_mod
+    original = jobs_mod.PutuoDistrictCollector
+    jobs_mod.PutuoDistrictCollector = SimplePutuo
+    try:
+        new_job = await manager.create_and_start(["区级网站·普陀区·区政府文件"], "full")
+        await wait_job(manager, new_job)
+    finally:
+        jobs_mod.PutuoDistrictCollector = original
+    created = db.get_job(new_job)
+    assert json.loads(created["safety_json"])["query_contract"] == PUTUO_QUERY_CONTRACT
+
+
+@pytest.mark.asyncio
+async def test_automatic_plan_skips_old_putuo_contract_resume(tmp_path):
+    db = Database(tmp_path / "auto-skip-old.db")
+    db.initialize()
+    manager = JobManager(db)
+    old_job = db.create_job(
+        ["区级网站·普陀区·区政府文件"],
+        "full",
+        {"query_contract": "putuo-legacy-v1"},
+        0,
+    )
+    db.update_job(old_job, status="partial", coverage_status="partial")
+    plan = manager.automatic_plan(["区级网站·普陀区·区政府文件"])
+    assert plan["action"] == "create"
+    assert plan["mode"] == "full"
+
+
+
+@pytest.mark.asyncio
+async def test_resume_preserves_completed_capped_target_real_total(tmp_path, monkeypatch):
+    """已完成截断来源的真实总量不得被恢复时首屏 10000 覆盖。"""
+    from app.putuo_collector import PutuoDistrictCollector, PUTUO_QUERY_CONTRACT
+    from app.safety import SafetyController
+
+    disable_request_throttle(monkeypatch)
+
+    page_size = 3
+    cap = 10
+    pages = {
+        1: {
+            "list": [{"id": i, "doc_flag": "1", "title": f"t{i}", "url": f"/{i}.html"} for i in range(1, 4)],
+            "pageNo": 1, "totalPage": 4, "totalCount": cap,
+        },
+        2: {
+            "list": [{"id": i, "doc_flag": "1", "title": f"t{i}", "url": f"/{i}.html"} for i in range(4, 7)],
+            "pageNo": 2, "totalPage": 4, "totalCount": cap,
+        },
+        3: {
+            "list": [{"id": i, "doc_flag": "1", "title": f"t{i}", "url": f"/{i}.html"} for i in range(7, 10)],
+            "pageNo": 3, "totalPage": 4, "totalCount": cap,
+        },
+        4: {
+            "list": [{"id": i, "doc_flag": "1", "title": f"t{i}", "url": f"/{i}.html"} for i in range(10, 13)],
+            "pageNo": 4, "totalPage": 4, "totalCount": cap,
+        },
+        5: {
+            "list": [{"id": i, "doc_flag": "1", "title": f"t{i}", "url": f"/{i}.html"} for i in range(13, 15)],
+            "pageNo": 4, "totalPage": 4, "totalCount": cap,
+        },
+        6: {"list": [], "pageNo": 0, "totalPage": 0, "totalCount": 0},
+    }
+    select_calls = []
+
+    class MultiPageRequest:
+        async def post(self, _url, *, data, timeout, fail_on_status_code):
+            from tests.test_collector_parsing import FakePutuoApiResponse
+            return FakePutuoApiResponse({"data": pages[int(data["pageNo"])]})
+
+    class CappedCollector(PutuoDistrictCollector):
+        def __init__(self, browser, safety, target):
+            super().__init__(
+                browser, safety, target,
+                page_size=page_size, api_total_cap=cap, capped_max_extra_pages=20,
+            )
+            self.page = object()
+            self.context = type("Context", (), {"request": MultiPageRequest()})()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def check_robots(self):
+            return None
+
+        async def safe_goto(self, page, url):
+            return None
+
+        async def select_district(self, district):
+            select_calls.append(self.target.label)
+            return await super().select_district(district)
+
+        async def open_item(self, item):
+            return PolicyRecord(
+                district=item.district, title=item.title, url=item.url,
+                published_date=date(2026, 7, 1), authored_date=date(2026, 7, 1),
+            )
+
+        async def open_detail_url(self, district, url, title):
+            return PolicyRecord(
+                district=district, title=title, url=url,
+                published_date=date(2026, 7, 1), authored_date=date(2026, 7, 1),
+            )
+
+    db = Database(tmp_path / "preserve-capped-total.db")
+    db.initialize()
+    monkeypatch.setattr("app.jobs.async_playwright", lambda: FakePlaywrightContext())
+    monkeypatch.setattr("app.jobs.PutuoDistrictCollector", CappedCollector)
+    manager = JobManager(db)
+
+    # 先跑完委办局，得到真实总量 14
+    job_id = await manager.create_and_start(["区级网站·普陀区·委办局"], "full")
+    await wait_job(manager, job_id)
+    job = db.get_job(job_id)
+    assert job["status"] == "completed"
+    assert json.loads(job["total_by_district_json"])["区级网站·普陀区·委办局"] == 14
+
+    # 模拟：任务在“异常复测阶段”暂停（列表已完成，index == len(targets)）
+    db.update_job(
+        job_id, status="paused", coverage_status="partial", completion_kind="data_pause",
+        current_district_index=1, finished_at=None, pause_reason="模拟复测阶段暂停",
+    )
+    select_calls.clear()
+    examined_before = int(job["examined_count"])
+    with db.connect() as conn:
+        item_count_before = conn.execute(
+            "SELECT COUNT(*) FROM scan_item_results WHERE job_id=?", (job_id,)
+        ).fetchone()[0]
+
+    await manager.resume(job_id)
+    await wait_job(manager, job_id)
+    resumed = db.get_job(job_id)
+    assert resumed["status"] == "completed"
+    assert json.loads(resumed["total_by_district_json"])["区级网站·普陀区·委办局"] == 14
+    assert resumed["estimated_total"] == 14
+    assert resumed["examined_count"] == examined_before
+    with db.connect() as conn:
+        item_count_after = conn.execute(
+            "SELECT COUNT(*) FROM scan_item_results WHERE job_id=?", (job_id,)
+        ).fetchone()[0]
+    assert item_count_after == item_count_before
+    # 已完成来源在预初始化时不得 select_district 重写总量
+    assert select_calls == []
+
+
+@pytest.mark.asyncio
+async def test_multi_source_resume_skips_completed_capped_total_and_continues(tmp_path, monkeypatch):
+    """多来源：已完成截断 B 保持 14，当前 C 可继续，最终覆盖一致。"""
+    from app.putuo_collector import PutuoDistrictCollector, PUTUO_QUERY_CONTRACT
+
+    disable_request_throttle(monkeypatch)
+
+    page_size = 3
+    cap = 10
+    bureau_pages = {
+        1: {
+            "list": [{"id": i, "doc_flag": "1", "title": f"b{i}", "url": f"/b{i}.html"} for i in range(1, 4)],
+            "pageNo": 1, "totalPage": 4, "totalCount": cap,
+        },
+        2: {
+            "list": [{"id": i, "doc_flag": "1", "title": f"b{i}", "url": f"/b{i}.html"} for i in range(4, 7)],
+            "pageNo": 2, "totalPage": 4, "totalCount": cap,
+        },
+        3: {
+            "list": [{"id": i, "doc_flag": "1", "title": f"b{i}", "url": f"/b{i}.html"} for i in range(7, 10)],
+            "pageNo": 3, "totalPage": 4, "totalCount": cap,
+        },
+        4: {
+            "list": [{"id": i, "doc_flag": "1", "title": f"b{i}", "url": f"/b{i}.html"} for i in range(10, 13)],
+            "pageNo": 4, "totalPage": 4, "totalCount": cap,
+        },
+        5: {
+            "list": [{"id": i, "doc_flag": "1", "title": f"b{i}", "url": f"/b{i}.html"} for i in range(13, 15)],
+            "pageNo": 4, "totalPage": 4, "totalCount": cap,
+        },
+        6: {"list": [], "pageNo": 0, "totalPage": 0, "totalCount": 0},
+    }
+    gov_items = [
+        PolicyListItem(
+            district="普陀区", page_number=1, item_index=0, title="gov0",
+            url="https://www.shpt.gov.cn/g0.html", published_date=date(2026, 7, 1),
+            source_site="区级网站·普陀区·区政府文件", source_key="putuo_government",
+        )
+    ]
+    town_items = [
+        PolicyListItem(
+            district="普陀区", page_number=1, item_index=0, title="town0",
+            url="https://www.shpt.gov.cn/t0.html", published_date=date(2026, 7, 1),
+            source_site="区级网站·普陀区·街道镇", source_key="putuo_towns",
+        ),
+        PolicyListItem(
+            district="普陀区", page_number=1, item_index=1, title="town1",
+            url="https://www.shpt.gov.cn/t1.html", published_date=date(2026, 7, 1),
+            source_site="区级网站·普陀区·街道镇", source_key="putuo_towns",
+        ),
+    ]
+    select_labels = []
+    open_urls = []
+    pause_after_first_town = {"done": False}
+
+    class MultiPageRequest:
+        async def post(self, _url, *, data, timeout, fail_on_status_code):
+            from tests.test_collector_parsing import FakePutuoApiResponse
+            return FakePutuoApiResponse({"data": bureau_pages[int(data["pageNo"])]})
+
+    class HybridCollector(PutuoDistrictCollector):
+        def __init__(self, browser, safety, target):
+            super().__init__(
+                browser, safety, target,
+                page_size=page_size, api_total_cap=cap, capped_max_extra_pages=20,
+            )
+            self.page = object()
+            self.context = type("Context", (), {"request": MultiPageRequest()})()
+            self._fake_total = 1 if target.key != "putuo_towns" else 2
+            if target.key == "putuo_government":
+                self._fake_items = gov_items
+            elif target.key == "putuo_towns":
+                self._fake_items = town_items
+            else:
+                self._fake_items = None
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def check_robots(self):
+            return None
+
+        async def safe_goto(self, page, url):
+            return None
+
+        async def select_district(self, district):
+            select_labels.append(self.target.label)
+            if self._fake_items is not None:
+                self._estimated_total = self._fake_total
+                self._total_count = self._fake_total
+                return None
+            return await super().select_district(district)
+
+        async def estimated_total(self):
+            if self._fake_items is not None:
+                return self._fake_total
+            return await super().estimated_total()
+
+        async def iter_items(self, district, start_page=1, start_item_index=-1):
+            if self._fake_items is not None:
+                for policy_item in self._fake_items:
+                    if policy_item.page_number < start_page:
+                        continue
+                    if policy_item.page_number == start_page and policy_item.item_index <= start_item_index:
+                        continue
+                    yield policy_item
+                return
+            async for policy_item in super().iter_items(district, start_page, start_item_index):
+                yield policy_item
+
+        async def open_item(self, policy_item):
+            open_urls.append(policy_item.url)
+            if self.target.key == "putuo_towns" and not pause_after_first_town["done"]:
+                pause_after_first_town["done"] = True
+                raise SafetyPause("模拟街道镇中途暂停")
+            return PolicyRecord(
+                district=policy_item.district, title=policy_item.title, url=policy_item.url,
+                published_date=date(2026, 7, 1), authored_date=date(2026, 7, 1),
+            )
+
+        async def open_detail_url(self, district, url, title):
+            return PolicyRecord(
+                district=district, title=title, url=url,
+                published_date=date(2026, 7, 1), authored_date=date(2026, 7, 1),
+            )
+
+    db = Database(tmp_path / "multi-source-resume.db")
+    db.initialize()
+    monkeypatch.setattr("app.jobs.async_playwright", lambda: FakePlaywrightContext())
+    monkeypatch.setattr("app.jobs.PutuoDistrictCollector", HybridCollector)
+    manager = JobManager(db)
+    sources = [
+        "区级网站·普陀区·区政府文件",
+        "区级网站·普陀区·委办局",
+        "区级网站·普陀区·街道镇",
+    ]
+    job_id = await manager.create_and_start(sources, "full")
+    await wait_job(manager, job_id)
+    paused = db.get_job(job_id)
+    assert paused["status"] == "paused"
+    assert "模拟街道镇中途暂停" in paused["pause_reason"]
+    totals = json.loads(paused["total_by_district_json"])
+    assert totals["区级网站·普陀区·委办局"] == 14
+    assert paused["current_district_index"] == 2
+
+    select_labels.clear()
+    open_urls.clear()
+    pause_after_first_town["done"] = True  # 恢复后不再暂停
+
+    await manager.resume(job_id)
+    await wait_job(manager, job_id)
+    done = db.get_job(job_id)
+    assert done["status"] == "completed"
+    totals = json.loads(done["total_by_district_json"])
+    examined = json.loads(done["examined_by_district_json"])
+    assert totals["区级网站·普陀区·委办局"] == 14
+    assert totals["区级网站·普陀区·区政府文件"] == 1
+    assert totals["区级网站·普陀区·街道镇"] == 2
+    assert examined == totals
+    assert done["estimated_total"] == 17
+    assert done["examined_count"] == 17
+    with db.connect() as conn:
+        item_count = conn.execute(
+            "SELECT COUNT(*) FROM scan_item_results WHERE job_id=?", (job_id,)
+        ).fetchone()[0]
+    assert item_count == 17
+    # 恢复预初始化：已完成 gov/bureaus 不 select；街道镇要 select
+    assert "区级网站·普陀区·委办局" not in select_labels
+    assert "区级网站·普陀区·区政府文件" not in select_labels
+    assert "区级网站·普陀区·街道镇" in select_labels
+    # 街道镇剩余条目被扫描（第 0 条可能在恢复时复用已落库结果）
+    assert any(url.endswith("t1.html") for url in open_urls) or done["examined_count"] == 17
+
+
+@pytest.mark.asyncio
+async def test_resume_during_exception_retest_preserves_all_final_totals(tmp_path, monkeypatch):
+    """列表全部完成后在异常复测阶段恢复，不得覆盖任何最终总量。"""
+    from app.putuo_collector import PutuoDistrictCollector
+
+    disable_request_throttle(monkeypatch)
+
+    page_size = 3
+    cap = 10
+    pages = {
+        1: {
+            "list": [{"id": i, "doc_flag": "1", "title": f"t{i}", "url": f"/{i}.html"} for i in range(1, 4)],
+            "pageNo": 1, "totalPage": 4, "totalCount": cap,
+        },
+        2: {
+            "list": [{"id": i, "doc_flag": "1", "title": f"t{i}", "url": f"/{i}.html"} for i in range(4, 7)],
+            "pageNo": 2, "totalPage": 4, "totalCount": cap,
+        },
+        3: {
+            "list": [{"id": i, "doc_flag": "1", "title": f"t{i}", "url": f"/{i}.html"} for i in range(7, 10)],
+            "pageNo": 3, "totalPage": 4, "totalCount": cap,
+        },
+        4: {
+            "list": [{"id": i, "doc_flag": "1", "title": f"t{i}", "url": f"/{i}.html"} for i in range(10, 13)],
+            "pageNo": 4, "totalPage": 4, "totalCount": cap,
+        },
+        5: {
+            "list": [{"id": i, "doc_flag": "1", "title": f"t{i}", "url": f"/{i}.html"} for i in range(13, 15)],
+            "pageNo": 4, "totalPage": 4, "totalCount": cap,
+        },
+        6: {"list": [], "pageNo": 0, "totalPage": 0, "totalCount": 0},
+    }
+    retest_calls = []
+    select_calls = []
+
+    class MultiPageRequest:
+        async def post(self, _url, *, data, timeout, fail_on_status_code):
+            from tests.test_collector_parsing import FakePutuoApiResponse
+            return FakePutuoApiResponse({"data": pages[int(data["pageNo"])]})
+
+    class CappedCollector(PutuoDistrictCollector):
+        def __init__(self, browser, safety, target):
+            super().__init__(
+                browser, safety, target,
+                page_size=page_size, api_total_cap=cap, capped_max_extra_pages=20,
+            )
+            self.page = object()
+            self.context = type("Context", (), {"request": MultiPageRequest()})()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def check_robots(self):
+            return None
+
+        async def safe_goto(self, page, url):
+            return None
+
+        async def select_district(self, district):
+            select_calls.append(self.target.label)
+            return await super().select_district(district)
+
+        async def open_item(self, item):
+            if item.item_index == 0 and item.page_number == 1:
+                raise ItemReviewRequired("模拟首条异常", "detail_metadata")
+            return PolicyRecord(
+                district=item.district, title=item.title, url=item.url,
+                published_date=date(2026, 7, 1), authored_date=date(2026, 7, 1),
+            )
+
+        async def open_detail_url(self, district, url, title):
+            retest_calls.append(url)
+            return PolicyRecord(
+                district=district, title=title, url=url,
+                published_date=date(2026, 7, 1), authored_date=date(2026, 7, 1),
+            )
+
+    db = Database(tmp_path / "retest-resume.db")
+    db.initialize()
+    monkeypatch.setattr("app.jobs.async_playwright", lambda: FakePlaywrightContext())
+    monkeypatch.setattr("app.jobs.PutuoDistrictCollector", CappedCollector)
+    manager = JobManager(db)
+    job_id = await manager.create_and_start(["区级网站·普陀区·委办局"], "full")
+    await wait_job(manager, job_id)
+    completed = db.get_job(job_id)
+    # 正常路径会完成；改为模拟复测阶段暂停
+    assert completed["status"] == "completed"
+    assert json.loads(completed["total_by_district_json"])["区级网站·普陀区·委办局"] == 14
+
+    # 复用首轮扫描产生的异常记录（若已 resolve 则重置为 pending），并把任务拨回复测阶段
+    with db.connect() as conn:
+        existing = conn.execute(
+            "SELECT id,status FROM scan_exceptions WHERE job_id=? AND url=?",
+            (job_id, "https://www.shpt.gov.cn/1.html"),
+        ).fetchone()
+        if existing:
+            conn.execute(
+                """UPDATE scan_exceptions
+                SET status='pending', retry_count=0, resolved_at=NULL, last_error='模拟首条异常'
+                WHERE id=?""",
+                (existing["id"],),
+            )
+        else:
+            conn.execute(
+                """INSERT INTO scan_exceptions(
+                    job_id,district,page_number,item_index,title,url,category,first_error,last_error,status,retry_count,first_seen_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    job_id, "普陀区", 1, 0, "t1", "https://www.shpt.gov.cn/1.html",
+                    "detail_metadata", "模拟首条异常", "模拟首条异常", "pending", 0, "2026-07-17T00:00:00+00:00",
+                ),
+            )
+    # 回退到“列表完成、异常待复测”的计数：1 条 skipped 待复测，13 条已处理。
+    db.update_job(
+        job_id, status="paused", coverage_status="partial", completion_kind="exception_queued",
+        current_district_index=1, finished_at=None, pause_reason="异常复测前暂停",
+        estimated_total=14,
+        total_by_district_json=json.dumps({"区级网站·普陀区·委办局": 14}, ensure_ascii=False),
+        examined_by_district_json=json.dumps({"区级网站·普陀区·委办局": 14}, ensure_ascii=False),
+        examined_count=14, processed_count=13, skipped_count=1,
+    )
+    select_calls.clear()
+    retest_calls.clear()
+
+    await manager.resume(job_id)
+    await wait_job(manager, job_id)
+    done = db.get_job(job_id)
+    assert done["status"] == "completed"
+    assert json.loads(done["total_by_district_json"])["区级网站·普陀区·委办局"] == 14
+    assert done["estimated_total"] == 14
+    assert done["examined_count"] == 14
+    assert select_calls == []
+    assert retest_calls == ["https://www.shpt.gov.cn/1.html"]
+    with db.connect() as conn:
+        item_count = conn.execute(
+            "SELECT COUNT(*) FROM scan_item_results WHERE job_id=?", (job_id,)
+        ).fetchone()[0]
+    assert item_count == 14
+
+
+@pytest.mark.asyncio
+async def test_incomplete_normal_target_still_pauses_when_total_changes(tmp_path, fake_runtime, monkeypatch):
+    """未完成的普通来源恢复时总量变化仍必须 SafetyPause。"""
+    disable_request_throttle(monkeypatch)
+
+    class ChangingTotalCollector(FakeCollector):
+        totals = {"普陀区": 2}
+
+        async def estimated_total(self):
+            return self.totals[self.current_district or "普陀区"]
+
+        async def select_district(self, district):
+            self.current_district = district
+
+    db = Database(tmp_path / "normal-total-change.db")
+    db.initialize()
+    monkeypatch.setattr("app.jobs.async_playwright", lambda: FakePlaywrightContext())
+    monkeypatch.setattr("app.jobs.BrowserCollector", ChangingTotalCollector)
+    ChangingTotalCollector.datasets = {
+        "普陀区": [item("普陀区", 0, "a"), item("普陀区", 1, "b")],
+    }
+    ChangingTotalCollector.opened = []
+    manager = JobManager(db)
+    job_id = await manager.create_and_start(["市级平台·普陀区"], "full", max_documents=1)
+    await wait_job(manager, job_id)
+    paused = db.get_job(job_id)
+    assert paused["status"] == "partial"
+    assert json.loads(paused["total_by_district_json"])["市级平台·普陀区"] == 2
+
+    ChangingTotalCollector.totals["普陀区"] = 3
+    await manager.resume(job_id)
+    await wait_job(manager, job_id)
+    failed = db.get_job(job_id)
+    assert failed["status"] == "paused"
+    assert "列表总量在任务恢复后发生变化" in failed["pause_reason"]
+    assert "原 2 条，现 3 条" in failed["pause_reason"]
+
+
+@pytest.mark.asyncio
+async def test_incomplete_capped_target_resume_from_beyond_declared_page(tmp_path, monkeypatch):
+    """未完成截断来源可从超声明页码恢复，真实总量 = 已覆盖 + 本轮新增。"""
+    from app.putuo_collector import PutuoDistrictCollector
+
+    disable_request_throttle(monkeypatch)
+
+    page_size = 3
+    cap = 10
+    pages = {
+        1: {
+            "list": [{"id": i, "doc_flag": "1", "title": f"t{i}", "url": f"/{i}.html"} for i in range(1, 4)],
+            "pageNo": 1, "totalPage": 4, "totalCount": cap,
+        },
+        2: {
+            "list": [{"id": i, "doc_flag": "1", "title": f"t{i}", "url": f"/{i}.html"} for i in range(4, 7)],
+            "pageNo": 2, "totalPage": 4, "totalCount": cap,
+        },
+        3: {
+            "list": [{"id": i, "doc_flag": "1", "title": f"t{i}", "url": f"/{i}.html"} for i in range(7, 10)],
+            "pageNo": 3, "totalPage": 4, "totalCount": cap,
+        },
+        4: {
+            "list": [{"id": i, "doc_flag": "1", "title": f"t{i}", "url": f"/{i}.html"} for i in range(10, 13)],
+            "pageNo": 4, "totalPage": 4, "totalCount": cap,
+        },
+        5: {
+            "list": [{"id": i, "doc_flag": "1", "title": f"t{i}", "url": f"/{i}.html"} for i in range(13, 15)],
+            "pageNo": 4, "totalPage": 4, "totalCount": cap,
+        },
+        6: {"list": [], "pageNo": 0, "totalPage": 0, "totalCount": 0},
+    }
+    opened = []
+    pause_at_url = "/12.html"
+
+    class MultiPageRequest:
+        async def post(self, _url, *, data, timeout, fail_on_status_code):
+            from tests.test_collector_parsing import FakePutuoApiResponse
+            return FakePutuoApiResponse({"data": pages[int(data["pageNo"])]})
+
+    class CappedCollector(PutuoDistrictCollector):
+        def __init__(self, browser, safety, target):
+            super().__init__(
+                browser, safety, target,
+                page_size=page_size, api_total_cap=cap, capped_max_extra_pages=20,
+            )
+            self.page = object()
+            self.context = type("Context", (), {"request": MultiPageRequest()})()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def check_robots(self):
+            return None
+
+        async def safe_goto(self, page, url):
+            return None
+
+        async def open_item(self, item):
+            opened.append((item.page_number, item.item_index, item.url))
+            if item.url.endswith(pause_at_url):
+                raise SafetyPause("截断扫描中途暂停")
+            return PolicyRecord(
+                district=item.district, title=item.title, url=item.url,
+                published_date=date(2026, 7, 1), authored_date=date(2026, 7, 1),
+            )
+
+    db = Database(tmp_path / "capped-mid-resume.db")
+    db.initialize()
+    monkeypatch.setattr("app.jobs.async_playwright", lambda: FakePlaywrightContext())
+    monkeypatch.setattr("app.jobs.PutuoDistrictCollector", CappedCollector)
+    manager = JobManager(db)
+    job_id = await manager.create_and_start(["区级网站·普陀区·委办局"], "full")
+    await wait_job(manager, job_id)
+    paused = db.get_job(job_id)
+    assert paused["status"] == "paused"
+    assert "截断扫描中途暂停" in paused["pause_reason"]
+    # 第 4 页 item_index 2 是 id=12；暂停发生在处理该条时，游标可能已到该条
+    assert int(paused["current_page"]) >= 4
+    examined_mid = int(paused["examined_count"])
+    assert examined_mid >= 11  # 前 11 条已推进或含暂停条
+
+    opened.clear()
+    # 恢复后不再暂停
+    pause_at_url = "/never.html"
+    await manager.resume(job_id)
+    await wait_job(manager, job_id)
+    done = db.get_job(job_id)
+    assert done["status"] == "completed"
+    assert done["estimated_total"] == 14
+    assert done["examined_count"] == 14
+    assert json.loads(done["total_by_district_json"])["区级网站·普陀区·委办局"] == 14
+    assert json.loads(done["examined_by_district_json"])["区级网站·普陀区·委办局"] == 14
+    with db.connect() as conn:
+        item_count = conn.execute(
+            "SELECT COUNT(*) FROM scan_item_results WHERE job_id=?", (job_id,)
+        ).fetchone()[0]
+    assert item_count == 14

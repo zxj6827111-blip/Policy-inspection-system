@@ -22,7 +22,7 @@ from app.domain import (
     PolicyRecord,
     SafetyPause,
 )
-from app.putuo_collector import PutuoDistrictCollector
+from app.putuo_collector import PUTUO_QUERY_CONTRACT, PutuoDistrictCollector
 from app.repository import PAGE_LINK_CHECK_VERSION, Repository
 from app.rules import WorkdayCalendar, evaluate_record
 from app.safety import SafetyController
@@ -52,10 +52,11 @@ class JobManager:
                 self._validate_incremental_baseline(districts, baseline_job_id)
             elif baseline_job_id is not None:
                 raise ValueError("全量扫描不能指定基准任务")
-            safety = SafetyConfig()
-            job_id = self.db.create_job(districts, mode, asdict(safety), max_documents, baseline_job_id)
+            safety = self._safety_payload(districts)
+            job_id = self.db.create_job(districts, mode, safety, max_documents, baseline_job_id)
             self._tasks[job_id] = asyncio.create_task(self._run(job_id))
             return job_id
+
 
     @staticmethod
     def _job_sources(job: dict) -> list[str]:
@@ -69,6 +70,43 @@ class JobManager:
             except (KeyError, TypeError, json.JSONDecodeError):
                 sources = []
         return sorted(str(source) for source in sources)
+
+    @staticmethod
+    def _targets_include_putuo(districts: list[str]) -> bool:
+        for value in districts:
+            try:
+                if resolve_target(value).collector_type == "putuo":
+                    return True
+            except ValueError:
+                continue
+        return False
+
+    @classmethod
+    def _safety_payload(cls, districts: list[str], safety: dict | None = None) -> dict:
+        payload = dict(safety or asdict(SafetyConfig()))
+        if cls._targets_include_putuo(districts):
+            payload["query_contract"] = PUTUO_QUERY_CONTRACT
+        return payload
+
+    @classmethod
+    def _job_query_contract(cls, job: dict) -> str:
+        try:
+            safety = json.loads(job.get("safety_json") or "{}")
+        except (TypeError, json.JSONDecodeError):
+            safety = {}
+        return str(safety.get("query_contract") or "")
+
+    @classmethod
+    def _assert_putuo_query_contract(cls, job: dict, *, action: str) -> None:
+        districts = cls._job_sources(job)
+        if not cls._targets_include_putuo(districts):
+            return
+        contract = cls._job_query_contract(job)
+        if contract != PUTUO_QUERY_CONTRACT:
+            raise ValueError(
+                f"旧普陀区任务的列表查询契约已失效（当前需要 {PUTUO_QUERY_CONTRACT}），"
+                f"不能{action}。请通过“完整全量重建”创建新任务，勿恢复修复前的 paused/partial 任务"
+            )
 
     def _matching_jobs(self, districts: list[str]) -> list[dict]:
         signature = sorted(districts)
@@ -104,16 +142,22 @@ class JobManager:
             and latest["status"] in resumable
             and (not baseline or int(latest["id"]) > int(baseline["id"]))
         ):
-            action = "existing" if latest["status"] in {
-                JobStatus.PENDING, JobStatus.RUNNING, JobStatus.COOLING,
-            } else "resume"
-            return {
-                "action": action,
-                "mode": latest["mode"],
-                "baseline_job_id": latest["baseline_job_id"],
-                "job": latest,
-                "baseline": baseline,
-            }
+            try:
+                self._assert_putuo_query_contract(latest, action="恢复")
+            except ValueError:
+                # 查询契约已变化的旧任务不可自动恢复，改为创建新任务。
+                latest = None
+            if latest is not None:
+                action = "existing" if latest["status"] in {
+                    JobStatus.PENDING, JobStatus.RUNNING, JobStatus.COOLING,
+                } else "resume"
+                return {
+                    "action": action,
+                    "mode": latest["mode"],
+                    "baseline_job_id": latest["baseline_job_id"],
+                    "job": latest,
+                    "baseline": baseline,
+                }
         return {
             "action": "create",
             "mode": "incremental" if baseline else "full",
@@ -134,8 +178,8 @@ class JobManager:
             baseline_job_id = plan["baseline_job_id"]
             if mode == "incremental":
                 self._validate_incremental_baseline(districts, baseline_job_id)
-            safety = SafetyConfig()
-            job_id = self.db.create_job(districts, mode, asdict(safety), max_documents, baseline_job_id)
+            safety = self._safety_payload(districts)
+            job_id = self.db.create_job(districts, mode, safety, max_documents, baseline_job_id)
             self._tasks[job_id] = asyncio.create_task(self._run(job_id))
             return {"job_id": job_id, "action": f"created_{mode}", "mode": mode}
 
@@ -150,10 +194,9 @@ class JobManager:
                         "请先停止该任务，再重新全量扫描"
                     )
 
-            safety = SafetyConfig()
             results = []
             for districts in source_groups:
-                job_id = self.db.create_job(districts, "full", asdict(safety), 0, None)
+                job_id = self.db.create_job(districts, "full", self._safety_payload(districts), 0, None)
                 self._tasks[job_id] = asyncio.create_task(self._run(job_id))
                 results.append({
                     "job_id": job_id,
@@ -192,6 +235,13 @@ class JobManager:
             baseline_sources = sorted(json.loads(baseline["districts_json"]))
         if baseline_sources != sorted(districts):
             raise ValueError("增量扫描来源必须与所选基准全量扫描完全一致")
+        if self._targets_include_putuo(districts):
+            baseline_contract = self._job_query_contract(baseline)
+            if baseline_contract != PUTUO_QUERY_CONTRACT:
+                raise ValueError(
+                    f"所选基准任务的普陀区查询契约已过期（需要 {PUTUO_QUERY_CONTRACT}），"
+                    "不能作为增量基线。请先对普陀区站点执行完整全量重建"
+                )
 
     async def pause(self, job_id: int, reason: str = "用户手动暂停") -> None:
         job = self.db.get_job(job_id)
@@ -227,6 +277,7 @@ class JobManager:
             job = self.db.get_job(job_id)
             if not job or job["status"] not in {JobStatus.PAUSED, JobStatus.PARTIAL, JobStatus.COOLING, JobStatus.FAILED}:
                 raise ValueError("该任务当前不能恢复")
+            self._assert_putuo_query_contract(job, action="恢复")
             active = self._active_job_for(self._job_sources(job))
             if active and int(active["id"]) != job_id:
                 raise ValueError(f"同站点已有活动任务 #{active['id']}，不能同时恢复旧任务")
@@ -381,7 +432,12 @@ class JobManager:
         job = self.db.get_job(job_id)
         if not job:
             return
-        safety_config = SafetyConfig(**json.loads(job["safety_json"]))
+        safety_payload = json.loads(job["safety_json"] or "{}")
+        safety_fields = {
+            key: value for key, value in safety_payload.items()
+            if key in SafetyConfig.__dataclass_fields__
+        }
+        safety_config = SafetyConfig(**safety_fields)
         safety = SafetyController(
             safety_config, event_hook=lambda kind, details: self._record_safety_event(job_id, kind, details),
             initial_pages=int(job["access_count"]),
@@ -399,15 +455,21 @@ class JobManager:
                     collectors = []
                     detail_cache: dict[str, tuple[DetailInspection, int | None]] = {}
                     try:
-                        # 先在同一全局限速器下读取每个已选来源的总量，进度不会把未扫描范围误报为完成。
-                        for target in targets:
+                        # 先初始化全部 collector；仅对“当前/未开始”来源刷新列表总量。
+                        # 已完成来源保留数据库中的最终真实总量，避免截断栏目首屏 10000 覆盖 10234。
+                        start_index = int(job["current_district_index"])
+                        for target_index, target in enumerate(targets):
                             collector = self._collector_for_target(browser, safety, target)
                             await collector.__aenter__()
                             collectors.append((target, collector))
                             await collector.check_robots()
+                            if target_index < start_index:
+                                # 列表扫描已完成：只保留 collector 供异常复测，不修订总量。
+                                continue
                             await collector.select_district(target.district)
-                            await self._record_target_total(job_id, target.label, await collector.estimated_total())
-                        start_index = int(job["current_district_index"])
+                            await self._record_target_total(
+                                job_id, target.label, await collector.estimated_total(),
+                            )
                         for target_index, (target, collector) in enumerate(collectors[start_index:], start=start_index):
                             latest = self.db.get_job(job_id)
                             if not latest or latest["status"] != JobStatus.RUNNING:
@@ -494,20 +556,28 @@ class JobManager:
             return PutuoDistrictCollector(browser, safety, target)
         return BrowserCollector(browser, safety)
 
-    async def _record_target_total(self, job_id: int, label: str, total: int) -> None:
+    async def _record_target_total(
+        self, job_id: int, label: str, total: int, *, allow_revision: bool = False,
+    ) -> None:
         current = self.db.get_job(job_id)
         totals = json.loads(current["total_by_district_json"] or "{}")
         examined = json.loads(current["examined_by_district_json"] or "{}")
         previous_total = totals.get(label)
+        examined_count = int(examined.get(label, 0))
         if (
             previous_total is not None
-            and int(examined.get(label, 0)) > 0
+            and examined_count > 0
             and int(previous_total) != int(total)
         ):
-            raise SafetyPause(
-                f"{label} 列表总量在任务恢复后发生变化：原 {previous_total} 条，现 {total} 条"
-            )
-        totals[label] = total
+            if not allow_revision:
+                raise SafetyPause(
+                    f"{label} 列表总量在任务恢复后发生变化：原 {previous_total} 条，现 {total} 条"
+                )
+            if int(total) < examined_count:
+                raise SafetyPause(
+                    f"{label} 修订后的列表总量 {total} 小于已覆盖 {examined_count} 条"
+                )
+        totals[label] = int(total)
         examined.setdefault(label, 0)
         self.db.update_job(
             job_id,
@@ -670,6 +740,9 @@ class JobManager:
             job_id, current_district=target.label, current_district_index=target_index,
             current_page=start_page, current_item_index=item_index,
         )
+        if hasattr(collector, "note_resume_examined"):
+            examined_by_source = json.loads(latest["examined_by_district_json"] or "{}")
+            collector.note_resume_examined(int(examined_by_source.get(target.label, 0)))
         async for item in collector.iter_items(target.district, start_page, item_index):
             self._prepare_item_source(item, target)
             latest = self.db.get_job(job_id)
@@ -806,6 +879,17 @@ class JobManager:
             self._advance_progress(
                 job_id, target.label, item.page_number, item.item_index,
                 skipped=False, finding_delta=len(findings), current_url=record.url,
+            )
+        latest = self.db.get_job(job_id)
+        if latest and latest["status"] == JobStatus.RUNNING:
+            if getattr(collector, "capped_pagination_active", False) and not getattr(
+                collector, "capped_pagination_resolved", False
+            ):
+                raise SafetyPause(
+                    f"{target.label} 列表截断分页未确认真实终点，任务不能标记完成"
+                )
+            await self._record_target_total(
+                job_id, target.label, await collector.estimated_total(), allow_revision=True,
             )
         self.db.update_job(
             job_id, current_district_index=target_index + 1, current_district="",

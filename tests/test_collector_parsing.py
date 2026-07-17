@@ -309,22 +309,40 @@ class FakePutuoApiSafety:
 
 @pytest.mark.asyncio
 async def test_putuo_api_uses_page_no_and_accepts_exact_last_page_count():
-    payload = {"data": {"list": [{"id": 16}], "pageNo": 2, "totalPage": 2, "totalCount": 16}}
+    payload = {
+        "data": {
+            "list": [{"id": 16, "doc_flag": "1"}],
+            "pageNo": 2,
+            "totalPage": 2,
+            "totalCount": 16,
+        }
+    }
     collector = PutuoDistrictCollector(None, FakePutuoApiSafety(), SCAN_TARGETS["putuo_government"])
     request = FakePutuoApiRequest(payload)
     collector.context = type("Context", (), {"request": request})()
 
     records = await collector._fetch_page(2)
 
-    assert records == [{"id": 16}]
+    assert records == [{"id": 16, "doc_flag": "1"}]
     assert request.data["pageNo"] == 2
+    assert request.data["pageSize"] == 15
+    assert request.data["orderFields"] == ["display_date"]
+    assert request.data["orderTypes"] == ["desc"]
+    assert request.data["docFlag"] == "1"
     assert "pageNum" not in request.data
     assert await collector.estimated_total() == 16
 
 
 @pytest.mark.asyncio
 async def test_putuo_api_rejects_response_page_mismatch():
-    payload = {"data": {"list": [{"id": 1}], "pageNo": 1, "totalPage": 2, "totalCount": 16}}
+    payload = {
+        "data": {
+            "list": [{"id": 1, "doc_flag": "1"}],
+            "pageNo": 1,
+            "totalPage": 2,
+            "totalCount": 16,
+        }
+    }
     collector = PutuoDistrictCollector(None, FakePutuoApiSafety(), SCAN_TARGETS["putuo_government"])
     collector.context = type("Context", (), {"request": FakePutuoApiRequest(payload)})()
 
@@ -333,6 +351,353 @@ async def test_putuo_api_rejects_response_page_mismatch():
 
 
 @pytest.mark.asyncio
+async def test_putuo_api_requests_doc_flag_filter_for_policy_files():
+    payload = {
+        "data": {
+            "list": [{"id": 1, "doc_flag": "1", "title": "政策文件", "url": "/a.html"}],
+            "pageNo": 1,
+            "totalPage": 1,
+            "totalCount": 1,
+        }
+    }
+    collector = PutuoDistrictCollector(None, FakePutuoApiSafety(), SCAN_TARGETS["putuo_bureaus"])
+    request = FakePutuoApiRequest(payload)
+    collector.context = type("Context", (), {"request": request})()
+
+    records = await collector._fetch_page(1)
+
+    assert request.data["docFlag"] == "1"
+    assert request.data["channelList"] == ["6"]
+    assert request.data["pageNo"] == 1
+    assert request.data["pageSize"] == 15
+    assert request.data["orderFields"] == ["display_date"]
+    assert request.data["orderTypes"] == ["desc"]
+    assert records == payload["data"]["list"]
+
+
+@pytest.mark.asyncio
+async def test_putuo_api_accepts_all_doc_flag_one_records():
+    payload = {
+        "data": {
+            "list": [
+                {"id": 144800, "doc_flag": "1", "title": "文件甲"},
+                {"id": 144801, "doc_flag": "1", "title": "文件乙"},
+            ],
+            "pageNo": 1,
+            "totalPage": 1,
+            "totalCount": 2,
+        }
+    }
+    collector = PutuoDistrictCollector(None, FakePutuoApiSafety(), SCAN_TARGETS["putuo_government"])
+    collector.context = type("Context", (), {"request": FakePutuoApiRequest(payload)})()
+
+    records = await collector._fetch_page(1)
+    assert [item["id"] for item in records] == [144800, 144801]
+
+
+@pytest.mark.asyncio
+async def test_putuo_api_rejects_non_policy_doc_flag_with_filter_failure():
+    payload = {
+        "data": {
+            "list": [
+                {
+                    "id": 144838,
+                    "doc_flag": "0",
+                    "channel_id": "3390",
+                    "title": "建设项目环境影响登记表备案信息公开",
+                    "url": "https://beian.china-eia.com/f/announcement/announcementShow",
+                }
+            ],
+            "pageNo": 1,
+            "totalPage": 1,
+            "totalCount": 1,
+        }
+    }
+    collector = PutuoDistrictCollector(None, FakePutuoApiSafety(), SCAN_TARGETS["putuo_bureaus"])
+    collector.context = type("Context", (), {"request": FakePutuoApiRequest(payload)})()
+
+    with pytest.raises(SafetyPause, match="政策文件过滤失效") as exc_info:
+        await collector._fetch_page(1)
+    message = str(exc_info.value)
+    assert "非文件记录" in message
+    assert "page_number=1" in message
+    assert "id=144838" in message
+    assert "channel_id=3390" in message
+    assert "doc_flag='0'" in message
+
+
+def test_putuo_list_item_rejects_external_detail_domain():
+    with pytest.raises(SafetyPause, match="异常详情域名"):
+        putuo_list_item_from_api(
+            {
+                "title": "建设项目环境影响登记表备案系统",
+                "url": "https://beian.china-eia.com/",
+                "display_date": "2026-07-03",
+                "doc_flag": "0",
+            },
+            1,
+            0,
+        )
+
+
+@pytest.mark.asyncio
+
+@pytest.mark.asyncio
+async def test_putuo_uncapped_pagination_still_strict():
+    payload = {
+        "data": {
+            "list": [{"id": i, "doc_flag": "1", "title": f"t{i}", "url": f"/a{i}.html"} for i in range(1, 3)],
+            "pageNo": 2,
+            "totalPage": 2,
+            "totalCount": 17,
+        }
+    }
+    # totalCount=17, pageSize=15 => page2 should have 2 rows. Not a cap.
+    collector = PutuoDistrictCollector(
+        None, FakePutuoApiSafety(), SCAN_TARGETS["putuo_government"], page_size=15, api_total_cap=10_000,
+    )
+    collector.context = type("Context", (), {"request": FakePutuoApiRequest(payload)})()
+    records = await collector._fetch_page(2)
+    assert len(records) == 2
+    assert collector.capped_pagination_active is False
+
+
+@pytest.mark.asyncio
+async def test_putuo_capped_last_page_overflow_enters_capped_mode():
+    # cap=10, page_size=3 => declared residual on last page is 1, but API returns 3.
+    page_size = 3
+    cap = 10
+    declared_pages = 4  # ceil(10/3)=4, residual=1
+    payload = {
+        "data": {
+            "list": [
+                {"id": 100 + i, "doc_flag": "1", "title": f"t{i}", "url": f"/p4-{i}.html"}
+                for i in range(3)
+            ],
+            "pageNo": 4,
+            "totalPage": declared_pages,
+            "totalCount": cap,
+        }
+    }
+    collector = PutuoDistrictCollector(
+        None, FakePutuoApiSafety(), SCAN_TARGETS["putuo_bureaus"],
+        page_size=page_size, api_total_cap=cap,
+    )
+    collector.context = type("Context", (), {"request": FakePutuoApiRequest(payload)})()
+    records = await collector._fetch_page(4)
+    assert len(records) == 3
+    assert collector.capped_pagination_active is True
+
+
+@pytest.mark.asyncio
+async def test_putuo_capped_mode_continues_past_declared_page_with_fixed_response_page():
+    page_size = 3
+    cap = 10
+    pages = {
+        1: {
+            "list": [{"id": i, "doc_flag": "1", "title": f"p1-{i}", "url": f"/p1-{i}.html"} for i in range(1, 4)],
+            "pageNo": 1, "totalPage": 4, "totalCount": cap,
+        },
+        2: {
+            "list": [{"id": i, "doc_flag": "1", "title": f"p2-{i}", "url": f"/p2-{i}.html"} for i in range(4, 7)],
+            "pageNo": 2, "totalPage": 4, "totalCount": cap,
+        },
+        3: {
+            "list": [{"id": i, "doc_flag": "1", "title": f"p3-{i}", "url": f"/p3-{i}.html"} for i in range(7, 10)],
+            "pageNo": 3, "totalPage": 4, "totalCount": cap,
+        },
+        4: {
+            "list": [{"id": i, "doc_flag": "1", "title": f"p4-{i}", "url": f"/p4-{i}.html"} for i in range(10, 13)],
+            "pageNo": 4, "totalPage": 4, "totalCount": cap,
+        },
+        5: {
+            "list": [{"id": i, "doc_flag": "1", "title": f"p5-{i}", "url": f"/p5-{i}.html"} for i in range(13, 16)],
+            "pageNo": 4, "totalPage": 4, "totalCount": cap,  # response page stuck at declared last
+        },
+        6: {
+            "list": [{"id": i, "doc_flag": "1", "title": f"p6-{i}", "url": f"/p6-{i}.html"} for i in range(16, 18)],
+            "pageNo": 4, "totalPage": 4, "totalCount": cap,
+        },
+        7: {
+            "list": [],
+            "pageNo": 0, "totalPage": 0, "totalCount": 0,
+        },
+    }
+
+    class MultiPageRequest:
+        def __init__(self):
+            self.calls = []
+
+        async def post(self, _url, *, data, timeout, fail_on_status_code):
+            self.calls.append(dict(data))
+            page_no = int(data["pageNo"])
+            return FakePutuoApiResponse({"data": pages[page_no]})
+
+    class PageCollector(PutuoDistrictCollector):
+        async def safe_goto(self, page, url):
+            return None
+
+    collector = PageCollector(
+        None, FakePutuoApiSafety(), SCAN_TARGETS["putuo_bureaus"],
+        page_size=page_size, api_total_cap=cap, capped_max_extra_pages=20,
+    )
+    collector.page = object()
+    collector.context = type("Context", (), {"request": MultiPageRequest()})()
+
+    items = []
+    async for item in collector.iter_items("普陀区"):
+        items.append(item)
+
+    assert collector.capped_pagination_active is True
+    assert collector.capped_pagination_resolved is True
+    assert len(items) == 17
+    assert [item.page_number for item in items[-5:]] == [5, 5, 5, 6, 6]
+    assert await collector.estimated_total() == 17
+    # page 5 request kept requested pageNo=5 even if response said 4
+    requested_pages = [call["pageNo"] for call in collector.context.request.calls]
+    assert 5 in requested_pages and 6 in requested_pages and 7 in requested_pages
+
+
+@pytest.mark.asyncio
+async def test_putuo_capped_mode_stops_on_repeated_page_not_infinite():
+    page_size = 2
+    cap = 4
+    repeated = {
+        "list": [
+            {"id": 90, "doc_flag": "1", "title": "r1", "url": "/r1.html"},
+            {"id": 91, "doc_flag": "1", "title": "r2", "url": "/r2.html"},
+        ],
+        "pageNo": 2, "totalPage": 2, "totalCount": cap,
+    }
+    pages = {
+        1: {
+            "list": [
+                {"id": 1, "doc_flag": "1", "title": "a", "url": "/a.html"},
+                {"id": 2, "doc_flag": "1", "title": "b", "url": "/b.html"},
+            ],
+            "pageNo": 1, "totalPage": 2, "totalCount": cap,
+        },
+        2: {
+            "list": [
+                {"id": 3, "doc_flag": "1", "title": "c", "url": "/c.html"},
+                {"id": 4, "doc_flag": "1", "title": "d", "url": "/d.html"},
+            ],
+            "pageNo": 2, "totalPage": 2, "totalCount": cap,
+        },
+        3: repeated,
+        4: repeated,
+    }
+
+    class MultiPageRequest:
+        async def post(self, _url, *, data, timeout, fail_on_status_code):
+            return FakePutuoApiResponse({"data": pages[int(data["pageNo"])]})
+
+    class PageCollector(PutuoDistrictCollector):
+        async def safe_goto(self, page, url):
+            return None
+
+    collector = PageCollector(
+        None, FakePutuoApiSafety(), SCAN_TARGETS["putuo_bureaus"],
+        page_size=page_size, api_total_cap=cap, capped_max_extra_pages=20,
+    )
+    collector.page = object()
+    collector.context = type("Context", (), {"request": MultiPageRequest()})()
+
+    with pytest.raises(SafetyPause, match="重复返回已扫描记录"):
+        async for _ in collector.iter_items("普陀区"):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_putuo_capped_mode_rejects_doc_flag_zero():
+    payload = {
+        "data": {
+            "list": [{"id": 1, "doc_flag": "0", "title": "x", "url": "/x.html"}],
+            "pageNo": 1, "totalPage": 1, "totalCount": 10,
+        }
+    }
+    collector = PutuoDistrictCollector(
+        None, FakePutuoApiSafety(), SCAN_TARGETS["putuo_bureaus"],
+        page_size=3, api_total_cap=10,
+    )
+    collector.context = type("Context", (), {"request": FakePutuoApiRequest(payload)})()
+    with pytest.raises(SafetyPause, match="政策文件过滤失效"):
+        await collector._fetch_page(1)
+
+
+@pytest.mark.asyncio
+async def test_putuo_capped_resume_keeps_request_page_cursor():
+    page_size = 2
+    cap = 4
+    pages = {
+        1: {
+            "list": [
+                {"id": 1, "doc_flag": "1", "title": "a", "url": "/a.html"},
+                {"id": 2, "doc_flag": "1", "title": "b", "url": "/b.html"},
+            ],
+            "pageNo": 1, "totalPage": 2, "totalCount": cap,
+        },
+        2: {
+            "list": [
+                {"id": 3, "doc_flag": "1", "title": "c", "url": "/c.html"},
+                {"id": 4, "doc_flag": "1", "title": "d", "url": "/d.html"},
+            ],
+            "pageNo": 2, "totalPage": 2, "totalCount": cap,
+        },
+        3: {
+            "list": [
+                {"id": 5, "doc_flag": "1", "title": "e", "url": "/e.html"},
+                {"id": 6, "doc_flag": "1", "title": "f", "url": "/f.html"},
+            ],
+            "pageNo": 2, "totalPage": 2, "totalCount": cap,
+        },
+        4: {"list": [], "pageNo": 0, "totalPage": 0, "totalCount": 0},
+    }
+
+    class MultiPageRequest:
+        def __init__(self):
+            self.calls = []
+
+        async def post(self, _url, *, data, timeout, fail_on_status_code):
+            self.calls.append(int(data["pageNo"]))
+            return FakePutuoApiResponse({"data": pages[int(data["pageNo"])]})
+
+    class PageCollector(PutuoDistrictCollector):
+        async def safe_goto(self, page, url):
+            return None
+
+    collector = PageCollector(
+        None, FakePutuoApiSafety(), SCAN_TARGETS["putuo_bureaus"],
+        page_size=page_size, api_total_cap=cap, capped_max_extra_pages=20,
+    )
+    collector.page = object()
+    request = MultiPageRequest()
+    collector.context = type("Context", (), {"request": request})()
+    collector.note_resume_examined(4)  # finished pages 1-2
+
+    items = []
+    async for item in collector.iter_items("普陀区", start_page=3, start_item_index=-1):
+        items.append((item.page_number, item.item_index, item.title))
+
+    assert items == [(3, 0, "e"), (3, 1, "f")]
+    assert collector.capped_pagination_resolved is True
+    assert await collector.estimated_total() == 6  # 4 resumed + 2 new
+    assert 3 in request.calls
+
+
+def test_putuo_list_item_still_rejects_external_domain_in_capped_payload():
+    with pytest.raises(SafetyPause, match="异常详情域名"):
+        putuo_list_item_from_api(
+            {
+                "title": "环评",
+                "url": "https://beian.china-eia.com/",
+                "doc_flag": "1",
+            },
+            5,
+            0,
+        )
+
+
 async def test_putuo_detail_marks_missing_and_invalid_header_fields_without_dropping_record():
     detail = await PutuoDistrictCollector(None, None, SCAN_TARGETS["putuo_government"])._parse_putuo_detail(
         PutuoDetailPage(
