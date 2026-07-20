@@ -24,6 +24,7 @@ templates = Jinja2Templates(directory=BASE_DIR / "app" / "templates")
 async def lifespan(_app: FastAPI):
     db.initialize()
     manager.recover_interrupted()
+    manager.ensure_continuous_scheduler()
     yield
 
 
@@ -62,6 +63,33 @@ async def index(request: Request):
         context={"sites": list(SCAN_SITES.values()), "safety": SafetyConfig()},
     )
 
+
+
+
+@app.get("/api/continuous-schedules")
+async def continuous_schedules():
+    return manager.continuous_status()
+
+
+@app.get("/api/jobs/{job_id}/generation")
+async def job_generation(job_id: int):
+    job = db.get_job(job_id)
+    if not job:
+        raise HTTPException(404, "任务不存在")
+    gen_id = job.get("generation_id")
+    generation = manager.repo.get_generation(int(gen_id)) if gen_id else manager.repo.latest_generation_for_job(job_id)
+    counts = manager.repo.generation_item_counts(int(generation["id"])) if generation else {}
+    try:
+        stats = __import__("json").loads(job.get("generation_stats_json") or "{}")
+    except Exception:
+        stats = {}
+    return {
+        "job_id": job_id,
+        "scan_phase": job.get("scan_phase") or "idle",
+        "generation": generation,
+        "counts": counts,
+        "stats": stats,
+    }
 
 @app.get("/health")
 async def health():

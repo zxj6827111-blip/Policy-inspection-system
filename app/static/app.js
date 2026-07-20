@@ -57,6 +57,23 @@ async function api(url, options = {}) {
 }
 
 const statusNames = {pending:'等待启动', running:'扫描中', paused:'等待处理', partial:'本批完成', cooling:'安全冷却中', completed:'已完成', stopped:'已停止', failed:'扫描失败'};
+const phaseNames = {
+  idle: '待命',
+  discovering: '正在建立列表快照',
+  processing: '正在检查详情',
+  catching_up: '正在追赶新增内容',
+  incremental_discovery: '正在执行增量发现',
+  full_reconcile: '正在执行完整列表对账',
+  cooling: '安全冷却',
+  review: '等待人工复核',
+};
+function phaseLabel(job) {
+  const phase = job.scan_phase || 'idle';
+  if (job.status === 'cooling') return phaseNames.cooling;
+  if (job.completion_kind === 'exception_queued' || (job.pause_reason || '').includes('复核')) return phaseNames.review;
+  return phaseNames[phase] || statusNames[job.status] || job.status;
+}
+
 
 function operationState(job) {
   if (job.status === 'running') return {hint: '正在扫描中。可暂停以保留当前位置，或停止本任务。', pause: true, resume: false, stop: true};
@@ -75,14 +92,31 @@ function renderCurrent(job) {
   $('#job-id').textContent = `#${job.id}`;
   const baselineText = job.baseline_job_id ? ` · 基准 #${job.baseline_job_id}` : '';
   $('#job-subtitle').textContent = `${JSON.parse(job.districts_json).join('、')} · ${job.mode === 'full' ? '全量' : '增量'}扫描${baselineText}`;
-  $('#status').textContent = statusNames[job.status] || job.status;
+  $('#status').textContent = phaseLabel(job);
   $('#status').parentElement.className = `metric-status metric-status-${job.status}`;
-  $('#processed').textContent = `${job.examined_count} / ${job.estimated_total || '?'}（详情 ${job.processed_count}，复用/跳过 ${job.skipped_count}）`;
+  let genStats = {};
+  try { genStats = JSON.parse(job.generation_stats_json || '{}'); } catch (_) { genStats = {}; }
+  const discovered = genStats.discovered ?? job.estimated_total;
+  const completed = genStats.completed ?? job.processed_count;
+  const reused = genStats.reused ?? job.skipped_count;
+  const added = genStats.new ?? 0;
+  const retry = genStats.retry ?? 0;
+  const review = genStats.review ?? 0;
+  $('#processed').textContent = `发现 ${discovered ?? '?'} · 完成 ${completed ?? 0} · 新增 ${added} · 复用 ${reused ?? 0} · 重试/复核 ${retry + review}（详情 ${job.processed_count}，覆盖 ${job.examined_count}）`;
   $('#finding-count').textContent = job.finding_count;
-  $('#position').textContent = `${job.current_district || '-'} / ${job.current_page || '-'}`;
+  $('#position').textContent = `${job.current_district || '-'} / 阶段 ${phaseLabel(job)} / 页 ${job.current_page || '-'}`;
   $('#current-url').textContent = job.current_url || '-';
-  $('#job-message').textContent = job.pause_reason || job.last_error || '-';
-  $('#cooldown').textContent = job.status === 'cooling' ? cooldownText(job.cooldown_until) : '无需冷却';
+  const staleContract = (job.pause_reason || '').includes('查询契约已失效') || (job.pause_reason || '').includes('完整全量重建');
+  $('#job-message').textContent = job.pause_reason || job.last_error || (staleContract ? '旧契约任务不可直接恢复，请创建完整基线' : '-');
+  if (job.status === 'cooling') {
+    $('#cooldown').textContent = cooldownText(job.cooldown_until);
+  } else if ((job.pause_reason || '').includes('总量') || job.scan_phase === 'catching_up') {
+    $('#cooldown').textContent = '列表数据变化处理中（非风控冷却）';
+  } else {
+    $('#cooldown').textContent = '无需冷却';
+  }
+  renderGenerationMeta(job.id).catch(() => {});
+  renderContinuousMeta().catch(() => {});
   const progress = job.estimated_total ? Math.min(100, job.examined_count / job.estimated_total * 100) : 0;
   $('#progress-bar').style.width = `${progress}%`;
   $('#export-link').href = `/api/jobs/${job.id}/export`;
@@ -323,3 +357,36 @@ $('#history-details').addEventListener('toggle', (event) => {
 api('/health').then(() => { $('#health').textContent = '本地服务正常'; }).catch(() => { $('#health').textContent = '服务异常'; });
 refreshJobs().catch(error => toast(error.message));
 setInterval(() => refreshJobs().catch(() => {}), 3000);
+
+
+async function renderGenerationMeta(jobId) {
+  const box = document.querySelector('#generation-meta');
+  if (!box) return;
+  try {
+    const data = await api(`/api/jobs/${jobId}/generation`);
+    if (currentJobId !== jobId) return;
+    const c = data.counts || {};
+    const g = data.generation || {};
+    box.textContent = `快照阶段 ${phaseNames[data.scan_phase] || data.scan_phase} · 发现 ${c.total || 0} · 完成 ${(c.completed||0)+(c.reused||0)} · pending ${c.pending||0} · retry ${c.retry||0} · review ${c.review||0} · 观测总量 ${g.observed_total ?? '-'}`;
+  } catch (_) {
+    box.textContent = '快照信息暂不可用';
+  }
+}
+
+async function renderContinuousMeta() {
+  const box = document.querySelector('#continuous-meta');
+  if (!box) return;
+  try {
+    const rows = await api('/api/continuous-schedules');
+    if (!rows.length) { box.textContent = '持续任务未配置'; return; }
+    box.innerHTML = rows.map(r => {
+      const li = r.last_incremental_at ? new Date(r.last_incremental_at).toLocaleString('zh-CN', {hour12:false}) : '-';
+      const lf = r.last_full_reconcile_at ? new Date(r.last_full_reconcile_at).toLocaleString('zh-CN', {hour12:false}) : '-';
+      const ni = r.next_incremental_at ? new Date(r.next_incremental_at).toLocaleString('zh-CN', {hour12:false}) : '-';
+      const nf = r.next_full_reconcile_at ? new Date(r.next_full_reconcile_at).toLocaleString('zh-CN', {hour12:false}) : '-';
+      return `<div><strong>${escapeHtml(r.site_label)}</strong> 上次增量 ${escapeHtml(li)} · 上次对账 ${escapeHtml(lf)} · 下次增量 ${escapeHtml(ni)} · 下次对账 ${escapeHtml(nf)}</div>`;
+    }).join('');
+  } catch (_) {
+    box.textContent = '持续调度状态读取失败';
+  }
+}

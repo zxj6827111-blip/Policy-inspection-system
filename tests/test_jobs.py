@@ -1184,6 +1184,16 @@ async def test_multi_source_resume_skips_completed_capped_total_and_continues(tm
                 return
             async for policy_item in super().iter_items(district, start_page, start_item_index):
                 yield policy_item
+        async def discover_head_pages(self, max_pages: int = 2):
+            if self._fake_items is not None:
+                return list(self._fake_items)
+            return await super().discover_head_pages(max_pages)
+
+        async def fetch_list_page(self, page_number: int):
+            if self._fake_items is not None:
+                return [i for i in self._fake_items if i.page_number == page_number]
+            return await super().fetch_list_page(page_number)
+
 
         async def open_item(self, policy_item):
             open_urls.append(policy_item.url)

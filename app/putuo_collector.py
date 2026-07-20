@@ -10,6 +10,8 @@ from playwright.async_api import Browser, Page
 
 from app.collector import BrowserCollector, parse_iso_date
 from app.config import PUTUO_DISTRICT_URL, ScanTarget
+import hashlib
+
 from app.domain import DetailInspection, PolicyListItem, PolicyRecord, RelatedLink, SafetyPause
 from app.rules import extract_document_numbers
 from app.safety import SafetyController
@@ -23,7 +25,7 @@ PUTUO_API_TOTAL_CAP = 10_000
 PUTUO_CAPPED_MAX_EXTRA_PAGES = 2_000
 # 连续空页达到该次数后视为真实终点。
 PUTUO_CAPPED_MAX_EMPTY_PAGES = 1
-PUTUO_QUERY_CONTRACT = "putuo-docflag-capped-v2"
+PUTUO_QUERY_CONTRACT = "putuo-snapshot-continuous-v3"
 METADATA_LABELS = (
     "索引号", "主题分类", "公开属性", "成文日期", "发文字号", "发布日期", "公开主体",
 )
@@ -63,6 +65,32 @@ def putuo_record_identity(record: dict, *, list_url: str = PUTUO_DISTRICT_URL) -
     return f"url:{urljoin(list_url, raw_url)}"
 
 
+def putuo_content_fingerprint(
+    *, title: str, listed_date: str, url: str, doc_flag: str,
+) -> str:
+    payload = "|".join([
+        (title or "").strip(),
+        (listed_date or "").strip(),
+        (url or "").strip(),
+        (doc_flag or "").strip(),
+    ])
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def putuo_stable_identity(target_key: str, record: dict, *, list_url: str = PUTUO_DISTRICT_URL) -> str:
+    """target_key + API id，否则 target_key + canonical URL。"""
+    record_id = record.get("id")
+    if record_id is not None and str(record_id).strip() != "":
+        return f"{target_key}|id:{record_id}"
+    raw_url = str(
+        record.get("url") or record.get("link") or record.get("linkUrl") or record.get("website") or ""
+    ).strip()
+    if not raw_url:
+        raise SafetyPause("普陀区官网列表记录缺少稳定身份（id/url），采集器需要更新")
+    return f"{target_key}|url:{urljoin(list_url, raw_url)}"
+
+
+
 def putuo_list_item_from_api(
     record: dict, page_number: int, item_index: int, *, source_site: str = "区级网站·普陀区",
     source_key: str = "putuo_government", source_channel_id: str = "3", list_url: str = PUTUO_DISTRICT_URL,
@@ -76,16 +104,28 @@ def putuo_list_item_from_api(
     url = urljoin(list_url, raw_url)
     if urlparse(url).netloc.lower() != "www.shpt.gov.cn":
         raise SafetyPause(f"普陀区官网列表返回了异常详情域名：{url}")
+    published = parse_putuo_date(str(record.get("display_date") or record.get("displayDate") or ""))
+    listed = published.isoformat() if published else ""
+    doc_flag = _record_doc_flag(record)
+    api_id = "" if record.get("id") is None else str(record.get("id")).strip()
+    stable = putuo_stable_identity(source_key, record, list_url=list_url)
+    fingerprint = putuo_content_fingerprint(
+        title=title, listed_date=listed, url=url, doc_flag=doc_flag,
+    )
     return PolicyListItem(
         district="普陀区",
         page_number=page_number,
         item_index=item_index,
         title=title,
         url=url,
-        published_date=parse_putuo_date(str(record.get("display_date") or record.get("displayDate") or "")),
+        published_date=published,
         source_site=source_site,
         source_key=source_key,
         source_channel_id=source_channel_id,
+        stable_id=stable,
+        content_fingerprint=fingerprint,
+        api_record_id=api_id,
+        doc_flag=doc_flag,
     )
 
 
@@ -301,7 +341,11 @@ class PutuoDistrictCollector(BrowserCollector):
             if not self._capped_mode and (
                 total_count != self._declared_total_count or total_pages != self._declared_total_pages
             ):
-                raise SafetyPause("普陀区官网列表总量在扫描期间发生变化，已暂停以避免生成不完整结果")
+                self._declared_total_count = total_count
+                self._declared_total_pages = total_pages
+                self._total_count = total_count
+                self._total_pages = total_pages
+                self._estimated_total = total_count
             if self._capped_mode and total_count not in {self.api_total_cap, 0}:
                 if total_count != self._declared_total_count:
                     raise SafetyPause(
@@ -417,6 +461,31 @@ class PutuoDistrictCollector(BrowserCollector):
             )
         return records
 
+
+    async def fetch_list_page(self, page_number: int) -> list[PolicyListItem]:
+        """供快照发现阶段按页拉取并转换为稳定条目。"""
+        records = await self._fetch_page(page_number)
+        items: list[PolicyListItem] = []
+        for index, api_record in enumerate(records):
+            items.append(
+                putuo_list_item_from_api(
+                    api_record, page_number, index,
+                    source_site=self.target.label, source_key=self.target.key,
+                    source_channel_id=self.channel_id, list_url=self.list_url,
+                )
+            )
+        return items
+
+    async def discover_head_pages(self, max_pages: int = 2) -> list[PolicyListItem]:
+        """扫描结束前追赶：只检查栏目头部若干页的新增身份。"""
+        found: list[PolicyListItem] = []
+        for page_number in range(1, max(1, max_pages) + 1):
+            found.extend(await self.fetch_list_page(page_number))
+        return found
+
+    def observed_total_count(self) -> int | None:
+        return self._total_count if self._total_count is not None else self._declared_total_count
+
     async def select_district(self, _district: str) -> None:
         assert self.page
         await self.safe_goto(self.page, self.list_url)
@@ -428,7 +497,7 @@ class PutuoDistrictCollector(BrowserCollector):
         identities = []
         page_seen: set[str] = set()
         for record in records:
-            identity = putuo_record_identity(record, list_url=self.list_url)
+            identity = putuo_stable_identity(self.target.key, record, list_url=self.list_url)
             if identity in page_seen:
                 raise SafetyPause(
                     f"普陀区官网列表同一页出现重复记录：{identity}"

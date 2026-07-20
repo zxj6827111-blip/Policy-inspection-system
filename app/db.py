@@ -48,6 +48,9 @@ CREATE TABLE IF NOT EXISTS scan_jobs (
     safety_json TEXT NOT NULL DEFAULT '{}',
     baseline_job_id INTEGER,
     source_signature TEXT NOT NULL DEFAULT '[]',
+    scan_phase TEXT NOT NULL DEFAULT 'idle',
+    generation_id INTEGER,
+    generation_stats_json TEXT NOT NULL DEFAULT '{}',
     FOREIGN KEY(baseline_job_id) REFERENCES scan_jobs(id)
 );
 
@@ -233,6 +236,97 @@ CREATE TABLE IF NOT EXISTS holiday_calendar (
     is_workday INTEGER NOT NULL CHECK(is_workday IN (0, 1)),
     source_note TEXT NOT NULL DEFAULT ''
 );
+
+CREATE TABLE IF NOT EXISTS scan_generations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id INTEGER NOT NULL,
+    target_key TEXT NOT NULL DEFAULT '',
+    phase TEXT NOT NULL DEFAULT 'discovering',
+    generation_kind TEXT NOT NULL DEFAULT 'full',
+    query_contract TEXT NOT NULL DEFAULT '',
+    observed_total INTEGER NOT NULL DEFAULT 0,
+    discovered_count INTEGER NOT NULL DEFAULT 0,
+    completed_count INTEGER NOT NULL DEFAULT 0,
+    reused_count INTEGER NOT NULL DEFAULT 0,
+    new_count INTEGER NOT NULL DEFAULT 0,
+    retry_count INTEGER NOT NULL DEFAULT 0,
+    review_count INTEGER NOT NULL DEFAULT 0,
+    catchup_round INTEGER NOT NULL DEFAULT 0,
+    list_cursor_page INTEGER NOT NULL DEFAULT 1,
+    list_cursor_item INTEGER NOT NULL DEFAULT -1,
+    started_at TEXT NOT NULL,
+    finished_at TEXT,
+    stats_json TEXT NOT NULL DEFAULT '{}',
+    FOREIGN KEY(job_id) REFERENCES scan_jobs(id)
+);
+
+CREATE TABLE IF NOT EXISTS generation_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    generation_id INTEGER NOT NULL,
+    job_id INTEGER NOT NULL,
+    target_key TEXT NOT NULL,
+    stable_id TEXT NOT NULL,
+    api_record_id TEXT NOT NULL DEFAULT '',
+    title TEXT NOT NULL DEFAULT '',
+    url TEXT NOT NULL DEFAULT '',
+    listed_date TEXT,
+    doc_flag TEXT NOT NULL DEFAULT '',
+    content_fingerprint TEXT NOT NULL DEFAULT '',
+    page_number INTEGER NOT NULL DEFAULT 1,
+    item_index INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'pending',
+    detail_status TEXT NOT NULL DEFAULT '',
+    document_id INTEGER,
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT NOT NULL DEFAULT '',
+    first_seen_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    completed_at TEXT,
+    UNIQUE(generation_id, stable_id),
+    FOREIGN KEY(generation_id) REFERENCES scan_generations(id),
+    FOREIGN KEY(job_id) REFERENCES scan_jobs(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_generation_items_claim
+ON generation_items(job_id, target_key, status);
+
+CREATE INDEX IF NOT EXISTS idx_generation_items_stable
+ON generation_items(job_id, stable_id);
+
+CREATE TABLE IF NOT EXISTS source_inventory (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    target_key TEXT NOT NULL,
+    stable_id TEXT NOT NULL,
+    api_record_id TEXT NOT NULL DEFAULT '',
+    title TEXT NOT NULL DEFAULT '',
+    url TEXT NOT NULL DEFAULT '',
+    listed_date TEXT,
+    doc_flag TEXT NOT NULL DEFAULT '',
+    content_fingerprint TEXT NOT NULL DEFAULT '',
+    first_seen_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    last_generation_id INTEGER,
+    is_present INTEGER NOT NULL DEFAULT 1 CHECK(is_present IN (0, 1)),
+    last_detail_status TEXT NOT NULL DEFAULT '',
+    last_document_id INTEGER,
+    UNIQUE(target_key, stable_id)
+);
+
+CREATE TABLE IF NOT EXISTS continuous_schedules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    site_key TEXT NOT NULL UNIQUE,
+    source_signature TEXT NOT NULL DEFAULT '[]',
+    enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)),
+    incremental_interval_hours REAL NOT NULL DEFAULT 6,
+    full_reconcile_interval_days REAL NOT NULL DEFAULT 7,
+    last_incremental_at TEXT,
+    last_full_reconcile_at TEXT,
+    next_incremental_at TEXT,
+    next_full_reconcile_at TEXT,
+    last_job_id INTEGER,
+    last_status TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL
+);
 """
 
 
@@ -282,6 +376,9 @@ class Database:
                 "resumed_count": "INTEGER NOT NULL DEFAULT 0",
                 "baseline_job_id": "INTEGER",
                 "source_signature": "TEXT NOT NULL DEFAULT '[]'",
+                "scan_phase": "TEXT NOT NULL DEFAULT 'idle'",
+                "generation_id": "INTEGER",
+                "generation_stats_json": "TEXT NOT NULL DEFAULT '{}'",
             },
             "policy_documents": {
                 "last_detail_checked_at": "TEXT",
@@ -354,6 +451,43 @@ class Database:
                 UNIQUE(job_id,target_key,page_number,item_index));
             CREATE INDEX IF NOT EXISTS idx_scan_item_results_baseline_lookup
                 ON scan_item_results(job_id,target_key,url);
+
+            CREATE TABLE IF NOT EXISTS scan_generations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, job_id INTEGER NOT NULL, target_key TEXT NOT NULL DEFAULT '',
+                phase TEXT NOT NULL DEFAULT 'discovering', generation_kind TEXT NOT NULL DEFAULT 'full',
+                query_contract TEXT NOT NULL DEFAULT '', observed_total INTEGER NOT NULL DEFAULT 0,
+                discovered_count INTEGER NOT NULL DEFAULT 0, completed_count INTEGER NOT NULL DEFAULT 0,
+                reused_count INTEGER NOT NULL DEFAULT 0, new_count INTEGER NOT NULL DEFAULT 0,
+                retry_count INTEGER NOT NULL DEFAULT 0, review_count INTEGER NOT NULL DEFAULT 0,
+                catchup_round INTEGER NOT NULL DEFAULT 0, list_cursor_page INTEGER NOT NULL DEFAULT 1,
+                list_cursor_item INTEGER NOT NULL DEFAULT -1, started_at TEXT NOT NULL, finished_at TEXT,
+                stats_json TEXT NOT NULL DEFAULT '{}', FOREIGN KEY(job_id) REFERENCES scan_jobs(id));
+            CREATE TABLE IF NOT EXISTS generation_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, generation_id INTEGER NOT NULL, job_id INTEGER NOT NULL,
+                target_key TEXT NOT NULL, stable_id TEXT NOT NULL, api_record_id TEXT NOT NULL DEFAULT '',
+                title TEXT NOT NULL DEFAULT '', url TEXT NOT NULL DEFAULT '', listed_date TEXT,
+                doc_flag TEXT NOT NULL DEFAULT '', content_fingerprint TEXT NOT NULL DEFAULT '',
+                page_number INTEGER NOT NULL DEFAULT 1, item_index INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'pending', detail_status TEXT NOT NULL DEFAULT '',
+                document_id INTEGER, attempt_count INTEGER NOT NULL DEFAULT 0, last_error TEXT NOT NULL DEFAULT '',
+                first_seen_at TEXT NOT NULL, last_seen_at TEXT NOT NULL, completed_at TEXT,
+                UNIQUE(generation_id, stable_id));
+            CREATE INDEX IF NOT EXISTS idx_generation_items_claim ON generation_items(job_id, target_key, status);
+            CREATE INDEX IF NOT EXISTS idx_generation_items_stable ON generation_items(job_id, stable_id);
+            CREATE TABLE IF NOT EXISTS source_inventory (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, target_key TEXT NOT NULL, stable_id TEXT NOT NULL,
+                api_record_id TEXT NOT NULL DEFAULT '', title TEXT NOT NULL DEFAULT '', url TEXT NOT NULL DEFAULT '',
+                listed_date TEXT, doc_flag TEXT NOT NULL DEFAULT '', content_fingerprint TEXT NOT NULL DEFAULT '',
+                first_seen_at TEXT NOT NULL, last_seen_at TEXT NOT NULL, last_generation_id INTEGER,
+                is_present INTEGER NOT NULL DEFAULT 1, last_detail_status TEXT NOT NULL DEFAULT '',
+                last_document_id INTEGER, UNIQUE(target_key, stable_id));
+            CREATE TABLE IF NOT EXISTS continuous_schedules (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, site_key TEXT NOT NULL UNIQUE,
+                source_signature TEXT NOT NULL DEFAULT '[]', enabled INTEGER NOT NULL DEFAULT 1,
+                incremental_interval_hours REAL NOT NULL DEFAULT 6, full_reconcile_interval_days REAL NOT NULL DEFAULT 7,
+                last_incremental_at TEXT, last_full_reconcile_at TEXT, next_incremental_at TEXT,
+                next_full_reconcile_at TEXT, last_job_id INTEGER, last_status TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL);
             """
         )
 
@@ -394,7 +528,7 @@ class Database:
             "current_district_index", "total_by_district_json", "examined_by_district_json",
             "coverage_status", "completion_kind", "access_count", "retry_count", "rest_count",
             "resumed_count", "pause_reason", "cooldown_until", "last_error",
-            "baseline_job_id", "source_signature",
+            "baseline_job_id", "source_signature", "scan_phase", "generation_id", "generation_stats_json",
         }
         values = {k: v for k, v in values.items() if k in allowed}
         sql = ",".join(f"{key}=?" for key in values)

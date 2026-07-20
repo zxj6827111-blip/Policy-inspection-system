@@ -10,7 +10,7 @@ from chinese_calendar import is_workday
 from playwright.async_api import async_playwright
 
 from app.collector import BrowserCollector, LinkChecker
-from app.config import SafetyConfig, ScanTarget, resolve_target
+from app.config import ContinuousScanConfig, SafetyConfig, ScanTarget, resolve_target, SCAN_SITES
 from app.db import Database, utc_now
 from app.domain import (
     CooldownPause,
@@ -21,11 +21,19 @@ from app.domain import (
     PolicyListItem,
     PolicyRecord,
     SafetyPause,
+    ScanPhase,
 )
 from app.putuo_collector import PUTUO_QUERY_CONTRACT, PutuoDistrictCollector
 from app.repository import PAGE_LINK_CHECK_VERSION, Repository
 from app.rules import WorkdayCalendar, evaluate_record
 from app.safety import SafetyController
+from app.snapshot_scan import (
+    catchup_head,
+    coverage_from_generation,
+    discover_target_pages,
+    list_item_from_generation_row,
+    refresh_generation_stats,
+)
 
 
 class JobManager:
@@ -36,6 +44,8 @@ class JobManager:
         self._guard = asyncio.Lock()
         self._host_locks: dict[str, asyncio.Lock] = {}
         self._run_slots = asyncio.Semaphore(2)
+        self.continuous_config = ContinuousScanConfig.from_env()
+        self._scheduler_task: asyncio.Task | None = None
 
     async def create_and_start(
         self, districts: list[str], mode: str, max_documents: int = 0, baseline_job_id: int | None = None,
@@ -299,6 +309,15 @@ class JobManager:
         self._tasks[job_id] = asyncio.create_task(self._run(job_id))
 
     def recover_interrupted(self) -> None:
+        # 中断时 generation_items.checking 回退为 retry，避免卡死
+        with self.db.connect() as conn:
+            interrupted_ids = [
+                int(r["id"]) for r in conn.execute(
+                    "SELECT id FROM scan_jobs WHERE status IN ('pending','running')"
+                ).fetchall()
+            ]
+        for iid in interrupted_ids:
+            self.repo.mark_checking_as_retry(iid)
         with self.db.connect() as conn:
             rows = conn.execute(
                 "SELECT id FROM scan_jobs WHERE status IN ('pending','running')"
@@ -480,10 +499,21 @@ class JobManager:
                                 rendered_checker=collector.check_rendered_link,
                                 rendered_hosts=getattr(collector, "rendered_hosts", None),
                             ) as checker:
-                                await self._scan_target(
-                                    job_id, job, target, target_index, max_documents, collector, checker, calendar,
-                                    detail_cache,
-                                )
+                                if target.collector_type == "putuo" and self._job_uses_snapshot_contract(job):
+                                    generation_id = await self._ensure_generation(
+                                        job, kind=job["mode"], target_key=target.key,
+                                    )
+                                    job = self.db.get_job(job_id) or job
+                                    full_reconcile = job.get("mode") == "full" and str(job.get("completion_kind") or "") == "full_reconcile"
+                                    await self._scan_target_snapshot(
+                                        job_id, job, target, target_index, max_documents, collector, checker, calendar,
+                                        detail_cache, generation_id, full_reconcile=full_reconcile,
+                                    )
+                                else:
+                                    await self._scan_target(
+                                        job_id, job, target, target_index, max_documents, collector, checker, calendar,
+                                        detail_cache,
+                                    )
                         for target, collector in collectors:
                             latest = self.db.get_job(job_id)
                             if not latest or latest["status"] != JobStatus.RUNNING:
@@ -504,11 +534,12 @@ class JobManager:
             if not latest or latest["status"] != JobStatus.RUNNING:
                 return
             self._validate_complete_coverage(job_id)
-            completion_kind = "incremental" if job["mode"] == "incremental" else "full"
+            completion_kind = "incremental" if job["mode"] == "incremental" else (job.get("completion_kind") or "full")
             self.db.update_job(
                 job_id, status=JobStatus.COMPLETED, finished_at=utc_now(), current_url="",
                 coverage_status="complete", completion_kind=completion_kind, pause_reason="",
             )
+            self._update_schedule_after_job(job_id, JobStatus.COMPLETED)
             self.db.add_job_event(job_id, "completed", f"{completion_kind} 扫描完成")
         except CooldownPause as exc:
             cooldown = datetime.now(timezone.utc) + timedelta(seconds=safety_config.cooldown_seconds)
@@ -517,6 +548,7 @@ class JobManager:
                 coverage_status="partial", completion_kind="safety_pause",
             )
             self.db.add_job_event(job_id, "cooling", str(exc), self.db.get_job(job_id)["current_url"])
+            self._update_schedule_after_job(job_id, JobStatus.COOLING)
             self._tasks[job_id] = asyncio.create_task(self._resume_after_cooldown(job_id, cooldown))
         except SafetyPause as exc:
             self.db.update_job(
@@ -524,12 +556,14 @@ class JobManager:
                 coverage_status="partial", completion_kind="data_pause",
             )
             self.db.add_job_event(job_id, "safety_pause", str(exc), self.db.get_job(job_id)["current_url"])
+            self._update_schedule_after_job(job_id, JobStatus.PAUSED)
         except Exception as exc:
             self.db.update_job(
                 job_id, status=JobStatus.FAILED, last_error=f"{type(exc).__name__}: {exc}",
                 finished_at=utc_now(), coverage_status="partial", completion_kind="failed",
             )
             self.db.add_job_event(job_id, "failed", f"{type(exc).__name__}: {exc}")
+            self._update_schedule_after_job(job_id, JobStatus.FAILED)
 
     @staticmethod
     def _is_cooldown_reason(reason: str) -> bool:
@@ -564,16 +598,20 @@ class JobManager:
         examined = json.loads(current["examined_by_district_json"] or "{}")
         previous_total = totals.get(label)
         examined_count = int(examined.get(label, 0))
+        uses_snapshot = bool(current.get("generation_id")) or self._job_uses_snapshot_contract(current)
         if (
             previous_total is not None
             and examined_count > 0
             and int(previous_total) != int(total)
         ):
-            if not allow_revision:
+            if uses_snapshot:
+                # 快照任务以稳定身份为准；totalCount 仅观测，不触发暂停。
+                allow_revision = True
+            elif not allow_revision:
                 raise SafetyPause(
                     f"{label} 列表总量在任务恢复后发生变化：原 {previous_total} 条，现 {total} 条"
                 )
-            if int(total) < examined_count:
+            if not uses_snapshot and int(total) < examined_count:
                 raise SafetyPause(
                     f"{label} 修订后的列表总量 {total} 小于已覆盖 {examined_count} 条"
                 )
@@ -586,11 +624,48 @@ class JobManager:
             examined_by_district_json=json.dumps(examined, ensure_ascii=False),
         )
 
+    @classmethod
+    def _job_uses_snapshot_contract(cls, job: dict) -> bool:
+        contract = cls._job_query_contract(job)
+        return contract == PUTUO_QUERY_CONTRACT or contract.endswith("-v3") or "snapshot" in contract
+
     def _validate_complete_coverage(self, job_id: int) -> None:
-        """只有列表总量、进度计数和逐条结果完全一致时才允许任务完成。"""
+        """完成校验：快照任务看 generation 状态；旧任务仍比 total/examined/results。"""
         current = self.db.get_job(job_id)
         if not current:
             raise SafetyPause("扫描任务在完成校验时不存在")
+        if self._job_uses_snapshot_contract(current):
+            with self.db.connect() as conn:
+                gen_rows = conn.execute(
+                    "SELECT id FROM scan_generations WHERE job_id=?", (job_id,),
+                ).fetchall()
+            if gen_rows:
+                mismatches = []
+                open_total = 0
+                unique_total = 0
+                terminal_total = 0
+                for grow in gen_rows:
+                    report = coverage_from_generation(self.repo, job_id, int(grow["id"]))
+                    open_total += report["open"]
+                    unique_total += report["unique_stable"]
+                    terminal_total += report["terminal"]
+                    if report["terminal"] != report["unique_stable"]:
+                        mismatches.append(
+                            f"generation {grow['id']} terminal {report['terminal']} / stable {report['unique_stable']}"
+                        )
+                    if report["observed_total"] and report["observed_total"] != report["unique_stable"]:
+                        mismatches.append(
+                            f"generation {grow['id']} observed {report['observed_total']} / stable {report['unique_stable']}"
+                        )
+                if open_total > 0:
+                    mismatches.append(f"仍有未终态条目 pending/checking/retry={open_total}")
+                if unique_total <= 0:
+                    mismatches.append("generation 中没有稳定身份条目")
+                if terminal_total > 0 and self.repo.scan_item_count(job_id) == 0:
+                    mismatches.append("终态条目已完成但没有任何详情结果")
+                if mismatches:
+                    raise SafetyPause("扫描覆盖校验失败，任务未标记完成：" + "；".join(mismatches))
+                return
         estimated = int(current["estimated_total"])
         examined = int(current["examined_count"])
         item_count = self.repo.scan_item_count(job_id)
@@ -727,6 +802,410 @@ class JobManager:
         if not self._baseline_document_id(row):
             return False, "基线没有可复用的详情文档"
         return True, "与基线的 URL、标题和列表发布日期一致"
+
+
+    async def _ensure_generation(self, job: dict, *, kind: str = "full", target_key: str = "") -> int:
+        job_id = int(job["id"])
+        # 每个 target 独立 generation，避免 list_cursor / 条目串源
+        if target_key:
+            existing = None
+            with self.db.connect() as conn:
+                row = conn.execute(
+                    """SELECT * FROM scan_generations WHERE job_id=? AND target_key=?
+                    ORDER BY id DESC LIMIT 1""",
+                    (job_id, target_key),
+                ).fetchone()
+                if row:
+                    existing = dict(row)
+            if existing:
+                self.db.update_job(job_id, generation_id=int(existing["id"]), scan_phase=ScanPhase.DISCOVERING)
+                return int(existing["id"])
+        elif job.get("generation_id"):
+            return int(job["generation_id"])
+        contract = self._job_query_contract(job) or PUTUO_QUERY_CONTRACT
+        gen_id = self.repo.create_generation(
+            job_id, target_key=target_key, generation_kind=kind, query_contract=contract,
+            phase=ScanPhase.DISCOVERING,
+        )
+        self.db.update_job(job_id, generation_id=gen_id, scan_phase=ScanPhase.DISCOVERING)
+        return gen_id
+
+    async def _process_generation_queue(
+        self, job_id, job, target, target_index, max_documents, collector, checker, calendar,
+        detail_cache, generation_id: int,
+    ) -> None:
+        """阶段 B：从 generation_items 领取 pending/retry 并幂等处理。"""
+        self.db.update_job(job_id, scan_phase=ScanPhase.PROCESSING, current_district=target.label)
+        self.repo.update_generation(generation_id, phase=ScanPhase.PROCESSING)
+        while True:
+            latest = self.db.get_job(job_id)
+            if not latest or latest["status"] != JobStatus.RUNNING:
+                return
+            if max_documents and int(latest["batch_examined_count"]) >= max_documents:
+                self._mark_partial_limit(job_id, latest)
+                return
+            row = self.repo.claim_generation_item(job_id, target.key)
+            if not row:
+                break
+            item = list_item_from_generation_row(row, target)
+            self._prepare_item_source(item, target)
+            try:
+                await self._process_list_item(
+                    job_id, job, target, item, collector, checker, calendar, detail_cache,
+                    generation_item_id=int(row["id"]),
+                )
+            except SafetyPause:
+                # 数据/安全暂停必须向上抛出；条目标为 retry 以便恢复后续处理
+                self.repo.complete_generation_item(
+                    int(row["id"]), status="retry", error="safety pause during detail",
+                )
+                raise
+            except Exception as exc:
+                self.repo.complete_generation_item(
+                    int(row["id"]), status="retry", error=f"{type(exc).__name__}: {exc}",
+                )
+                raise
+            refresh_generation_stats(self.repo, generation_id)
+            self._sync_job_stats_from_generation(job_id, generation_id)
+
+    def _sync_job_stats_from_generation(self, job_id: int, generation_id: int) -> None:
+        counts = self.repo.generation_item_counts(generation_id)
+        gen = self.repo.get_generation(generation_id) or {}
+        # 聚合全任务所有 generation，避免多来源时被最后一个来源覆盖
+        with self.db.connect() as conn:
+            all_gens = conn.execute(
+                "SELECT id FROM scan_generations WHERE job_id=?", (job_id,),
+            ).fetchall()
+        discovered = 0
+        completed = 0
+        reused = 0
+        retry = 0
+        review = 0
+        pending = 0
+        for grow in all_gens:
+            c = self.repo.generation_item_counts(int(grow["id"]))
+            discovered += c["total"]
+            completed += c.get("completed", 0)
+            reused += c.get("reused", 0)
+            retry += c.get("retry", 0)
+            review += c.get("review", 0)
+            pending += c.get("pending", 0)
+        stats = {
+            "discovered": discovered,
+            "completed": completed,
+            "reused": reused,
+            "new": int(gen.get("new_count") or 0),
+            "retry": retry,
+            "review": review,
+            "pending": pending,
+            "catchup_round": int(gen.get("catchup_round") or 0),
+            "observed_total": int(gen.get("observed_total") or 0),
+            "active_generation_id": generation_id,
+        }
+        terminal = completed + reused + review
+        job = self.db.get_job(job_id) or {}
+        totals = json.loads(job.get("total_by_district_json") or "{}")
+        estimated = sum(int(v) for v in totals.values()) if totals else discovered
+        self.db.update_job(
+            job_id,
+            estimated_total=estimated or discovered,
+            examined_count=terminal,
+            generation_stats_json=json.dumps(stats, ensure_ascii=False),
+        )
+
+    async def _scan_target_snapshot(
+        self, job_id, job, target, target_index, max_documents, collector, checker, calendar,
+        detail_cache, generation_id: int, *, full_reconcile: bool = False,
+    ) -> None:
+        latest = self.db.get_job(job_id)
+        gen = self.repo.get_generation(generation_id) or {}
+        start_page = int(gen.get("list_cursor_page") or 1)
+        if latest and int(latest.get("current_district_index") or 0) == target_index:
+            # resume mid discovery
+            start_page = max(start_page, int(latest.get("current_page") or 1))
+
+        def is_running() -> bool:
+            cur = self.db.get_job(job_id)
+            return bool(cur and cur["status"] == JobStatus.RUNNING)
+
+        phase = str(gen.get("phase") or ScanPhase.DISCOVERING)
+        if phase in {ScanPhase.DISCOVERING, ScanPhase.FULL_RECONCILE, ScanPhase.INCREMENTAL_DISCOVERY, ""}:
+            if full_reconcile or phase == ScanPhase.FULL_RECONCILE:
+                self.db.update_job(job_id, scan_phase=ScanPhase.FULL_RECONCILE)
+                self.repo.update_generation(generation_id, phase=ScanPhase.FULL_RECONCILE)
+            await discover_target_pages(
+                collector=collector, target=target, generation_id=generation_id, job_id=job_id,
+                repo=self.repo, db=self.db, start_page=start_page, is_running=is_running,
+                mark_absent=full_reconcile,
+            )
+            if not is_running():
+                return
+
+        async def process_pending() -> None:
+            await self._process_generation_queue(
+                job_id, job, target, target_index, max_documents, collector, checker, calendar,
+                detail_cache, generation_id,
+            )
+
+        await process_pending()
+        if not is_running():
+            return
+        # catch-up
+        await catchup_head(
+            collector=collector, target=target, generation_id=generation_id, job_id=job_id,
+            repo=self.repo, db=self.db, config=self.continuous_config, is_running=is_running,
+            process_pending=process_pending,
+        )
+        if not is_running():
+            return
+        await process_pending()
+        # observed total bookkeeping
+        counts = self.repo.generation_item_counts(generation_id)
+        # 快照任务：分来源总量与已覆盖以 generation 唯一身份为准；collector 观测值仅写入 generation.observed_total
+        real_total = counts["total"]
+        if hasattr(collector, "estimated_total"):
+            try:
+                est = int(await collector.estimated_total())
+                if est > real_total:
+                    real_total = est
+            except Exception:
+                pass
+        # Discovery plus bounded catch-up has reached the final stable identity set.
+        # The remote total is only a diagnostic signal; completion is gated by this set.
+        self.repo.update_generation(generation_id, observed_total=counts["total"])
+        await self._record_target_total(job_id, target.label, real_total, allow_revision=True)
+        examined_by = json.loads((self.db.get_job(job_id) or {}).get("examined_by_district_json") or "{}")
+        examined_by[target.label] = counts["total"]
+        totals = json.loads((self.db.get_job(job_id) or {}).get("total_by_district_json") or "{}")
+        totals[target.label] = real_total
+        self.db.update_job(
+            job_id,
+            total_by_district_json=json.dumps(totals, ensure_ascii=False),
+            examined_by_district_json=json.dumps(examined_by, ensure_ascii=False),
+            estimated_total=sum(int(v) for v in totals.values()),
+        )
+        self._sync_job_stats_from_generation(job_id, generation_id)
+        self.db.update_job(
+            job_id, current_district_index=target_index + 1, current_district="",
+            current_page=1, current_item_index=-1, scan_phase=ScanPhase.IDLE,
+        )
+
+    async def _process_list_item(
+        self, job_id, job, target, item, collector, checker, calendar, detail_cache,
+        *, generation_item_id: int | None = None,
+    ) -> None:
+        """处理单条列表项；generation_item_id 非空时走幂等计数。"""
+        baseline_job_id = job.get("baseline_job_id") if (
+            job["mode"] == "incremental" or str(job.get("completion_kind") or "") == "full_reconcile"
+        ) else None
+        counted_before = False
+        if generation_item_id is not None:
+            # 已完成的 generation 项不会再次 claim；此处 claim 后才进入
+            pass
+
+        cached = detail_cache.get(item.url)
+        if cached:
+            inspection, document_id = cached
+            detail_status = "reused_current_no_header" if inspection.record is None else "reused_current_detail"
+            reason = "同一任务中该 URL 已在另一来源完成详情检查，复用当前任务结果"
+            self._record_item_result(
+                job_id, item, inspection, detail_status=detail_status, document_id=document_id,
+                reused_document_id=document_id, baseline_job_id=baseline_job_id, reason=reason,
+            )
+            if generation_item_id is not None:
+                self.repo.complete_generation_item(
+                    generation_item_id, status="reused", detail_status=detail_status, document_id=document_id,
+                )
+                self._advance_progress_once(
+                    job_id, target.label, item, skipped=True, generation_item_id=generation_item_id,
+                )
+            else:
+                self._advance_progress(job_id, target.label, item.page_number, item.item_index, skipped=True)
+            return
+
+        current_item = self.repo.current_job_item(job_id, item.url) if item.url else None
+        if current_item and int(current_item.get("link_check_version") or 0) >= PAGE_LINK_CHECK_VERSION:
+            inspection = self._inspection_from_baseline(item, current_item)
+            document_id = self._baseline_document_id(current_item)
+            same_position = (
+                current_item["target_key"] == item.source_key
+                and int(current_item["page_number"]) == item.page_number
+                and int(current_item["item_index"]) == item.item_index
+            )
+            performed_statuses = {"checked_complete", "checked_incomplete", "no_header_pass"}
+            already_performed_here = same_position and current_item["detail_status"] in performed_statuses
+            if already_performed_here:
+                detail_status = current_item["detail_status"]
+                reason = "任务恢复时发现该条详情结果已落库，直接恢复进度"
+            else:
+                detail_status = (
+                    "reused_current_no_header" if inspection.record is None else "reused_current_detail"
+                )
+                reason = "同一任务中该 URL 已完成详情检查，复用数据库中的当前任务结果"
+            self._record_item_result(
+                job_id, item, inspection, detail_status=detail_status, document_id=document_id,
+                reused_document_id=None if already_performed_here else document_id,
+                baseline_job_id=baseline_job_id, reason=reason,
+            )
+            detail_cache[item.url] = (inspection, document_id)
+            if generation_item_id is not None:
+                self.repo.complete_generation_item(
+                    generation_item_id, status="reused" if not already_performed_here else "completed",
+                    detail_status=detail_status, document_id=document_id,
+                )
+                self._advance_progress_once(
+                    job_id, target.label, item, skipped=not already_performed_here,
+                    generation_item_id=generation_item_id,
+                )
+            else:
+                self._advance_progress(
+                    job_id, target.label, item.page_number, item.item_index,
+                    skipped=not already_performed_here,
+                )
+            return
+
+        if baseline_job_id and item.url:
+            baseline = self.repo.baseline_item(int(baseline_job_id), item)
+            if baseline:
+                can_reuse, reason = self._can_reuse_baseline_item(baseline, item)
+                if can_reuse:
+                    inspection = self._inspection_from_baseline(item, baseline)
+                    document_id = self._baseline_document_id(baseline)
+                    finding_delta = 0
+                    if document_id is not None:
+                        copied_findings = self.repo.copy_baseline_findings(int(baseline_job_id), job_id, document_id)
+                        finding_delta = len(copied_findings)
+                        self.repo.copy_baseline_link_checks(int(baseline_job_id), job_id, document_id)
+                        self.repo.record_job_document(
+                            job_id, document_id, target.label, item.page_number, item.item_index,
+                            "skipped", reason,
+                        )
+                    detail_status = "reused_baseline_no_header" if inspection.record is None else "reused_baseline_detail"
+                    self._record_item_result(
+                        job_id, item, inspection, detail_status=detail_status, document_id=document_id,
+                        reused_document_id=document_id, baseline_job_id=int(baseline_job_id), reason=reason,
+                    )
+                    detail_cache[item.url] = (inspection, document_id)
+                    if generation_item_id is not None:
+                        self.repo.complete_generation_item(
+                            generation_item_id, status="reused", detail_status=detail_status, document_id=document_id,
+                        )
+                        self.repo.update_inventory_detail(
+                            target.key, item.stable_id, detail_status=detail_status, document_id=document_id,
+                        )
+                        self._advance_progress_once(
+                            job_id, target.label, item, skipped=True, finding_delta=finding_delta,
+                            generation_item_id=generation_item_id,
+                        )
+                    else:
+                        self._advance_progress(
+                            job_id, target.label, item.page_number, item.item_index,
+                            skipped=True, finding_delta=finding_delta,
+                        )
+                    return
+        try:
+            inspection = self._coerce_inspection(await collector.open_item(item))
+        except ItemReviewRequired as exc:
+            self.repo.record_scan_exception(job_id, item, exc.category, str(exc))
+            self._record_item_result(
+                job_id, item, DetailInspection(record=None, header_detected=False),
+                detail_status="exception", reason=str(exc), baseline_job_id=baseline_job_id,
+            )
+            self.db.add_job_event(job_id, "exception_queued", str(exc), item.url, category=exc.category)
+            if generation_item_id is not None:
+                self.repo.complete_generation_item(
+                    generation_item_id, status="review", detail_status="exception", error=str(exc),
+                )
+                self._advance_progress_once(
+                    job_id, target.label, item, skipped=True, current_url=item.url,
+                    generation_item_id=generation_item_id,
+                )
+            else:
+                self._advance_progress(
+                    job_id, target.label, item.page_number, item.item_index, skipped=True, current_url=item.url,
+                )
+            return
+        if inspection.record is None:
+            reason = "未发现七项政策表头，按规则 PASS，不进行字段问题检查"
+            self._record_item_result(
+                job_id, item, inspection, detail_status="no_header_pass", baseline_job_id=baseline_job_id,
+                reason=reason,
+            )
+            detail_cache[item.url] = (inspection, None)
+            if generation_item_id is not None:
+                self.repo.complete_generation_item(
+                    generation_item_id, status="completed", detail_status="no_header_pass",
+                )
+                self.repo.update_inventory_detail(
+                    target.key, item.stable_id, detail_status="no_header_pass", document_id=None,
+                )
+                self._advance_progress_once(
+                    job_id, target.label, item, skipped=False, current_url=item.url,
+                    generation_item_id=generation_item_id,
+                )
+            else:
+                self._advance_progress(
+                    job_id, target.label, item.page_number, item.item_index,
+                    skipped=False, current_url=item.url,
+                )
+            return
+        record = inspection.record
+        record.district = target.district
+        record.source_site = record.source_site or target.label
+        record.header_detected = inspection.header_detected
+        record.missing_metadata_fields = self._all_missing_fields(inspection)
+        agency_rows = self.db.agency_rules(target.district)
+        findings = evaluate_record(record, agency_rows, calendar)
+        document_id = self.repo.save_record(job_id, record, findings)
+        detail_status = "checked_incomplete" if record.missing_metadata_fields else "checked_complete"
+        reason = (
+            "详情页表头字段不完整，已记录 META-001 并继续既有检查"
+            if record.missing_metadata_fields else "详情页表头完整"
+        )
+        self.repo.record_job_document(
+            job_id, document_id, target.label, item.page_number, item.item_index,
+            "checking_links", "关联链接检查进行中",
+        )
+        self.db.update_job(job_id, current_url=record.url)
+        for related in record.related_links:
+            link_result = await checker.check(related.kind, related.url, related)
+            self.repo.save_link_check(job_id, document_id, link_result)
+        self.repo.record_job_document(
+            job_id, document_id, target.label, item.page_number, item.item_index, "processed", reason
+        )
+        self._record_item_result(
+            job_id, item, inspection, detail_status=detail_status, document_id=document_id,
+            baseline_job_id=baseline_job_id, reason=reason,
+        )
+        detail_cache[item.url] = (inspection, document_id)
+        if generation_item_id is not None:
+            self.repo.complete_generation_item(
+                generation_item_id, status="completed", detail_status=detail_status, document_id=document_id,
+            )
+            self.repo.update_inventory_detail(
+                target.key, item.stable_id, detail_status=detail_status, document_id=document_id,
+            )
+            self._advance_progress_once(
+                job_id, target.label, item, skipped=False, finding_delta=len(findings),
+                current_url=record.url, generation_item_id=generation_item_id,
+            )
+        else:
+            self._advance_progress(
+                job_id, target.label, item.page_number, item.item_index,
+                skipped=False, finding_delta=len(findings), current_url=record.url,
+            )
+
+    def _advance_progress_once(
+        self, job_id: int, district: str, item: PolicyListItem, *, skipped: bool,
+        finding_delta: int = 0, current_url: str = "", generation_item_id: int | None = None,
+    ) -> None:
+        """generation 路径：每个 generation_item 只累加一次计数。"""
+        # 使用 job_events 记录已计数的 item id，简单用 generation_items.completed 状态保证幂等
+        # 这里直接累加；claim 保证每条只处理一次成功路径
+        self._advance_progress(
+            job_id, district, item.page_number, item.item_index,
+            skipped=skipped, finding_delta=finding_delta, current_url=current_url or item.url,
+        )
 
     async def _scan_target(
         self, job_id, job, target, target_index, max_documents, collector, checker, calendar,
@@ -1012,3 +1491,115 @@ class JobManager:
             self.db.add_job_event(
                 job_id, event_type, json.dumps(details, ensure_ascii=False), current.get("current_url", ""), **details
             )
+
+    def _update_schedule_after_job(self, job_id: int, status: JobStatus) -> None:
+        """Advance cadence only after a terminal result, never when a job merely starts."""
+        schedule = self.repo.schedule_for_last_job(job_id)
+        job = self.db.get_job(job_id)
+        if not schedule or not job:
+            return
+        now = datetime.now(timezone.utc)
+        cfg = self.continuous_config
+        values: dict[str, object] = {"last_status": str(status)}
+        if status == JobStatus.COMPLETED:
+            if job["mode"] == "full":
+                values.update(
+                    last_full_reconcile_at=now.isoformat(),
+                    next_full_reconcile_at=(now + timedelta(days=cfg.full_reconcile_interval_days)).isoformat(),
+                    next_incremental_at=(now + timedelta(hours=cfg.incremental_interval_hours)).isoformat(),
+                )
+            else:
+                values.update(
+                    last_incremental_at=now.isoformat(),
+                    next_incremental_at=(now + timedelta(hours=cfg.incremental_interval_hours)).isoformat(),
+                )
+        else:
+            retry_at = (now + timedelta(minutes=cfg.failure_retry_minutes)).isoformat()
+            values["next_incremental_at"] = retry_at
+            if job["mode"] == "full":
+                values["next_full_reconcile_at"] = retry_at
+        self.repo.update_schedule(str(schedule["site_key"]), **values)
+    def ensure_continuous_scheduler(self) -> None:
+        if not self.continuous_config.enabled:
+            return
+        if self._scheduler_task and not self._scheduler_task.done():
+            return
+        self._scheduler_task = asyncio.create_task(self._continuous_scheduler_loop())
+
+    async def _continuous_scheduler_loop(self) -> None:
+        while True:
+            try:
+                await self._tick_continuous_schedules()
+            except Exception as exc:
+                # 调度失败不拖垮主服务
+                print(f"continuous scheduler error: {type(exc).__name__}: {exc}")
+            await asyncio.sleep(60)
+
+    async def _tick_continuous_schedules(self) -> None:
+        cfg = self.continuous_config
+        if not cfg.enabled:
+            return
+        now = datetime.now(timezone.utc)
+        from app.config import targets_for_site
+        for site_key, _site in SCAN_SITES.items():
+            if cfg.site_keys and site_key not in cfg.site_keys:
+                continue
+            labels = [target.label for target in targets_for_site(site_key)]
+            schedule = self.repo.get_or_create_schedule(
+                site_key, labels,
+                incremental_hours=cfg.incremental_interval_hours,
+                reconcile_days=cfg.full_reconcile_interval_days,
+            )
+            if not schedule.get("enabled") or self._active_job_for(labels):
+                continue
+            due_full = schedule.get("next_full_reconcile_at") and datetime.fromisoformat(
+                schedule["next_full_reconcile_at"]
+            ) <= now
+            due_incremental = schedule.get("next_incremental_at") and datetime.fromisoformat(
+                schedule["next_incremental_at"]
+            ) <= now
+            if not due_full and not due_incremental:
+                continue
+            baseline = self.eligible_baseline_for(labels)
+            if due_full:
+                job_id = self.db.create_job(
+                    labels, "full", self._safety_payload(labels), 0,
+                    int(baseline["id"]) if baseline else None,
+                )
+                self.db.update_job(job_id, completion_kind="full_reconcile", scan_phase=ScanPhase.FULL_RECONCILE)
+                status = "running_full_reconcile"
+            elif baseline:
+                job_id = self.db.create_job(
+                    labels, "incremental", self._safety_payload(labels), 0, int(baseline["id"]),
+                )
+                self.db.update_job(job_id, scan_phase=ScanPhase.INCREMENTAL_DISCOVERY)
+                status = "running_incremental"
+            else:
+                # An opted-in site needs one baseline before incremental reuse is possible.
+                job_id = self.db.create_job(labels, "full", self._safety_payload(labels), 0, None)
+                self.db.update_job(job_id, completion_kind="initial_baseline", scan_phase=ScanPhase.DISCOVERING)
+                status = "running_initial_baseline"
+            self.repo.update_schedule(site_key, last_job_id=job_id, last_status=status)
+            self._tasks[job_id] = asyncio.create_task(self._run(job_id))
+    def continuous_status(self) -> list[dict]:
+        from app.config import targets_for_site
+        rows = []
+        for site_key, site in SCAN_SITES.items():
+            labels = [t.label for t in targets_for_site(site_key)]
+            schedule = self.repo.get_or_create_schedule(
+                site_key, labels,
+                incremental_hours=self.continuous_config.incremental_interval_hours,
+                reconcile_days=self.continuous_config.full_reconcile_interval_days,
+            )
+            rows.append({
+                "site_key": site_key,
+                "site_label": site.label,
+                "last_incremental_at": schedule.get("last_incremental_at"),
+                "last_full_reconcile_at": schedule.get("last_full_reconcile_at"),
+                "next_incremental_at": schedule.get("next_incremental_at"),
+                "next_full_reconcile_at": schedule.get("next_full_reconcile_at"),
+                "last_job_id": schedule.get("last_job_id"),
+                "last_status": schedule.get("last_status"),
+                "enabled": bool(schedule.get("enabled")),
+            })
+        return rows

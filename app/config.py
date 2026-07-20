@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -146,3 +148,50 @@ class SafetyConfig:
 def ensure_directories() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+
+
+@dataclass(frozen=True)
+class ContinuousScanConfig:
+    """持续增量发现与完整列表对账调度配置。"""
+    incremental_interval_hours: float = 6.0
+    full_reconcile_interval_days: float = 7.0
+    max_catchup_rounds: int = 3
+    catchup_empty_rounds_to_finish: int = 2
+    failure_retry_minutes: int = 15
+    site_keys: tuple[str, ...] = ()
+    enabled: bool = False
+
+    @classmethod
+    def from_env(cls) -> "ContinuousScanConfig":
+        """Read opt-in continuous-scan settings without scheduling at service startup."""
+        def flag(name: str, default: bool) -> bool:
+            return os.getenv(name, str(default)).strip().lower() in {"1", "true", "yes", "on"}
+
+        def number(name: str, default: float, cast):
+            raw = os.getenv(name)
+            return cast(raw) if raw not in (None, "") else default
+
+        site_keys = tuple(key.strip() for key in os.getenv("CONTINUOUS_SCAN_SITE_KEYS", "").split(",") if key.strip())
+        config = cls(
+            incremental_interval_hours=number("CONTINUOUS_SCAN_INCREMENTAL_HOURS", 6.0, float),
+            full_reconcile_interval_days=number("CONTINUOUS_SCAN_FULL_RECONCILE_DAYS", 7.0, float),
+            max_catchup_rounds=number("CONTINUOUS_SCAN_MAX_CATCHUP_ROUNDS", 3, int),
+            catchup_empty_rounds_to_finish=number("CONTINUOUS_SCAN_EMPTY_CATCHUP_ROUNDS", 2, int),
+            failure_retry_minutes=number("CONTINUOUS_SCAN_FAILURE_RETRY_MINUTES", 15, int),
+            site_keys=site_keys,
+            enabled=flag("CONTINUOUS_SCAN_ENABLED", False),
+        )
+        config.validate()
+        return config
+
+    def validate(self) -> None:
+        if self.incremental_interval_hours < 1:
+            raise ValueError("增量发现间隔不得低于 1 小时")
+        if self.full_reconcile_interval_days < 1:
+            raise ValueError("完整对账间隔不得低于 1 天")
+        if self.max_catchup_rounds < 1:
+            raise ValueError("追赶轮数至少为 1")
+        if self.failure_retry_minutes < 1:
+            raise ValueError('failure retry interval must be at least one minute')
+        if self.catchup_empty_rounds_to_finish < 1:
+            raise ValueError("结束前无新增轮数至少为 1")

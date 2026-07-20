@@ -16,6 +16,28 @@ class JobStatus(StrEnum):
     FAILED = "failed"
 
 
+class ScanPhase(StrEnum):
+    """任务扫描阶段，供 UI 与恢复逻辑区分。"""
+
+    IDLE = "idle"
+    DISCOVERING = "discovering"
+    PROCESSING = "processing"
+    CATCHING_UP = "catching_up"
+    INCREMENTAL_DISCOVERY = "incremental_discovery"
+    FULL_RECONCILE = "full_reconcile"
+    COOLING = "cooling"
+    REVIEW = "review"
+
+
+class GenerationItemStatus(StrEnum):
+    PENDING = "pending"
+    CHECKING = "checking"
+    COMPLETED = "completed"
+    RETRY = "retry"
+    REVIEW = "review"
+    REUSED = "reused"
+
+
 @dataclass
 class RelatedLink:
     kind: str
@@ -41,6 +63,10 @@ class PolicyListItem:
     source_site: str = ""
     source_key: str = ""
     source_channel_id: str = ""
+    stable_id: str = ""
+    content_fingerprint: str = ""
+    api_record_id: str = ""
+    doc_flag: str = ""
 
 
 @dataclass
