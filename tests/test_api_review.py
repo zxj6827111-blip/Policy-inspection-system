@@ -152,7 +152,7 @@ def test_baseline_and_item_stats_apis_expose_completed_full_runs_only(tmp_path, 
     assert "必须选择" in missing_baseline.json()["detail"]
 
 
-def test_index_exposes_three_fixed_sites_without_manual_mode_or_baseline(tmp_path, monkeypatch):
+def test_index_exposes_district_and_sixteen_municipal_sites(tmp_path, monkeypatch):
     monkeypatch.setattr(main_module, "db", Database(tmp_path / "index.db"))
     monkeypatch.setattr(main_module, "manager", JobManager(main_module.db))
     with TestClient(main_module.app) as client:
@@ -160,16 +160,45 @@ def test_index_exposes_three_fixed_sites_without_manual_mode_or_baseline(tmp_pat
 
     assert response.status_code == 200
     html = response.text
-    assert html.count('name="site_key"') == 3
+    assert html.count('name="site_key"') == 17
     assert 'value="putuo_district"' in html
     assert 'value="municipal_putuo"' in html
     assert 'value="municipal_chongming"' in html
+    assert 'value="municipal_huangpu"' in html
+    assert 'value="municipal_pudong"' in html
     assert "区政府、委办局、街道镇、规范性文件、党政混合信息" in html
+    assert "site-group-district" in html
+    assert "site-option-chip" in html
+    assert "默认折叠" in html
+    assert "请自行勾选" in html
     assert 'id="auto-start-btn"' in html
     assert 'id="full-rebuild-btn"' in html
     assert 'name="mode"' not in html
     assert 'name="baseline_job_id"' not in html
+    # checkboxes must not be pre-selected
+    assert 'name="site_key" checked' not in html
+    assert 'checked name="site_key"' not in html
 
+
+
+def test_municipal_sites_cover_sixteen_districts_with_site_ids():
+    from app.config import DISTRICT_SITE_IDS, SCAN_SITES, municipal_sites, district_sites, resolve_site
+
+    munis = municipal_sites()
+    assert len(munis) == 16
+    assert len(district_sites()) == 1
+    assert district_sites()[0].key == "putuo_district"
+    assert len(SCAN_SITES) == 17
+    assert set(DISTRICT_SITE_IDS) == {site.district for site in munis}
+    assert DISTRICT_SITE_IDS["普陀区"] == "0075"
+    assert DISTRICT_SITE_IDS["崇明区"] == "0085"
+    assert DISTRICT_SITE_IDS["黄浦区"] == "0071"
+    assert DISTRICT_SITE_IDS["浦东新区"] == "0070"
+    for site in munis:
+        resolved = resolve_site(site.key)
+        assert resolved.source_level == "市级"
+        assert resolved.host == "www.shanghai.gov.cn"
+        assert resolved.target_keys == (site.key,)
 
 def test_site_jobs_create_separate_fixed_jobs_and_choose_mode_automatically(tmp_path, monkeypatch):
     db = Database(tmp_path / "site-jobs.db")

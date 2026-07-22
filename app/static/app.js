@@ -266,25 +266,36 @@ function syncSiteOptionStates() {
   setScanActionsBusy(scanActionsBusy);
 }
 
+function isMunicipalChip(runtime) {
+  return Boolean(runtime.closest('.site-option-chip'));
+}
+
 function renderSiteStatuses(sites) {
   for (const site of sites) {
     const runtime = $(`#site-runtime-${site.key}`);
     if (!runtime) continue;
     const job = site.latest_job;
+    const chip = isMunicipalChip(runtime);
     if (site.next_action === 'existing' && job) {
-      runtime.textContent = `任务 #${job.id} · ${statusNames[job.status] || job.status} · ${job.examined_count}/${job.estimated_total || '?'}`;
+      runtime.textContent = chip
+        ? `#${job.id} · ${statusNames[job.status] || job.status}`
+        : `任务 #${job.id} · ${statusNames[job.status] || job.status} · ${job.examined_count}/${job.estimated_total || '?'}`;
       runtime.className = `site-runtime site-runtime-${job.status}`;
     } else if (site.next_action === 'resume' && job) {
-      runtime.textContent = `任务 #${job.id} · ${statusNames[job.status] || job.status} · 选择后继续原任务`;
+      runtime.textContent = chip
+        ? `#${job.id} · 可继续`
+        : `任务 #${job.id} · ${statusNames[job.status] || job.status} · 选择后继续原任务`;
       runtime.className = `site-runtime site-runtime-${job.status}`;
     } else if (site.next_mode === 'incremental') {
-      runtime.textContent = `基线 #${site.baseline_job_id} 已就绪 · 下次自动增量`;
+      runtime.textContent = chip
+        ? `基线 #${site.baseline_job_id}`
+        : `基线 #${site.baseline_job_id} 已就绪 · 下次自动增量`;
       runtime.className = 'site-runtime site-runtime-ready';
     } else if (job && job.mode === 'full' && job.status === 'completed') {
-      runtime.textContent = `任务 #${job.id} 的逐条记录不完整 · 需重新全量`;
+      runtime.textContent = chip ? '记录不完整 · 需全量' : `任务 #${job.id} 的逐条记录不完整 · 需重新全量`;
       runtime.className = 'site-runtime site-runtime-invalid';
     } else {
-      runtime.textContent = '尚未建立完整基线 · 首次自动全量';
+      runtime.textContent = chip ? '首次全量' : '尚未建立完整基线 · 首次自动全量';
       runtime.className = 'site-runtime site-runtime-new';
     }
   }

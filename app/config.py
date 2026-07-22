@@ -36,9 +36,45 @@ class ScanSite:
     host: str
 
 
+# 上海市 16 个行政区县（市级政策文件库 siteId，已与 gwk/policy/page 核对）
+MUNICIPAL_DISTRICTS: tuple[tuple[str, str, str], ...] = (
+    ("municipal_pudong", "浦东新区", "0070"),
+    ("municipal_huangpu", "黄浦区", "0071"),
+    ("municipal_xuhui", "徐汇区", "0073"),
+    ("municipal_changning", "长宁区", "0074"),
+    ("municipal_jingan", "静安区", "0072"),
+    ("municipal_putuo", "普陀区", "0075"),
+    ("municipal_hongkou", "虹口区", "0076"),
+    ("municipal_yangpu", "杨浦区", "0077"),
+    ("municipal_minhang", "闵行区", "0079"),
+    ("municipal_baoshan", "宝山区", "0078"),
+    ("municipal_jiading", "嘉定区", "0080"),
+    ("municipal_jinshan", "金山区", "0081"),
+    ("municipal_songjiang", "松江区", "0082"),
+    ("municipal_qingpu", "青浦区", "0083"),
+    ("municipal_fengxian", "奉贤区", "0084"),
+    ("municipal_chongming", "崇明区", "0085"),
+)
+
+
+def _municipal_target(key: str, district: str) -> ScanTarget:
+    return ScanTarget(
+        key, f"市级平台·{district}", district, "市级", "上海市政策文件库",
+    )
+
+
+def _municipal_site(key: str, district: str) -> ScanSite:
+    return ScanSite(
+        key, f"市级平台·{district}", district, "市级", "上海市政策文件库",
+        (key,), "www.shanghai.gov.cn",
+    )
+
+
 SCAN_TARGETS = {
-    "municipal_putuo": ScanTarget("municipal_putuo", "市级平台·普陀区", "普陀区", "市级", "上海市政策文件库"),
-    "municipal_chongming": ScanTarget("municipal_chongming", "市级平台·崇明区", "崇明区", "市级", "上海市政策文件库"),
+    **{
+        key: _municipal_target(key, district)
+        for key, district, _site_id in MUNICIPAL_DISTRICTS
+    },
     "putuo_government": ScanTarget(
         "putuo_government", "区级网站·普陀区·区政府文件", "普陀区", "区级", "区政府文件",
         "putuo", "3", "https://www.shpt.gov.cn/zhengwu/qzfwj-zfwj/index.html",
@@ -62,6 +98,7 @@ SCAN_TARGETS = {
 }
 
 
+# 区级单独成组；市级 16 区按官方惯用顺序排列，供界面与 API 一致使用。
 SCAN_SITES = {
     "putuo_district": ScanSite(
         "putuo_district", "区级网站·普陀区", "普陀区", "区级", "政策文件（五类栏目）",
@@ -74,22 +111,17 @@ SCAN_SITES = {
         ),
         "www.shpt.gov.cn",
     ),
-    "municipal_putuo": ScanSite(
-        "municipal_putuo", "市级平台·普陀区", "普陀区", "市级", "上海市政策文件库",
-        ("municipal_putuo",), "www.shanghai.gov.cn",
-    ),
-    "municipal_chongming": ScanSite(
-        "municipal_chongming", "市级平台·崇明区", "崇明区", "市级", "上海市政策文件库",
-        ("municipal_chongming",), "www.shanghai.gov.cn",
-    ),
+    **{
+        key: _municipal_site(key, district)
+        for key, district, _site_id in MUNICIPAL_DISTRICTS
+    },
 }
 
 # 保留给旧数据和测试使用的区县映射；新增任务使用 SCAN_TARGETS 的 key。
 DISTRICTS = {key: target.label for key, target in SCAN_TARGETS.items()}
 
 DISTRICT_SITE_IDS = {
-    "普陀区": "0075",
-    "崇明区": "0085",
+    district: site_id for _key, district, site_id in MUNICIPAL_DISTRICTS
 }
 
 
@@ -120,6 +152,14 @@ def resolve_site(value: str) -> ScanSite:
 def targets_for_site(value: str) -> list[ScanTarget]:
     site = resolve_site(value)
     return [SCAN_TARGETS[key] for key in site.target_keys]
+
+
+def district_sites() -> list[ScanSite]:
+    return [site for site in SCAN_SITES.values() if site.source_level == "区级"]
+
+
+def municipal_sites() -> list[ScanSite]:
+    return [site for site in SCAN_SITES.values() if site.source_level == "市级"]
 
 
 @dataclass(frozen=True)

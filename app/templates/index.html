@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>上海区级政策文件安全巡检系统</title>
-  <link rel="stylesheet" href="/static/app.css?v=20260714-full-rebuild-1">
+  <link rel="stylesheet" href="/static/app.css?v=20260722-municipal-16">
 </head>
 <body>
   <header class="topbar">
@@ -20,21 +20,47 @@
       <form id="scan-form">
         <fieldset class="scan-source-field">
           <legend>扫描站点</legend>
-          <div class="scan-sites">
-            {% for site in sites %}
-            <label class="site-option" data-site-key="{{ site.key }}">
-              <input type="checkbox" name="site_key" value="{{ site.key }}">
-              <span class="site-main">
-                <strong>{{ site.district }}</strong>
-                <small class="source-badge">{{ site.source_level }}</small>
-                <span>{{ site.source_name }}</span>
-              </span>
-              {% if site.key == 'putuo_district' %}
-              <small class="site-coverage">区政府、委办局、街道镇、规范性文件、党政混合信息</small>
-              {% endif %}
-              <span class="site-runtime" id="site-runtime-{{ site.key }}">正在读取站点状态…</span>
-            </label>
-            {% endfor %}
+          <div class="scan-site-groups">
+            <details class="site-group site-group-district">
+              <summary class="site-group-summary">
+                <span class="site-group-title">区级网站</span>
+                <small class="site-group-meta">{{ district_sites|length }} 个站点 · 默认折叠</small>
+              </summary>
+              <div class="scan-sites scan-sites-district">
+                {% for site in district_sites %}
+                <label class="site-option site-option-district" data-site-key="{{ site.key }}">
+                  <input type="checkbox" name="site_key" value="{{ site.key }}">
+                  <span class="site-main">
+                    <strong>{{ site.district }}</strong>
+                    <small class="source-badge">{{ site.source_level }}</small>
+                    <span>{{ site.source_name }}</span>
+                  </span>
+                  {% if site.key == 'putuo_district' %}
+                  <small class="site-coverage">区政府、委办局、街道镇、规范性文件、党政混合信息</small>
+                  {% endif %}
+                  <span class="site-runtime" id="site-runtime-{{ site.key }}">正在读取站点状态…</span>
+                </label>
+                {% endfor %}
+              </div>
+            </details>
+
+            <div class="site-group site-group-municipal">
+              <div class="site-group-heading">
+                <span class="site-group-title">市级平台</span>
+                <small class="site-group-meta">上海市政策文件库 · {{ municipal_sites|length }} 个区县 · 请自行勾选</small>
+              </div>
+              <div class="scan-sites scan-sites-municipal">
+                {% for site in municipal_sites %}
+                <label class="site-option site-option-chip" data-site-key="{{ site.key }}" title="{{ site.label }}">
+                  <input type="checkbox" name="site_key" value="{{ site.key }}">
+                  <span class="site-chip-body">
+                    <strong>{{ site.district }}</strong>
+                    <span class="site-runtime" id="site-runtime-{{ site.key }}">读取中…</span>
+                  </span>
+                </label>
+                {% endfor %}
+              </div>
+            </div>
           </div>
         </fieldset>
         <div class="scan-settings">
@@ -151,6 +177,6 @@
     <pre id="evidence-body" class="evidence-body"></pre>
   </dialog>
   <div id="toast" role="status"></div>
-  <script src="/static/app.js?v=20260714-full-rebuild-1"></script>
+  <script src="/static/app.js?v=20260722-municipal-16"></script>
 </body>
 </html>

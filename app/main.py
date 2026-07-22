@@ -9,7 +9,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
-from app.config import BASE_DIR, SCAN_SITES, SafetyConfig, resolve_site, resolve_target, targets_for_site
+from app.config import BASE_DIR, SCAN_SITES, SafetyConfig, district_sites, municipal_sites, resolve_site, resolve_target, targets_for_site
 from app.db import Database, utc_now
 from app.exporter import export_job
 from app.jobs import JobManager
@@ -60,7 +60,11 @@ async def index(request: Request):
     return templates.TemplateResponse(
         request=request,
         name="index.html",
-        context={"sites": list(SCAN_SITES.values()), "safety": SafetyConfig()},
+        context={
+            "district_sites": district_sites(),
+            "municipal_sites": municipal_sites(),
+            "safety": SafetyConfig(),
+        },
     )
 
 
