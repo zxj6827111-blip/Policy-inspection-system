@@ -514,6 +514,30 @@ class JobManager:
                                         job_id, job, target, target_index, max_documents, collector, checker, calendar,
                                         detail_cache,
                                     )
+                        # 兜底排空：早前来源可能因中断遗留 pending/checking/retry 条目，
+                        # 而恢复只从断点来源继续，永远不会回头处理它们，完成校验会因此死循环。
+                        self.repo.mark_checking_as_retry(job_id)
+                        for target_index, (target, collector) in enumerate(collectors):
+                            if not (target.collector_type == "putuo" and self._job_uses_snapshot_contract(job)):
+                                continue
+                            if self.repo.open_generation_item_count(job_id, target.key) == 0:
+                                continue
+                            latest = self.db.get_job(job_id)
+                            if not latest or latest["status"] != JobStatus.RUNNING:
+                                return
+                            async with LinkChecker(
+                                safety,
+                                collector.ensure_allowed,
+                                rendered_checker=collector.check_rendered_link,
+                                rendered_hosts=getattr(collector, "rendered_hosts", None),
+                            ) as checker:
+                                generation_id = await self._ensure_generation(
+                                    job, kind=job["mode"], target_key=target.key,
+                                )
+                                await self._process_generation_queue(
+                                    job_id, job, target, target_index, max_documents, collector, checker,
+                                    calendar, detail_cache, generation_id,
+                                )
                         for target, collector in collectors:
                             latest = self.db.get_job(job_id)
                             if not latest or latest["status"] != JobStatus.RUNNING:

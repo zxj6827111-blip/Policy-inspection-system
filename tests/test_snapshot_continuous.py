@@ -737,3 +737,35 @@ async def test_reconcile_resume_uses_persisted_generation_membership(snapshot_ru
     assert repo.inventory_entry(target.key, first.stable_id)["is_present"] == 1
     assert repo.inventory_entry(target.key, second.stable_id)["is_present"] == 1
     assert repo.inventory_entry(target.key, old.stable_id)["is_present"] == 0
+
+@pytest.mark.asyncio
+async def test_resume_drains_stranded_items_in_finished_targets(snapshot_runtime):
+    """断点已越过的来源里遗留未终态条目时，恢复必须兜底补扫而不是覆盖校验死循环。"""
+    manager, db = snapshot_runtime
+    SnapshotFakeCollector.pages = {1: [
+        _item("putuo_government", "s1", "S1", 1, 0),
+        _item("putuo_government", "s2", "S2", 1, 1),
+    ]}
+    job_id = await manager.create_and_start(putuo_labels(), "full")
+    await wait_job(manager, job_id)
+    assert db.get_job(job_id)["status"] == "completed"
+    repo = Repository(db)
+    items = repo.generation_items_for_job(job_id)
+    assert len(items) == 2
+    # 人为复现线上死锁：断点索引已越过该来源，且其中一条回退为 retry 未终态
+    with db.connect() as conn:
+        conn.execute(
+            "UPDATE generation_items SET status='retry', completed_at=NULL WHERE id=?",
+            (int(items[0]["id"]),),
+        )
+    db.update_job(
+        job_id, status="paused", coverage_status="not_started",
+        pause_reason="扫描覆盖校验失败（测试模拟）", current_district_index=1,
+    )
+    assert repo.open_generation_item_count(job_id) == 1
+    await manager.resume(job_id)
+    await wait_job(manager, job_id)
+    job = db.get_job(job_id)
+    assert job["status"] == "completed", job.get("pause_reason")
+    assert job["coverage_status"] == "complete"
+    assert repo.open_generation_item_count(job_id) == 0

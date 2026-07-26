@@ -200,6 +200,7 @@ function syncBatchBar() {
 // ---------- 站点详情 ----------
 function displayJobFor(site) {
   if (overrideJobId) {
+    if (site.latest_job && site.latest_job.id === overrideJobId) return site.latest_job;
     const found = jobs.find(job => job.id === overrideJobId);
     if (found) return found;
   }
@@ -296,10 +297,15 @@ function renderCallout(job) {
   if (!message || !resumable) { callout.hidden = true; return; }
   callout.hidden = false;
   let title = '为什么暂停了？';
+  let desc = message;
   if (job.status === 'partial') title = '本批次已完成设定上限';
   if (job.status === 'failed') title = '扫描异常结束';
+  if (message.includes('覆盖校验失败')) {
+    title = '还有个别条目未完成核验';
+    desc = `收尾校验发现少量条目未达终态。点击「${resumeLabel(job)}」，系统会自动补扫这些遗留条目并重新校验。原始信息：${message}`;
+  }
   $('#callout-title').textContent = title;
-  $('#callout-desc').textContent = message;
+  $('#callout-desc').textContent = desc;
 }
 
 function renderProgress(job) {
@@ -317,6 +323,7 @@ function renderProgress(job) {
   $('#progress-bar').style.width = `${percent}%`;
 }
 
+const itemStatsCache = {};
 function renderStats(site, job) {
   const row = $('#stat-row');
   if (!job) { row.hidden = true; return; }
@@ -326,11 +333,12 @@ function renderStats(site, job) {
   const discovered = gen.discovered ?? job.estimated_total;
   const added = gen.new ?? 0;
   const reused = gen.reused ?? job.skipped_count;
+  const cached = itemStatsCache[job.id];
   row.innerHTML = `
     <div class="stat"><span class="label">发现条目</span><div class="value num">${discovered != null ? fmtNum(discovered) : '?'}</div></div>
     <div class="stat"><span class="label">新增</span><div class="value num">${fmtNum(added)}</div></div>
     <div class="stat"><span class="label">基线复用</span><div class="value num">${fmtNum(reused)}</div><div class="hint">未开详情直接复用</div></div>
-    <div class="stat"><span class="label">表头完整</span><div class="value num" id="stat-header">…</div><div class="hint" id="stat-header-hint">读取中</div></div>
+    <div class="stat"><span class="label">表头完整</span><div class="value num" id="stat-header">${cached ? fmtNum(cached.complete_header) : '…'}</div><div class="hint" id="stat-header-hint">${cached ? `缺字段 ${fmtNum(cached.incomplete_header)} · 无表头 PASS ${fmtNum(cached.no_header_pass)}` : '读取中'}</div></div>
     <div class="stat"><span class="label">发现问题</span><div class="value num link" id="stat-findings">${fmtNum(job.finding_count)}</div><div class="hint">点击查看复核 ↓</div></div>`;
   const findingsTile = $('#stat-findings');
   if (findingsTile) findingsTile.addEventListener('click', () => {
@@ -338,6 +346,7 @@ function renderStats(site, job) {
     if (!panel.hidden) panel.scrollIntoView({behavior: 'smooth'});
   });
   api(`/api/jobs/${job.id}/item-stats`).then(stats => {
+    itemStatsCache[job.id] = stats;
     const header = $('#stat-header'), hint = $('#stat-header-hint');
     if (!header) return;
     header.textContent = fmtNum(stats.complete_header);

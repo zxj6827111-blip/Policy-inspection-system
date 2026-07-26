@@ -526,6 +526,22 @@ class Repository:
             )
             return int(cur.rowcount or 0)
 
+    def open_generation_item_count(self, job_id: int, target_key: str | None = None) -> int:
+        with self.db.connect() as conn:
+            if target_key:
+                row = conn.execute(
+                    """SELECT COUNT(*) FROM generation_items
+                    WHERE job_id=? AND target_key=? AND status IN ('pending','checking','retry')""",
+                    (job_id, target_key),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    """SELECT COUNT(*) FROM generation_items
+                    WHERE job_id=? AND status IN ('pending','checking','retry')""",
+                    (job_id,),
+                ).fetchone()
+        return int(row[0])
+
     def upsert_source_inventory(self, item: PolicyListItem, generation_id: int) -> None:
         now = utc_now()
         stable = item.stable_id or f"{item.source_key}|url:{item.url}"
