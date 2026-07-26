@@ -685,8 +685,13 @@ class JobManager:
                     mismatches.append(f"仍有未终态条目 pending/checking/retry={open_total}")
                 if unique_total <= 0:
                     mismatches.append("generation 中没有稳定身份条目")
-                if terminal_total > 0 and self.repo.scan_item_count(job_id) == 0:
-                    mismatches.append("终态条目已完成但没有任何详情结果")
+                item_count = self.repo.scan_item_count(job_id)
+                if terminal_total != item_count:
+                    mismatches.append(
+                        "snapshot 结果行数量不一致："
+                        f"terminal={terminal_total}, scan_item_results={item_count}, "
+                        f"missing_count={terminal_total - item_count}"
+                    )
                 if mismatches:
                     raise SafetyPause("扫描覆盖校验失败，任务未标记完成：" + "；".join(mismatches))
                 return

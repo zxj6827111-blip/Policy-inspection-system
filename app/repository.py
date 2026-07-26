@@ -66,15 +66,17 @@ class Repository:
         reused_document_id: int | None = None, baseline_job_id: int | None = None, reason: str = "",
         link_check_version: int = PAGE_LINK_CHECK_VERSION,
     ) -> None:
-        """按位置写入；若同 job/target/url 已存在则更新该行，避免分页漂移覆盖错位。"""
+        """记录列表条目详情结果。
+
+        快照条目有稳定身份时按 URL 幂等更新；位置已被其他稳定条目占用时改用负数
+        item_index 保留审计行。旧的非快照路径仍按页码位置 upsert。
+        """
         listed = item.published_date.isoformat() if item.published_date else None
         authored = authored_date.isoformat() if authored_date else None
         published = published_date.isoformat() if published_date else None
         missing_json = json.dumps(missing_fields or [], ensure_ascii=False)
         now = utc_now()
         with self.db.connect() as conn:
-            # 有稳定身份时按 URL 更新，避免分页漂移覆盖；旧路径仍按页码位置唯一
-            existing = None
             if getattr(item, "stable_id", None):
                 existing = conn.execute(
                     """SELECT id FROM scan_item_results
@@ -82,29 +84,45 @@ class Repository:
                     ORDER BY checked_at DESC LIMIT 1""",
                     (job_id, item.source_key, item.url),
                 ).fetchone()
-            if existing:
-                position_conflict = conn.execute(
-                    """SELECT id FROM scan_item_results
-                    WHERE job_id=? AND target_key=? AND page_number=? AND item_index=? AND id!=?""",
-                    (job_id, item.source_key, item.page_number, item.item_index, int(existing["id"])),
-                ).fetchone()
-                item_index = item.item_index
-                if position_conflict:
-                    # Keep both audit rows when a dynamic list shifts a processed item.
-                    item_index = -int(existing["id"])
+                existing_id = int(existing["id"]) if existing else None
+                item_index = self._conflict_safe_item_index(
+                    conn,
+                    job_id=job_id,
+                    target_key=item.source_key,
+                    page_number=item.page_number,
+                    item_index=item.item_index,
+                    existing_result_id=existing_id,
+                )
+                if existing_id is not None:
+                    conn.execute(
+                        """UPDATE scan_item_results SET page_number=?,item_index=?,title=?,listed_date=?,
+                        detail_status=?,header_detected=?,source_id=?,topic_category=?,disclosure_attribute=?,
+                        authored_date=?,page_document_number=?,published_date=?,issuing_agency=?,
+                        missing_fields_json=?,document_id=?,reused_document_id=?,baseline_job_id=?,
+                        link_check_version=?,reason=?,checked_at=?,source_label=?,channel_id=?
+                        WHERE id=?""",
+                        (
+                            item.page_number, item_index, item.title, listed, detail_status,
+                            int(header_detected), source_id, topic_category, disclosure_attribute,
+                            authored, page_document_number, published, issuing_agency, missing_json,
+                            document_id, reused_document_id, baseline_job_id, link_check_version, reason, now,
+                            item.source_site, item.source_channel_id, existing_id,
+                        ),
+                    )
+                    return
                 conn.execute(
-                    """UPDATE scan_item_results SET page_number=?,item_index=?,title=?,listed_date=?,
-                    detail_status=?,header_detected=?,source_id=?,topic_category=?,disclosure_attribute=?,
-                    authored_date=?,page_document_number=?,published_date=?,issuing_agency=?,
-                    missing_fields_json=?,document_id=?,reused_document_id=?,baseline_job_id=?,
-                    link_check_version=?,reason=?,checked_at=?,source_label=?,channel_id=?
-                    WHERE id=?""",
+                    """INSERT INTO scan_item_results(job_id,target_key,source_label,channel_id,page_number,item_index,title,url,
+                    listed_date,detail_status,header_detected,source_id,topic_category,disclosure_attribute,authored_date,
+                    page_document_number,published_date,issuing_agency,missing_fields_json,document_id,reused_document_id,
+                    baseline_job_id,link_check_version,reason,checked_at)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (
-                        item.page_number, item_index, item.title, listed, detail_status,
+                        job_id, item.source_key, item.source_site, item.source_channel_id, item.page_number, item_index,
+                        item.title, item.url, listed, detail_status,
                         int(header_detected), source_id, topic_category, disclosure_attribute,
-                        authored, page_document_number, published, issuing_agency, missing_json,
-                        document_id, reused_document_id, baseline_job_id, link_check_version, reason, now,
-                        item.source_site, item.source_channel_id, int(existing["id"]),
+                        authored, page_document_number, published, issuing_agency,
+                        missing_json, document_id, reused_document_id,
+                        baseline_job_id, link_check_version, reason, now,
                     ),
                 )
                 return
@@ -132,6 +150,39 @@ class Repository:
                     baseline_job_id, link_check_version, reason, now,
                 ),
             )
+
+    def _conflict_safe_item_index(
+        self,
+        conn,
+        *,
+        job_id: int,
+        target_key: str,
+        page_number: int,
+        item_index: int,
+        existing_result_id: int | None = None,
+    ) -> int:
+        position_conflict = conn.execute(
+            """SELECT id FROM scan_item_results
+            WHERE job_id=? AND target_key=? AND page_number=? AND item_index=?
+              AND (? IS NULL OR id!=?)
+            LIMIT 1""",
+            (job_id, target_key, page_number, item_index, existing_result_id, existing_result_id),
+        ).fetchone()
+        if not position_conflict:
+            return item_index
+        if existing_result_id is not None:
+            existing = conn.execute(
+                "SELECT item_index FROM scan_item_results WHERE id=?", (existing_result_id,),
+            ).fetchone()
+            if existing and int(existing["item_index"]) < 0:
+                return int(existing["item_index"])
+        row = conn.execute(
+            """SELECT MIN(item_index) AS min_index FROM scan_item_results
+            WHERE job_id=? AND target_key=? AND page_number=? AND item_index<0""",
+            (job_id, target_key, page_number),
+        ).fetchone()
+        min_index = int(row["min_index"]) if row and row["min_index"] is not None else 0
+        return min_index - 1 if min_index < 0 else -1
 
     def baseline_item(self, baseline_job_id: int, item: PolicyListItem) -> dict | None:
         with self.db.connect() as conn:
