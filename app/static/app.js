@@ -116,7 +116,6 @@ function renderCurrent(job) {
     $('#cooldown').textContent = '无需冷却';
   }
   renderGenerationMeta(job.id).catch(() => {});
-  renderContinuousMeta().catch(() => {});
   const progress = job.estimated_total ? Math.min(100, job.examined_count / job.estimated_total * 100) : 0;
   $('#progress-bar').style.width = `${progress}%`;
   $('#export-link').href = `/api/jobs/${job.id}/export`;
@@ -381,23 +380,5 @@ async function renderGenerationMeta(jobId) {
     box.textContent = `快照阶段 ${phaseNames[data.scan_phase] || data.scan_phase} · 发现 ${c.total || 0} · 完成 ${(c.completed||0)+(c.reused||0)} · pending ${c.pending||0} · retry ${c.retry||0} · review ${c.review||0} · 观测总量 ${g.observed_total ?? '-'}`;
   } catch (_) {
     box.textContent = '快照信息暂不可用';
-  }
-}
-
-async function renderContinuousMeta() {
-  const box = document.querySelector('#continuous-meta');
-  if (!box) return;
-  try {
-    const rows = await api('/api/continuous-schedules');
-    if (!rows.length) { box.textContent = '持续任务未配置'; return; }
-    box.innerHTML = rows.map(r => {
-      const li = r.last_incremental_at ? new Date(r.last_incremental_at).toLocaleString('zh-CN', {hour12:false}) : '-';
-      const lf = r.last_full_reconcile_at ? new Date(r.last_full_reconcile_at).toLocaleString('zh-CN', {hour12:false}) : '-';
-      const ni = r.next_incremental_at ? new Date(r.next_incremental_at).toLocaleString('zh-CN', {hour12:false}) : '-';
-      const nf = r.next_full_reconcile_at ? new Date(r.next_full_reconcile_at).toLocaleString('zh-CN', {hour12:false}) : '-';
-      return `<div><strong>${escapeHtml(r.site_label)}</strong> 上次增量 ${escapeHtml(li)} · 上次对账 ${escapeHtml(lf)} · 下次增量 ${escapeHtml(ni)} · 下次对账 ${escapeHtml(nf)}</div>`;
-    }).join('');
-  } catch (_) {
-    box.textContent = '持续调度状态读取失败';
   }
 }
