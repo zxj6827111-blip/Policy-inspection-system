@@ -164,25 +164,25 @@ def municipal_sites() -> list[ScanSite]:
 
 @dataclass(frozen=True)
 class SafetyConfig:
-    min_delay_seconds: float = 5.0
-    max_delay_seconds: float = 10.0
+    min_delay_seconds: float = 3.0
+    max_delay_seconds: float = 3.0
     rest_every_pages: int = 50
-    rest_min_seconds: float = 180.0
-    rest_max_seconds: float = 300.0
+    rest_min_seconds: float = 90.0
+    rest_max_seconds: float = 90.0
     max_retries: int = 2
     max_run_seconds: float = 4 * 60 * 60
     cooldown_seconds: float = 30 * 60
     consecutive_failure_limit: int = 3
 
     def validate(self) -> None:
-        if self.min_delay_seconds < 5:
-            raise ValueError("最小访问间隔不得低于 5 秒")
+        if self.min_delay_seconds < 3:
+            raise ValueError("最小访问间隔不得低于 3 秒")
         if self.max_delay_seconds < self.min_delay_seconds:
             raise ValueError("最大访问间隔不得小于最小访问间隔")
         if self.rest_every_pages > 50 or self.rest_every_pages < 1:
             raise ValueError("每轮连续访问页数不得超过 50")
-        if self.rest_min_seconds < 180:
-            raise ValueError("强制休息不得少于 3 分钟")
+        if self.rest_min_seconds < 90:
+            raise ValueError("强制休息不得少于 90 秒")
 
 
 def ensure_directories() -> None:

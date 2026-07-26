@@ -20,7 +20,7 @@ class FakeSleep:
 
 def test_safety_config_rejects_fast_interval():
     with pytest.raises(ValueError, match="不得低于"):
-        SafetyConfig(min_delay_seconds=4).validate()
+        SafetyConfig(min_delay_seconds=2).validate()
 
 
 @pytest.mark.asyncio
@@ -100,7 +100,7 @@ async def test_real_click_is_limited_before_429_is_observed():
     with pytest.raises(SafetyPause):
         await collector._click_and_observe(page, page.click, 0)
 
-    assert sleep.calls and sleep.calls[0] >= 5
+    assert sleep.calls and sleep.calls[0] >= 2.9
     assert not controller._lock.locked()
 
 
@@ -128,8 +128,8 @@ async def test_minimum_delay_and_fiftieth_access_rest_are_enforced():
     await controller.before_request()
     controller.after_request(200, "正常")
     await controller.before_request()
-    assert any(5 <= seconds <= 10 for seconds in sleep.calls)
-    assert any(180 <= seconds <= 300 for seconds in sleep.calls)
+    assert any(2.9 <= seconds <= 3.0 for seconds in sleep.calls)
+    assert any(89.9 <= seconds <= 90.0 for seconds in sleep.calls)
     assert any(kind == "rest" and details["access_count"] == 50 for kind, details in events)
     controller.after_request(200, "正常")
 
