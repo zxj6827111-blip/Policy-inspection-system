@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>上海区级政策文件安全巡检系统</title>
-  <link rel="stylesheet" href="/static/app.css?v=20260722-municipal-16">
+  <link rel="stylesheet" href="/static/app.css?v=20260726-task-center">
 </head>
 <body>
   <header class="topbar">
@@ -12,7 +12,10 @@
       <h1>上海区级政策文件安全巡检系统</h1>
       <p>本地运行 · 受控并行 · 同域串行 · 风控信号自动暂停</p>
     </div>
-    <span class="health" id="health">正在检查服务</span>
+    <div class="topbar-side">
+      <button type="button" id="task-center-btn" class="task-center-btn">任务中心</button>
+      <span class="health" id="health">正在检查服务</span>
+    </div>
   </header>
 
   <main>
@@ -81,8 +84,16 @@
       </form>
       <div class="safety-strip">
         <strong>固定安全节奏</strong>
+        {% if safety.min_delay_seconds == safety.max_delay_seconds %}
+        <span>{{ safety.min_delay_seconds|int }} 秒/页</span>
+        {% else %}
         <span>{{ safety.min_delay_seconds|int }}–{{ safety.max_delay_seconds|int }} 秒/页</span>
-        <span>每 {{ safety.rest_every_pages }} 页休息 3–5 分钟</span>
+        {% endif %}
+        {% if safety.rest_min_seconds == safety.rest_max_seconds %}
+        <span>每 {{ safety.rest_every_pages }} 页休息 {{ safety.rest_min_seconds|int }} 秒</span>
+        {% else %}
+        <span>每 {{ safety.rest_every_pages }} 页休息 {{ safety.rest_min_seconds|int }}–{{ safety.rest_max_seconds|int }} 秒</span>
+        {% endif %}
         <span>详情与外链并发数 1</span>
         <span>公开列表接口仅用于读取分页和总量，仍共享限速器</span>
         <span>403 / 429 / 验证码立即暂停</span>
@@ -175,7 +186,14 @@
     <p class="evidence-note">红框表示规则命中的已采集文本；未在正文中出现的页面字段会保留在上方证据区。</p>
     <pre id="evidence-body" class="evidence-body"></pre>
   </dialog>
+  <dialog id="task-center-dialog" class="evidence-dialog task-center-dialog" aria-labelledby="task-center-title">
+    <div class="dialog-heading">
+      <div><h2 id="task-center-title">任务中心</h2><p>持续调度接下来将自动执行的任务</p></div>
+      <button type="button" id="task-center-close" title="关闭任务中心">关闭</button>
+    </div>
+    <div id="task-center-body" class="task-center-body">加载中…</div>
+  </dialog>
   <div id="toast" role="status"></div>
-  <script src="/static/app.js?v=20260726-hide-schedule"></script>
+  <script src="/static/app.js?v=20260726-task-center"></script>
 </body>
 </html>

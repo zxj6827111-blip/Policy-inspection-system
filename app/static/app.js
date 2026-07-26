@@ -345,6 +345,8 @@ $('#resume-btn').addEventListener('click', () => command('resume'));
 $('#stop-btn').addEventListener('click', () => command('stop'));
 $('#refresh-btn').addEventListener('click', refreshJobs);
 $('#evidence-close').addEventListener('click', () => $('#evidence-dialog').close());
+$('#task-center-btn').addEventListener('click', () => { openTaskCenter(); });
+$('#task-center-close').addEventListener('click', () => $('#task-center-dialog').close());
 document.querySelectorAll('.review-filter').forEach(button => button.addEventListener('click', () => {
   reviewFilter = button.dataset.status;
   reviewPage = 1;
@@ -381,4 +383,54 @@ async function renderGenerationMeta(jobId) {
   } catch (_) {
     box.textContent = '快照信息暂不可用';
   }
+}
+
+function fmtScheduleTime(value) {
+  return value ? new Date(value).toLocaleString('zh-CN', {hour12: false}) : '-';
+}
+
+async function openTaskCenter() {
+  const dialog = $('#task-center-dialog');
+  const box = $('#task-center-body');
+  box.textContent = '加载中…';
+  if (!dialog.open) dialog.showModal();
+  try {
+    const data = await api('/api/continuous-schedules');
+    renderTaskCenter(data);
+  } catch (_) {
+    box.textContent = '任务计划读取失败，请稍后重试';
+  }
+}
+
+function renderTaskCenter(data) {
+  const box = $('#task-center-body');
+  const sites = (data && data.sites) || [];
+  const willRun = s => s.has_baseline && s.opted_in && s.enabled;
+  const planned = sites.filter(willRun);
+  const blocked = sites.filter(s => !willRun(s));
+  const nextAt = s => {
+    const times = [s.next_incremental_at, s.next_full_reconcile_at].filter(Boolean).map(v => new Date(v).getTime());
+    return times.length ? Math.min(...times) : Infinity;
+  };
+  planned.sort((a, b) => nextAt(a) - nextAt(b));
+  const parts = [];
+  if (!data || !data.enabled) {
+    parts.push('<p class="task-center-note">持续调度未开启（服务端未设置 CONTINUOUS_SCAN_ENABLED），系统不会自动执行任何任务；下方仅展示各站点基准数据库状态。</p>');
+  }
+  const plannedRows = planned.map(s => `
+    <div class="schedule-row">
+      <strong>${escapeHtml(s.site_label)}</strong>
+      <span class="schedule-times">
+        下次增量 ${escapeHtml(fmtScheduleTime(s.next_incremental_at))} · 下次对账 ${escapeHtml(fmtScheduleTime(s.next_full_reconcile_at))}<br>
+        上次增量 ${escapeHtml(fmtScheduleTime(s.last_incremental_at))} · 上次对账 ${escapeHtml(fmtScheduleTime(s.last_full_reconcile_at))} · 基线 #${s.baseline_job_id ?? '-'}
+      </span>
+    </div>`);
+  parts.push(`<div class="task-center-group"><h3>将自动执行（${planned.length}）</h3>${plannedRows.join('') || '<p class="task-center-empty">暂无。站点需要先建立基准数据库（完成一次完整全量扫描）。</p>'}</div>`);
+  if (blocked.length) {
+    const reason = s => !s.has_baseline ? '未建基准，不排增量' : (!s.opted_in ? '未纳入调度范围' : '站点调度已停用');
+    parts.push(`<div class="task-center-group"><h3>不会自动执行（${blocked.length}）</h3>
+      <div class="waiting-sites">${blocked.map(s => `<span>${escapeHtml(s.site_label)} · ${reason(s)}</span>`).join('')}</div>
+      <p class="task-center-empty">完成一次完整全量扫描并通过覆盖校验后，站点会自动进入增量调度（增量默认每 6 小时、全量对账每 7 天）。</p></div>`);
+  }
+  box.innerHTML = parts.join('');
 }

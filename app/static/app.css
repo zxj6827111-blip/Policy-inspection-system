@@ -7,6 +7,9 @@ h2 { font-size: 18px; margin: 0 0 4px; letter-spacing: 0; }
 p { margin: 0; color: #657480; font-size: 13px; }
 .topbar p { color: #c9d6df; }
 .health { font-size: 13px; border: 1px solid #6e8798; padding: 6px 9px; border-radius: 4px; }
+.topbar-side { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.task-center-btn { height: auto; font-size: 13px; border: 1px solid #6e8798; background: transparent; color: white; padding: 6px 12px; border-radius: 4px; }
+.task-center-btn:hover { background: #24506f; }
 main { max-width: 1180px; margin: 0 auto; padding: 26px 24px 50px; }
 section { background: white; border: 1px solid #dfe5e9; margin-bottom: 18px; padding: 20px; }
 .control-band form { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 20px; align-items: start; }
@@ -153,6 +156,17 @@ th { color: #52626d; background: #f5f7f8; }
 .evidence-note { margin: 16px 0 8px; }
 .evidence-body { margin: 0; max-height: 430px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; border: 1px solid #dfe5e9; background: #f8fafb; padding: 14px; font: 13px/1.75 "Microsoft YaHei", "Segoe UI", sans-serif; }
 .evidence-mark { border: 2px solid #c9362b; background: #fff0ef; color: #8b241d; padding: 1px 2px; }
+.task-center-dialog { width: min(760px, calc(100vw - 32px)); }
+.task-center-body { display: grid; gap: 14px; font-size: 13px; margin-top: 16px; }
+.task-center-note { color: #9b3d2e; background: #fdf1ee; border: 1px solid #e4c0b8; padding: 8px 10px; }
+.task-center-group h3 { font-size: 14px; margin: 0 0 8px; }
+.task-center-group + .task-center-group { border-top: 1px solid #e4e9ec; padding-top: 12px; }
+.schedule-row { display: grid; grid-template-columns: minmax(150px, auto) 1fr; gap: 4px 14px; padding: 8px 0; border-bottom: 1px dashed #e1e7ea; }
+.schedule-row:last-child { border-bottom: 0; }
+.schedule-times { color: #52626d; line-height: 1.6; overflow-wrap: anywhere; }
+.waiting-sites { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.waiting-sites span { border: 1px solid #d5dfe4; color: #52626d; padding: 4px 8px; font-size: 12px; background: #f8fafb; }
+.task-center-empty { color: #657480; }
 @media (max-width: 1050px) {
   .scan-source-field { padding-left: 0; }
   .scan-source-field legend { position: static; margin-bottom: 7px; }

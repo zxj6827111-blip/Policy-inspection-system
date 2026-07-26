@@ -627,6 +627,13 @@ class Repository:
             ).fetchone()
         return dict(row)
 
+    def get_schedule(self, site_key: str) -> dict | None:
+        with self.db.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM continuous_schedules WHERE site_key=?", (site_key,),
+            ).fetchone()
+        return dict(row) if row else None
+
     def update_schedule(self, site_key: str, **values) -> None:
         allowed = {
             "enabled", "last_incremental_at", "last_full_reconcile_at", "next_incremental_at",

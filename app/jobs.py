@@ -1545,6 +1545,10 @@ class JobManager:
             if cfg.site_keys and site_key not in cfg.site_keys:
                 continue
             labels = [target.label for target in targets_for_site(site_key)]
+            baseline = self.eligible_baseline_for(labels)
+            if baseline is None:
+                # 基准数据库未建立的站点不排任何自动任务，等待人工完成首次完整全量。
+                continue
             schedule = self.repo.get_or_create_schedule(
                 site_key, labels,
                 incremental_hours=cfg.incremental_interval_hours,
@@ -1560,46 +1564,41 @@ class JobManager:
             ) <= now
             if not due_full and not due_incremental:
                 continue
-            baseline = self.eligible_baseline_for(labels)
             if due_full:
                 job_id = self.db.create_job(
-                    labels, "full", self._safety_payload(labels), 0,
-                    int(baseline["id"]) if baseline else None,
+                    labels, "full", self._safety_payload(labels), 0, int(baseline["id"]),
                 )
                 self.db.update_job(job_id, completion_kind="full_reconcile", scan_phase=ScanPhase.FULL_RECONCILE)
                 status = "running_full_reconcile"
-            elif baseline:
+            else:
                 job_id = self.db.create_job(
                     labels, "incremental", self._safety_payload(labels), 0, int(baseline["id"]),
                 )
                 self.db.update_job(job_id, scan_phase=ScanPhase.INCREMENTAL_DISCOVERY)
                 status = "running_incremental"
-            else:
-                # An opted-in site needs one baseline before incremental reuse is possible.
-                job_id = self.db.create_job(labels, "full", self._safety_payload(labels), 0, None)
-                self.db.update_job(job_id, completion_kind="initial_baseline", scan_phase=ScanPhase.DISCOVERING)
-                status = "running_initial_baseline"
             self.repo.update_schedule(site_key, last_job_id=job_id, last_status=status)
             self._tasks[job_id] = asyncio.create_task(self._run(job_id))
-    def continuous_status(self) -> list[dict]:
+    def continuous_status(self) -> dict:
+        """任务中心数据：只读，不创建调度行；未建基准的站点标记为不自动执行。"""
         from app.config import targets_for_site
-        rows = []
+        cfg = self.continuous_config
+        sites = []
         for site_key, site in SCAN_SITES.items():
             labels = [t.label for t in targets_for_site(site_key)]
-            schedule = self.repo.get_or_create_schedule(
-                site_key, labels,
-                incremental_hours=self.continuous_config.incremental_interval_hours,
-                reconcile_days=self.continuous_config.full_reconcile_interval_days,
-            )
-            rows.append({
+            baseline = self.eligible_baseline_for(labels)
+            schedule = self.repo.get_schedule(site_key) or {}
+            sites.append({
                 "site_key": site_key,
                 "site_label": site.label,
+                "has_baseline": baseline is not None,
+                "baseline_job_id": int(baseline["id"]) if baseline else None,
+                "opted_in": not cfg.site_keys or site_key in cfg.site_keys,
                 "last_incremental_at": schedule.get("last_incremental_at"),
                 "last_full_reconcile_at": schedule.get("last_full_reconcile_at"),
                 "next_incremental_at": schedule.get("next_incremental_at"),
                 "next_full_reconcile_at": schedule.get("next_full_reconcile_at"),
                 "last_job_id": schedule.get("last_job_id"),
                 "last_status": schedule.get("last_status"),
-                "enabled": bool(schedule.get("enabled")),
+                "enabled": bool(schedule.get("enabled", 1)),
             })
-        return rows
+        return {"enabled": bool(cfg.enabled), "sites": sites}
