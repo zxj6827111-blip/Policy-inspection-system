@@ -175,7 +175,15 @@ class Repository:
                 "SELECT item_index FROM scan_item_results WHERE id=?", (existing_result_id,),
             ).fetchone()
             if existing and int(existing["item_index"]) < 0:
-                return int(existing["item_index"])
+                existing_index = int(existing["item_index"])
+                negative_conflict = conn.execute(
+                    """SELECT id FROM scan_item_results
+                    WHERE job_id=? AND target_key=? AND page_number=? AND item_index=? AND id!=?
+                    LIMIT 1""",
+                    (job_id, target_key, page_number, existing_index, existing_result_id),
+                ).fetchone()
+                if not negative_conflict:
+                    return existing_index
         row = conn.execute(
             """SELECT MIN(item_index) AS min_index FROM scan_item_results
             WHERE job_id=? AND target_key=? AND page_number=? AND item_index<0""",

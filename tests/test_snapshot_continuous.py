@@ -365,6 +365,48 @@ def test_snapshot_record_scan_item_replay_of_same_stable_is_idempotent(tmp_path)
     assert replay_rows[0]["item_index"] == before["item_index"] == -1
 
 
+def test_snapshot_record_scan_item_reassigns_negative_position_after_page_drift(tmp_path):
+    db = Database(tmp_path / "stable-page-drift.db")
+    db.initialize()
+    repo = Repository(db)
+    job_id = db.create_job(putuo_labels(), "full", {"query_contract": PUTUO_QUERY_CONTRACT}, 0)
+    first_page = _item("putuo_government", "first-page", "First Page", 1, 0)
+    moving = _item("putuo_government", "moving", "Moving", 1, 0)
+    second_page = _item("putuo_government", "second-page", "Second Page", 2, 0)
+    second_page_negative = _item("putuo_government", "second-page-negative", "Second Page Negative", 2, -1)
+
+    repo.record_scan_item(job_id, first_page, detail_status="checked_complete")
+    repo.record_scan_item(job_id, moving, detail_status="checked_complete")
+    repo.record_scan_item(job_id, second_page, detail_status="checked_complete")
+    repo.record_scan_item(job_id, second_page_negative, detail_status="checked_complete")
+
+    moving_on_second_page = _item("putuo_government", "moving", "Moving", 2, 0)
+    repo.record_scan_item(job_id, moving_on_second_page, detail_status="checked_complete")
+    with db.connect() as conn:
+        before_replay = conn.execute(
+            "SELECT id,page_number,item_index FROM scan_item_results WHERE job_id=? AND url=?",
+            (job_id, moving.url),
+        ).fetchone()
+
+    repo.record_scan_item(job_id, moving_on_second_page, detail_status="checked_complete")
+
+    with db.connect() as conn:
+        rows = conn.execute(
+            "SELECT id,url,page_number,item_index FROM scan_item_results WHERE job_id=? ORDER BY id",
+            (job_id,),
+        ).fetchall()
+        moving_rows = [row for row in rows if row["url"] == moving.url]
+
+    assert len(rows) == 4
+    assert len(moving_rows) == 1
+    assert moving_rows[0]["id"] == before_replay["id"]
+    assert moving_rows[0]["page_number"] == before_replay["page_number"] == 2
+    assert moving_rows[0]["item_index"] == before_replay["item_index"] == -2
+    assert {(row["page_number"], row["item_index"]) for row in rows} == {
+        (1, 0), (2, 0), (2, -1), (2, -2),
+    }
+
+
 def _seed_snapshot_validation_case(tmp_path, result_count: int):
     db = Database(tmp_path / f"snapshot-coverage-{result_count}.db")
     db.initialize()
