@@ -4,196 +4,270 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>上海区级政策文件安全巡检系统</title>
-  <link rel="stylesheet" href="/static/app.css?v=20260726-task-center">
+  <link rel="stylesheet" href="/static/app.css?v=20260726-sitecentric">
 </head>
 <body>
   <header class="topbar">
     <div>
-      <h1>上海区级政策文件安全巡检系统</h1>
-      <p>本地运行 · 受控并行 · 同域串行 · 风控信号自动暂停</p>
+      <h1>政策文件安全巡检系统</h1>
+      <p class="sub">受控采集 · 同域串行 · 风控信号自动暂停</p>
     </div>
     <div class="topbar-side">
-      <button type="button" id="task-center-btn" class="task-center-btn">任务中心</button>
-      <span class="health" id="health">正在检查服务</span>
+      <button type="button" class="btn-ghost-dark" id="task-center-btn">任务中心</button>
+      <span class="service-chip"><span class="dot" id="health-dot"></span><span id="health">正在检查服务</span></span>
     </div>
   </header>
 
-  <main>
-    <section class="control-band">
-      <form id="scan-form">
-        <fieldset class="scan-source-field">
-          <legend>扫描站点</legend>
-          <div class="scan-site-groups">
-            <details class="site-group site-group-district">
-              <summary class="site-group-summary">
-                <span class="site-group-title">区级网站</span>
-                <small class="site-group-meta">{{ district_sites|length }} 个站点 · 默认折叠</small>
-              </summary>
-              <div class="scan-sites scan-sites-district">
-                {% for site in district_sites %}
-                <label class="site-option site-option-district" data-site-key="{{ site.key }}">
-                  <input type="checkbox" name="site_key" value="{{ site.key }}">
-                  <span class="site-main">
-                    <strong>{{ site.district }}</strong>
-                    <small class="source-badge">{{ site.source_level }}</small>
-                    <span>{{ site.source_name }}</span>
-                  </span>
-                  {% if site.key == 'putuo_district' %}
-                  <small class="site-coverage">区政府、委办局、街道镇、规范性文件、党政混合信息</small>
-                  {% endif %}
-                  <span class="site-runtime" id="site-runtime-{{ site.key }}">正在读取站点状态…</span>
-                </label>
-                {% endfor %}
-              </div>
-            </details>
+  <div class="shell">
+    <!-- ============ 左侧：站点导航 ============ -->
+    <aside class="sidebar">
+      <button type="button" class="side-item" data-nav="overview">
+        <span class="s-dot s-grid"></span>
+        <span class="s-main"><strong>全部站点总览</strong><small>{{ district_sites|length + municipal_sites|length }} 个站点运行概况</small></span>
+      </button>
 
-            <div class="site-group site-group-municipal">
-              <div class="site-group-heading">
-                <span class="site-group-title">市级平台</span>
-                <small class="site-group-meta">上海市政策文件库 · {{ municipal_sites|length }} 个区县 · 请自行勾选</small>
-              </div>
-              <div class="scan-sites scan-sites-municipal">
-                {% for site in municipal_sites %}
-                <label class="site-option site-option-chip" data-site-key="{{ site.key }}" title="{{ site.label }}">
-                  <input type="checkbox" name="site_key" value="{{ site.key }}">
-                  <span class="site-chip-body">
-                    <strong>{{ site.district }}</strong>
-                    <span class="site-runtime" id="site-runtime-{{ site.key }}">读取中…</span>
-                  </span>
-                </label>
-                {% endfor %}
-              </div>
-            </div>
-          </div>
-        </fieldset>
-        <div class="scan-settings">
-          <label class="field">本次最多文件数
-            <input type="number" name="max_documents" value="0" min="0" step="1">
-            <small>0 表示扫描全部条目。设为非 0 仅用于试扫，未完整完成的任务不能作为增量基线。</small>
-          </label>
-          <div class="parallel-policy" aria-label="并行调度规则">
-            <strong>并行调度</strong>
-            <span>不同域名最多同时运行 2 个任务</span>
-            <small>同一域名的任务自动排队，分别保留进度和结果。</small>
-          </div>
-        </div>
-        <div class="scan-actions">
-          <button type="submit" class="primary" id="auto-start-btn" disabled>启动所选站点</button>
-          <button type="button" id="full-rebuild-btn" disabled>重新全量扫描</button>
-        </div>
-      </form>
-      <div class="safety-strip">
-        <strong>固定安全节奏</strong>
+      <details class="side-group" open id="group-district">
+        <summary>区级网站 <span class="g-alert" id="alert-district" hidden></span><span class="g-count">{{ district_sites|length }}</span></summary>
+        {% for site in district_sites %}
+        <button type="button" class="side-item" data-nav="site" data-site="{{ site.key }}">
+          <span class="s-dot s-none" id="side-dot-{{ site.key }}"></span>
+          <span class="s-main"><strong>{{ site.district }}</strong><small id="side-sub-{{ site.key }}">读取中…</small></span>
+        </button>
+        {% endfor %}
+      </details>
+
+      <details class="side-group" id="group-municipal">
+        <summary>市级平台 <span class="g-alert" id="alert-municipal" hidden></span><span class="g-count">{{ municipal_sites|length }}</span></summary>
+        {% for site in municipal_sites %}
+        <button type="button" class="side-item" data-nav="site" data-site="{{ site.key }}">
+          <span class="s-dot s-none" id="side-dot-{{ site.key }}"></span>
+          <span class="s-main"><strong>{{ site.district }}</strong><small id="side-sub-{{ site.key }}">读取中…</small></span>
+        </button>
+        {% endfor %}
+      </details>
+
+      <div class="side-safety">
+        <div class="side-safety-title">固定安全节奏</div>
         {% if safety.min_delay_seconds == safety.max_delay_seconds %}
-        <span>{{ safety.min_delay_seconds|int }} 秒/页</span>
+        <span>{{ safety.min_delay_seconds|int }} 秒/次访问</span>
         {% else %}
-        <span>{{ safety.min_delay_seconds|int }}–{{ safety.max_delay_seconds|int }} 秒/页</span>
+        <span>{{ safety.min_delay_seconds|int }}–{{ safety.max_delay_seconds|int }} 秒/次访问</span>
         {% endif %}
         {% if safety.rest_min_seconds == safety.rest_max_seconds %}
-        <span>每 {{ safety.rest_every_pages }} 页休息 {{ safety.rest_min_seconds|int }} 秒</span>
+        <span>每 {{ safety.rest_every_pages }} 次休息 {{ safety.rest_min_seconds|int }} 秒</span>
         {% else %}
-        <span>每 {{ safety.rest_every_pages }} 页休息 {{ safety.rest_min_seconds|int }}–{{ safety.rest_max_seconds|int }} 秒</span>
+        <span>每 {{ safety.rest_every_pages }} 次休息 {{ safety.rest_min_seconds|int }}–{{ safety.rest_max_seconds|int }} 秒</span>
         {% endif %}
-        <span>详情与外链并发数 1</span>
-        <span>公开列表接口仅用于读取分页和总量，仍共享限速器</span>
-        <span>403 / 429 / 验证码立即暂停</span>
+        <span>403 / 429 / 验证码自动暂停</span>
+        <span>不同域名最多并行 2 个任务</span>
       </div>
-    </section>
+    </aside>
 
-    <section class="job-panel" id="current-panel" hidden>
-      <div class="section-heading">
-        <div><h2>当前任务 <span id="job-id"></span></h2><p id="job-subtitle"></p></div>
-        <div class="job-operations">
-          <p id="operation-hint" class="operation-hint" aria-live="polite"></p>
-          <div class="actions">
-          <button type="button" id="pause-btn">暂停</button>
-          <button type="button" id="resume-btn">恢复</button>
-          <button type="button" id="stop-btn">停止</button>
-          <a id="export-link" class="button-link">下载 Excel</a>
+    <!-- ============ 右侧内容 ============ -->
+    <main class="content">
+
+      <!-- ===== 全部站点总览 ===== -->
+      <section class="page" id="page-overview" hidden>
+        <div class="site-head"><h2>全部站点总览</h2>
+          <span class="head-actions">
+            <button type="button" class="btn btn-sm" id="batch-toggle">批量扫描</button>
+          </span>
+        </div>
+        <p class="site-sub">点击站点卡片进入该站点操作；批量扫描可一次启动多个站点</p>
+        <div class="ov-chips" id="ov-chips"></div>
+        <div class="ov-grid" id="ov-grid"></div>
+        <div class="batch-bar" id="batch-bar" hidden>
+          <span class="summary" id="batch-summary">未选择站点</span>
+          <span class="grow"></span>
+          <label class="max-docs">本次最多文件数 <input type="number" id="batch-max-docs" value="0" min="0" step="1"> <span>0 = 全部</span></label>
+          <button type="button" class="btn btn-primary" id="batch-start" disabled>启动所选站点</button>
+          <button type="button" class="btn" id="batch-cancel">退出批量</button>
+        </div>
+
+        <div class="card" id="legacy-card" hidden style="overflow:hidden; margin-top:16px">
+          <div class="panel-head"><h3>其他历史任务</h3><span class="muted-note">与当前站点配置不完全对应的早期任务</span></div>
+          <div class="table-wrap"><table class="mini" id="legacy-table">
+            <thead><tr><th>任务</th><th>来源</th><th>模式</th><th>状态</th><th>进度</th><th>问题</th><th>创建时间</th><th>结果</th></tr></thead>
+            <tbody id="legacy-body"></tbody>
+          </table></div>
+        </div>
+      </section>
+
+      <!-- ===== 站点详情（唯一骨架，JS 填充当前站点） ===== -->
+      <section class="page" id="page-site" hidden>
+        <div class="site-head">
+          <h2 id="site-title">-</h2>
+          <span class="lv" id="site-level">-</span>
+          <span class="pill pill-neutral" id="site-pill">-</span>
+        </div>
+        <p class="site-sub" id="site-subline">-</p>
+
+        <div class="site-layout">
+          <div class="main-col">
+            <!-- 主操作卡 -->
+            <div class="card">
+              <div class="action-hero">
+                <div class="txt">
+                  <strong id="hero-title">-</strong>
+                  <p id="hero-desc">-</p>
+                </div>
+                <span class="hero-buttons" id="hero-buttons"></span>
+                <details class="more-menu" id="more-menu">
+                  <summary class="btn">更多 ▾</summary>
+                  <div class="menu" id="more-menu-items"></div>
+                </details>
+              </div>
+
+              <div class="callout" id="site-callout" hidden>
+                <span>⚠️</span>
+                <div>
+                  <strong id="callout-title">-</strong>
+                  <p id="callout-desc">-</p>
+                </div>
+              </div>
+
+              <details class="adv" id="max-docs-adv">
+                <summary>高级：限制本次扫描条数（试扫）</summary>
+                <label>本次最多文件数 <input type="number" id="site-max-docs" value="0" min="0" step="1"> <span class="muted-note">0 = 全部。非 0 的试扫任务不能作为增量基线。</span></label>
+              </details>
+
+              <div class="progress-wrap" id="progress-wrap" hidden>
+                <div class="progress-meta">
+                  <span class="big num" id="progress-big">-</span>
+                  <span class="eta num" id="progress-eta">-</span>
+                </div>
+                <div class="progress-track"><div class="progress-bar" id="progress-bar"></div></div>
+              </div>
+
+              <details class="tech" id="tech-details" hidden>
+                <summary>技术详情（排查用）</summary>
+                <dl>
+                  <dt>当前地址</dt><dd id="tech-url">-</dd>
+                  <dt>原始信息</dt><dd id="tech-message">-</dd>
+                  <dt>快照阶段</dt><dd id="tech-generation">-</dd>
+                  <dt>冷却状态</dt><dd id="tech-cooldown">-</dd>
+                </dl>
+              </details>
+
+              <div class="stat-row" id="stat-row" hidden></div>
+
+              <ol class="steps" id="onboarding-steps" hidden>
+                <li class="cur"><strong>① 首次全量扫描</strong>逐条建立基准数据库（一次性投入）</li>
+                <li><strong>② 自动增量</strong>之后每 6 小时自动核验新增与变化</li>
+                <li><strong>③ 每周对账</strong>每 7 天完整比对一次，防止遗漏</li>
+              </ol>
+            </div>
+
+            <!-- 问题复核 -->
+            <div class="card" id="findings-panel" hidden>
+              <div class="panel-head"><h3>问题复核</h3><span class="muted-note">当前任务的复核队列</span></div>
+              <div class="review-filters">
+                <button type="button" class="chip-filter review-filter" data-status="pending">待复核 <b id="rc-pending">0</b></button>
+                <button type="button" class="chip-filter review-filter" data-status="confirmed">确认异常 <b id="rc-confirmed">0</b></button>
+                <button type="button" class="chip-filter review-filter" data-status="dismissed">已排除 <b id="rc-dismissed">0</b></button>
+                <button type="button" class="chip-filter review-filter" data-status="all">全部</button>
+              </div>
+              <div id="findings-body" class="review-list"></div>
+              <div class="review-pagination">
+                <span id="review-page-info"></span>
+                <div><button type="button" class="btn btn-sm" id="review-prev">上一页</button><button type="button" class="btn btn-sm" id="review-next">下一页</button></div>
+              </div>
+            </div>
+
+            <!-- 扫描异常复核 -->
+            <div class="card" id="exceptions-panel" hidden>
+              <div class="panel-head"><h3>扫描异常复核</h3><span class="muted-note">全量复测后仍未通过的条目</span></div>
+              <div class="panel-pad"><div id="exception-counts" class="ov-chips"></div><div id="scan-exceptions-body" class="review-list"></div></div>
+            </div>
+
+            <!-- 本站点历史 -->
+            <div class="card" style="overflow:hidden">
+              <div class="panel-head"><h3>本站点历史任务</h3></div>
+              <div class="table-wrap"><table class="mini">
+                <thead><tr><th>任务</th><th>模式</th><th>状态</th><th>进度</th><th>问题</th><th>创建时间</th><th>结果</th></tr></thead>
+                <tbody id="site-history-body"></tbody>
+              </table></div>
+              <p class="muted-note panel-pad" id="site-history-empty" hidden>暂无记录。完成首次全量后，这里会显示每次扫描的结果与 Excel 下载。</p>
+            </div>
           </div>
+
+          <!-- 信息侧栏 -->
+          <aside class="rail">
+            <div class="card" id="rail-schedule">
+              <div class="rail-head"><h4>自动调度</h4><button type="button" class="btn btn-sm" id="rail-task-center">全部站点</button></div>
+              <div class="rail-pad" id="rail-schedule-body">读取中…</div>
+            </div>
+            <div class="card">
+              <div class="rail-head"><h4>站点信息</h4></div>
+              <div class="rail-pad"><dl class="kv" id="rail-info"></dl></div>
+            </div>
+            <div class="card" id="rail-findings-card" hidden>
+              <div class="rail-head"><h4>待复核问题</h4></div>
+              <div class="rail-pad"><div class="rail-big num" id="rail-findings-num">0</div></div>
+            </div>
+            <div class="card" id="rail-notes-card" hidden>
+              <div class="rail-head"><h4>扫描前须知</h4></div>
+              <div class="rail-pad"><ul class="rail-list">
+                <li>可随时暂停 / 停止，断点续扫不丢进度</li>
+                <li>遇 403 / 429 / 验证码自动暂停保护</li>
+                <li>连续运行 4 小时后自动冷却 30 分钟</li>
+                <li>市级各区县同域排队，与区级站点可并行</li>
+              </ul></div>
+            </div>
+          </aside>
         </div>
-      </div>
-      <div class="progress-track"><div id="progress-bar"></div></div>
-      <div class="metrics">
-        <div><span>状态</span><strong id="status"></strong></div>
-        <div><span>覆盖进度（详情 / 复用或跳过）</span><strong id="processed"></strong></div>
-        <div><span>表头 / 复用状态</span><strong id="item-stats">加载中</strong></div>
-        <div><span>发现问题</span><strong id="finding-count"></strong></div>
-        <div><span>当前区县 / 页</span><strong id="position"></strong></div>
-      </div>
-      <dl class="details">
-        <dt>当前地址</dt><dd id="current-url">-</dd>
-        <dt>暂停或错误</dt><dd id="job-message">-</dd>
-        <dt>冷却状态</dt><dd id="cooldown">-</dd>
-      </dl>
-      <p id="generation-meta" class="muted">快照统计加载中…</p>
+      </section>
+    </main>
+  </div>
 
-    </section>
+  <!-- ===== 任务中心 ===== -->
+  <dialog id="task-center-dialog" aria-labelledby="task-center-title">
+    <div class="dlg-head">
+      <div><h3 id="task-center-title">任务中心</h3><p>持续调度接下来将自动执行的任务</p></div>
+      <button type="button" class="dlg-close" id="task-center-close">✕</button>
+    </div>
+    <div class="dlg-body" id="task-center-body">加载中…</div>
+  </dialog>
 
-    <section id="findings-panel" hidden>
-      <div class="section-heading"><div><h2>问题复核</h2><p>当前任务的有限复核队列</p></div></div>
-      <div class="review-toolbar">
-        <div id="review-counts" class="review-counts"></div>
-        <div class="review-filters" role="group" aria-label="复核状态筛选">
-          <button type="button" class="review-filter" data-status="pending">待复核</button>
-          <button type="button" class="review-filter" data-status="all">全部</button>
-          <button type="button" class="review-filter" data-status="confirmed">确认异常</button>
-          <button type="button" class="review-filter" data-status="dismissed">已排除</button>
-        </div>
-      </div>
-      <div id="findings-body" class="findings-list"></div>
-      <div class="review-pagination">
-        <span id="review-page-info"></span>
-        <div><button type="button" id="review-prev">上一页</button><button type="button" id="review-next">下一页</button></div>
-      </div>
-    </section>
+  <!-- ===== 重新全量确认 ===== -->
+  <dialog id="confirm-rebuild" aria-labelledby="confirm-rebuild-title">
+    <div class="dlg-head"><div><h3 id="confirm-rebuild-title">确认重新全量扫描？</h3><p id="confirm-rebuild-site">-</p></div>
+      <button type="button" class="dlg-close" id="confirm-rebuild-close">✕</button>
+    </div>
+    <div class="dlg-body confirm-body">
+      <p>将从第一条开始重新检查本站点全部页面、政策解读、阅办联动和附件，通常仅在怀疑数据异常时使用。</p>
+      <ul>
+        <li>预计耗时较长（数小时至数天，视条目数量）</li>
+        <li>本次不受"最多文件数"限制</li>
+        <li>旧基线、历史记录与 Excel 会保留，不会被删除</li>
+        <li>本站点有进行中的任务时需先停止</li>
+      </ul>
+    </div>
+    <div class="dlg-actions">
+      <button type="button" class="btn" id="confirm-rebuild-cancel">取消</button>
+      <button type="button" class="btn-danger" id="confirm-rebuild-ok">确认，重新全量</button>
+    </div>
+  </dialog>
 
-    <section id="exceptions-panel" hidden>
-      <div class="section-heading"><div><h2>扫描异常复核</h2><p>已完成全量扫描后的复测仍未通过的政策条目</p></div></div>
-      <div id="exception-counts" class="review-counts"></div>
-      <div id="scan-exceptions-body" class="findings-list"></div>
-    </section>
-
-    <section class="history-panel">
-      <details id="history-details" class="collapsible-section">
-        <summary>
-          <span><strong>历史扫描</strong><small>状态、覆盖数量和结果导出</small></span>
-          <span class="collapse-hint" data-collapsed="展开历史扫描" data-expanded="收起历史扫描">展开历史扫描</span>
-        </summary>
-        <div class="history-content">
-          <div class="section-heading"><p>点击任务编号可查看详情、恢复扫描或导出结果。</p><button id="refresh-btn" type="button" title="刷新任务列表">↻</button></div>
-          <div class="table-wrap">
-            <table class="history-table">
-              <thead><tr><th>ID</th><th>站点</th><th>模式</th><th>状态</th><th>完整进度</th><th>问题</th><th>创建时间</th><th>结果</th></tr></thead>
-              <tbody id="jobs-body"></tbody>
-            </table>
-          </div>
-        </div>
-      </details>
-    </section>
-  </main>
+  <!-- ===== 证据定位 ===== -->
   <dialog id="evidence-dialog" class="evidence-dialog" aria-labelledby="evidence-title">
-    <div class="dialog-heading">
-      <div><h2 id="evidence-title">问题证据定位</h2><p id="evidence-subtitle"></p></div>
-      <button type="button" id="evidence-close" title="关闭证据定位">关闭</button>
+    <div class="dlg-head">
+      <div><h3 id="evidence-title">问题证据定位</h3><p id="evidence-subtitle"></p></div>
+      <button type="button" class="dlg-close" id="evidence-close">✕</button>
     </div>
-    <div class="evidence-actions"><a id="evidence-source" class="button-link" target="_blank" rel="noopener noreferrer">打开原政策页面</a></div>
-    <dl class="evidence-fields">
-      <dt>页面值</dt><dd id="evidence-page-value">-</dd>
-      <dt>正文值</dt><dd id="evidence-body-value">-</dd>
-      <dt>规则证据</dt><dd id="evidence-rule-text">-</dd>
-    </dl>
-    <p class="evidence-note">红框表示规则命中的已采集文本；未在正文中出现的页面字段会保留在上方证据区。</p>
-    <pre id="evidence-body" class="evidence-body"></pre>
-  </dialog>
-  <dialog id="task-center-dialog" class="evidence-dialog task-center-dialog" aria-labelledby="task-center-title">
-    <div class="dialog-heading">
-      <div><h2 id="task-center-title">任务中心</h2><p>持续调度接下来将自动执行的任务</p></div>
-      <button type="button" id="task-center-close" title="关闭任务中心">关闭</button>
+    <div class="dlg-body">
+      <div class="evidence-actions"><a id="evidence-source" class="btn btn-sm" target="_blank" rel="noopener noreferrer">打开原政策页面</a></div>
+      <dl class="kv evidence-fields">
+        <dt>页面值</dt><dd id="evidence-page-value">-</dd>
+        <dt>正文值</dt><dd id="evidence-body-value">-</dd>
+        <dt>规则证据</dt><dd id="evidence-rule-text">-</dd>
+      </dl>
+      <p class="muted-note">红框表示规则命中的已采集文本；未在正文中出现的页面字段会保留在上方证据区。</p>
+      <pre id="evidence-body" class="evidence-body"></pre>
     </div>
-    <div id="task-center-body" class="task-center-body">加载中…</div>
   </dialog>
+
   <div id="toast" role="status"></div>
-  <script src="/static/app.js?v=20260726-task-center"></script>
+  <script src="/static/app.js?v=20260726-sitecentric"></script>
 </body>
 </html>

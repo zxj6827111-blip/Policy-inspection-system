@@ -160,24 +160,23 @@ def test_index_exposes_district_and_sixteen_municipal_sites(tmp_path, monkeypatc
 
     assert response.status_code == 200
     html = response.text
-    assert html.count('name="site_key"') == 17
-    assert 'value="putuo_district"' in html
-    assert 'value="municipal_putuo"' in html
-    assert 'value="municipal_chongming"' in html
-    assert 'value="municipal_huangpu"' in html
-    assert 'value="municipal_pudong"' in html
-    assert "区政府、委办局、街道镇、规范性文件、党政混合信息" in html
-    assert "site-group-district" in html
-    assert "site-option-chip" in html
-    assert "默认折叠" in html
-    assert "请自行勾选" in html
-    assert 'id="auto-start-btn"' in html
-    assert 'id="full-rebuild-btn"' in html
+    # 站点中心式界面：侧栏必须暴露全部 17 个站点入口
+    assert html.count('data-nav="site"') == 17
+    assert 'data-site="putuo_district"' in html
+    assert 'data-site="municipal_putuo"' in html
+    assert 'data-site="municipal_chongming"' in html
+    assert 'data-site="municipal_huangpu"' in html
+    assert 'data-site="municipal_pudong"' in html
+    assert 'id="group-district"' in html
+    assert 'id="group-municipal"' in html
+    # 总览与站点详情两个视图骨架、批量启动与任务中心入口
+    assert 'id="page-overview"' in html
+    assert 'id="page-site"' in html
+    assert 'id="batch-start"' in html
+    assert 'id="task-center-btn"' in html
+    # 旧的手动模式/基线选择表单不应回归
     assert 'name="mode"' not in html
     assert 'name="baseline_job_id"' not in html
-    # checkboxes must not be pre-selected
-    assert 'name="site_key" checked' not in html
-    assert 'checked name="site_key"' not in html
 
 
 
