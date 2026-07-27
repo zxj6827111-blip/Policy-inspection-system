@@ -88,7 +88,7 @@
     "M7": {
       "branch": "feat/full-policy-inspection-upgrade",
       "head_before": "02cb6e22341e2940abb0e657d27b9ba2c7b2cae9",
-      "head_after": "02cb6e22341e2940abb0e657d27b9ba2c7b2cae9",
+      "head_after": "79dacc0e0cc8e210d5d72c7042266e3568f83135",
       "workspace_db_sha256": "5F35DE29396143B2F1EA5BE328505D37180A2AC2686898357D4BC309E76398F8",
       "self_acceptance": "PASS",
       "tests_passed": 347,
@@ -121,8 +121,28 @@
     "high_frequency_external_scanning": false
   },
   "final_independent_acceptance": "PENDING",
-  "last_updated": "2026-07-27",
+  "last_updated": "2026-07-28",
   "last_updated_by": "primary_dev_ai",
+  "remediation": {
+    "triggered_by": "final_independent_acceptance_fail_2026-07-28",
+    "p0_issues_closed": 3,
+    "p1_issues_closed": 5,
+    "re_acceptance_p0_closed": 1,
+    "tests_after_remediation": 391,
+    "tests_added_by_remediation": 44,
+    "evaluation_engine": "production_rule_modules",
+    "status": "COMMITTED_PENDING_RE_ACCEPTANCE",
+    "closure_report": "docs/final_acceptance/remediation_closure_report.md",
+    "summary_json": "tmp/program_control/remediation_summary.json",
+    "re_acceptance_blocker_was": "dirty_working_tree_uncommitted_remediation",
+    "extra_fixes": [
+      "login_failed_audit_actor_username",
+      "evidence_completeness_empty_db_metadata",
+      "logout_simple_csrf_tests",
+      "gitignore_data_backups"
+    ]
+  },
   "m6_notes": "M6 PASS: 21-item nav UI + role filter; Excel 8 new sheets (PDF/attachments, archive, duplicates, reconciliation, reading linkage, media, interpretation, rectification); 19 critical indexes; OCR queue (enqueue/next_pending/complete/cancel with retry + priority); PRAGMA tuning (busy_timeout=30s, synchronous=NORMAL, cache_size=64MB); observability (structured logging, metrics, deep health, request middleware, health snapshots); backup/restore (SQLite online backup API + SHA256 + dry_run + validate); 10-step production-replica full-flow rehearsal ALL PASS. 347 tests + 10 rehearsal steps PASS. Production boundary held.",
-  "m7_notes": "M7 PASS: full system regression 347 passed / 0 failed; final 1500-sample evaluation 74 rules P=R=F1=1.0000 (0 failed, 0 degradation); 12 final deliverable docs (architecture, feature matrix, rule catalog, security report, data quality report, test report, migration report, cutover runbook, rollback runbook, acceptance guide, observation checklist, release candidate package); 3 scripts (smoke_test, rehearsal_backup_restore, final_1500_evaluation); final_development_summary.json; tag candidate v3.0.0-rc1; squash merge plan to codex/fix-snapshot-result-collision. Production boundary held (db SHA256 unchanged, no service restart, no Nginx/PM2/cert changes). M0-M7 ALL self-acceptance PASS. Awaiting independent final acceptance."
+  "m7_notes": "M7 PASS: full system regression 347 passed / 0 failed; final 1500-sample evaluation 74 rules P=R=F1=1.0000 (0 failed, 0 degradation); 12 final deliverable docs (architecture, feature matrix, rule catalog, security report, data quality report, test report, migration report, cutover runbook, rollback runbook, acceptance guide, observation checklist, release candidate package); 3 scripts (smoke_test, rehearsal_backup_restore, final_1500_evaluation); final_development_summary.json; tag candidate v3.0.0-rc1; squash merge plan to codex/fix-snapshot-result-collision. Production boundary held (db SHA256 unchanged, no service restart, no Nginx/PM2/cert changes). M0-M7 ALL self-acceptance PASS. Awaiting independent final acceptance.",
+  "remediation_notes": "P0/P1 整改 + 可复现树入库（2026-07-28）：R-P0-1 CSRF；R-P0-2 生产引擎 1500 评测；R-P0-3 规则目录对齐；R-P1-1~5；重新总验阻断 R-RE-P0-1（未 commit）已通过入库关闭。增补：失败登录 actor_username、证据 KPI empty_database/sample_adequate、logout CSRF 测试、.gitignore data/backups/。全量回归 391 passed / 0 failed。生产 DB SHA256 未变。final_independent_acceptance 仍为 PENDING，待独立重新总验。"
 }

@@ -186,8 +186,29 @@ def _classify_match(
     evidence.append({"type": "district_url",
                       "url": district_doc.get("url", "")})
 
-    # All match → RECON-001.
+    # All match → RECON-001 (only if no attachment mismatch).
     if title_match and doc_number_match and date_match and body_match:
+        # Check attachment mismatch: both have hashes but they differ → RECON-008.
+        has_attachment_mismatch = (
+            bool(muni_fp.attachment_hash)
+            and bool(dist_fp.attachment_hash)
+            and muni_fp.attachment_hash != dist_fp.attachment_hash
+        )
+        if has_attachment_mismatch:
+            return ReconciliationMatch(
+                municipal_document_id=muni_id, district_document_id=dist_id,
+                match_status="RECON-008",
+                title_match=title_match, doc_number_match=doc_number_match,
+                date_match=date_match, body_match=body_match,
+                attachment_match=attachment_match,
+                similarity_score=similarity,
+                evidence=evidence + [{
+                    "type": "attachment_mismatch",
+                    "municipal_attachment_hash": muni_fp.attachment_hash,
+                    "district_attachment_hash": dist_fp.attachment_hash,
+                }],
+                notes="Attachment combination mismatch between channels.",
+            )
         # Check update delay.
         has_delay, delay_days = _check_update_delay(municipal_doc, district_doc)
         if has_delay and delay_days is not None:

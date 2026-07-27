@@ -129,3 +129,24 @@
 | F-12 | docs/final_candidate/release_candidate_package.md | DONE |
 | F-13 | tmp/program_control/final_development_summary.json | DONE |
 
+## 独立总验收与 P0/P1 整改（2026-07-28）
+
+| 编号 | 任务 | 状态 | 完成日期 | 产物 |
+|---:|---|---|---|---|
+| A-1 | 独立总验收执行 | FAIL | 2026-07-28 | docs/final_acceptance/final_acceptance_report.md |
+| A-2 | 整改清单生成 | DONE | 2026-07-28 | docs/final_acceptance/remediation_list.md |
+| R-P0-1 | CSRF 接入 system-settings/backups/logout | DONE | 2026-07-28 | app/main.py + tests/test_csrf_admin_writes.py（8 用例） |
+| R-P0-2 | 1500 评测改用生产规则引擎 | DONE | 2026-07-28 | scripts/final_1500_evaluation.py（engine=production_rule_modules） |
+| R-P0-3 | 规则目录与 DB/代码对齐 | DONE | 2026-07-28 | docs/final_candidate/03_final_rule_catalog.md（74 条对齐） |
+| R-P1-1 | 控制面 HEAD 对齐 79dacc0 | DONE | 2026-07-28 | status.json / final_development_summary.json / M7_self_acceptance.json / 10_independent_acceptance_guide.md |
+| R-P1-2 | 证据完整率 KPI 模块 + 测试 | DONE | 2026-07-28 | app/evidence_completeness/__init__.py + tests/test_evidence_completeness.py（15 用例） |
+| R-P1-3 | metrics 强制登录 + 失败登录审计 + cutover runbook 补齐 | DONE | 2026-07-28 | app/main.py + 08_production_cutover_runbook.md + 09_rollback_runbook.md |
+| R-P1-4 | M6 专项 pytest | DONE | 2026-07-28 | tests/test_m6_observability_ocr_backup.py（18 用例） |
+| R-P1-5 | INTERP-002/004/008 判定分支补齐 | DONE | 2026-07-28 | app/interpretation/__init__.py |
+| A-3 | 整改后全量回归 | DONE | 2026-07-28 | tmp/program_control/final_acceptance_pytest_after_remediation.txt（388 passed / 0 failed） |
+| A-4 | 整改后 1500 评测 | DONE | 2026-07-28 | tmp/program_control/M7_1500_evaluation.json（engine=production_rule_modules, P=R=F1=1.0000） |
+| A-5 | 整改关闭报告 | DONE | 2026-07-28 | docs/final_acceptance/remediation_closure_report.md |
+| A-6 | 整改摘要 JSON | DONE | 2026-07-28 | tmp/program_control/remediation_summary.json |
+| A-7 | 控制文件更新（status/change_log/risk/task_matrix） | DONE | 2026-07-28 | docs/program_control/* |
+| A-8 | 独立重新总验 | PENDING | — | 待独立总验收 AI 执行 |
+

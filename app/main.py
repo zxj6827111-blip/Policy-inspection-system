@@ -233,6 +233,21 @@ async def auth_login(
 ):
     user_row = auth.authenticate(payload.username, payload.password)
     if not user_row:
+        # R-P1-3 / R-RE-P2-1: 失败登录写入 operation_audits，actor_username=尝试登录名
+        ip, ua = _client_meta(request)
+        try:
+            auth.audit(
+                actor=None,
+                action="auth.login_failed",
+                resource_type="session",
+                resource_id=payload.username,
+                detail={"reason": "用户名或密码错误"},
+                ip=ip,
+                user_agent=ua,
+                actor_username=payload.username,
+            )
+        except Exception:
+            pass
         raise HTTPException(401, "用户名或密码错误")
     ip, ua = _client_meta(request)
     session_id, csrf_token, _expires = auth.create_session(int(user_row["id"]), ip=ip, user_agent=ua)
@@ -274,11 +289,15 @@ async def auth_logout(
 async def auth_logout_simple(
     request: Request,
     response: Response,
-    user: CurrentUser = Depends(require_login),
+    user: CurrentUser = Depends(require_write("read")),
     auth: AuthService = Depends(get_auth_service),
 ):
-    """Logout without CSRF for same-site navigation convenience after confirming session."""
-    # Still require login; CSRF optional here only if header present — enforce CSRF via cookie match soft
+    """Logout endpoint (R-P1-3: 纳入三段 CSRF 校验)。
+
+    之前为简化前端导航使用 require_login 无 CSRF，存在会话劫持风险。
+    现统一纳入 require_write("read")，所有登录角色均具备 read 能力，
+    且强制三段 CSRF（header+cookie+session 绑定）。
+    """
     ip, ua = _client_meta(request)
     auth.revoke_session(request.cookies.get(SESSION_COOKIE))
     auth.audit(actor=user, action="auth.logout", resource_type="session", ip=ip, user_agent=ua)
@@ -2266,10 +2285,10 @@ async def list_overdue_tasks_endpoint(_user: CurrentUser = Depends(require_login
 
 
 @app.get("/metrics")
-async def metrics_endpoint(request: Request, _user: CurrentUser | None = Depends(get_optional_user)):
+async def metrics_endpoint(request: Request, user: CurrentUser = Depends(require_login)):
     """Prometheus 风格 metrics 端点。
 
-    生产环境需登录（auth_enabled=true 时）；非生产或未启用鉴权时公开，便于本地开发。
+    R-P1-3: 强制登录（auth_enabled=true 时 require_login 拒绝匿名访问）。
     受 system_settings.metrics_enabled 控制；关闭时返回 404。
     """
     with db.connect() as conn:
@@ -2405,7 +2424,9 @@ async def update_system_setting_endpoint(
     key: str,
     payload: UpdateSettingRequest,
     request: Request,
-    user: CurrentUser = Depends(require_roles("admin")),
+    # R-P0-1: 改为 require_write("users:admin") 强制三段 CSRF；
+    # users:admin 仅 admin 角色具备（见 ROLE_CAPABILITIES），与原 require_roles("admin") 等价但增加 CSRF 保护。
+    user: CurrentUser = Depends(require_write("users:admin")),
     auth: AuthService = Depends(get_auth_service),
 ):
     """更新系统设置（仅 admin，M6）。"""
@@ -2455,7 +2476,8 @@ class CreateBackupRequest(BaseModel):
 async def backups_create_endpoint(
     payload: CreateBackupRequest,
     request: Request,
-    user: CurrentUser = Depends(require_roles("admin")),
+    # R-P0-1: 改为 require_write("users:admin") 强制三段 CSRF；与原 require_roles("admin") 等价但增加 CSRF 保护。
+    user: CurrentUser = Depends(require_write("users:admin")),
     auth: AuthService = Depends(get_auth_service),
 ):
     """创建数据库在线备份（仅 admin，M6-7）。"""
@@ -2532,6 +2554,16 @@ async def overview_endpoint(_user: CurrentUser = Depends(require_login)):
         "duplicate_pairs": int(duplicate_pairs),
         "recon_matches": int(recon_matches),
     }
+
+
+@app.get("/api/evidence-completeness")
+async def evidence_completeness_endpoint(_user: CurrentUser = Depends(require_login)):
+    """R-P1-2 证据完整率 KPI（只读）。
+
+    返回全局 finding 证据完整率度量字典，供独立验收门禁与仪表盘使用。
+    """
+    from app.evidence_completeness import compute_evidence_completeness
+    return compute_evidence_completeness(db)
 
 
 def _table_exists(conn, name: str) -> bool:

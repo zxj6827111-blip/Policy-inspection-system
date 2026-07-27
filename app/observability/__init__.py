@@ -461,10 +461,18 @@ def deep_health_check(db: Database) -> dict[str, Any]:
     ``status`` is ``unhealthy`` when the DB is unreachable or the integrity
     check does not return ``ok``; ``degraded`` when queues back up
     (``ocr_pending > 50`` or ``rectification_overdue > 10``); otherwise ``ok``.
+
+    The ``database`` sub-dict exposes ``integrity_check`` / ``quick_check`` /
+    ``foreign_key_check`` explicitly so callers can audit each PRAGMA result
+    independently (the legacy ``integrity`` alias is retained for backward
+    compatibility and mirrors ``quick_check``).
     """
     connected = False
     journal_mode = ""
     integrity = ""
+    integrity_check = ""
+    quick_check = ""
+    fk_check: list[Any] = []
     db_size = 0
     wal_size = 0
     jobs_active = 0
@@ -474,7 +482,16 @@ def deep_health_check(db: Database) -> dict[str, Any]:
         with db.connect() as conn:
             connected = True
             journal_mode = str(_pragma_scalar(conn, "journal_mode") or "")
-            integrity = str(_pragma_scalar(conn, "quick_check") or "")
+            quick_check = str(_pragma_scalar(conn, "quick_check") or "")
+            integrity_check = str(_pragma_scalar(conn, "integrity_check") or "")
+            integrity = quick_check  # backward-compat alias
+            try:
+                fk_check = [
+                    (r[0] if not isinstance(r, tuple) else r) for r in
+                    conn.execute("PRAGMA foreign_key_check").fetchall()
+                ]
+            except Exception:
+                fk_check = []
             path = Path(db.path)
             db_size = _safe_getsize(path)
             wal_size = _safe_getsize(Path(str(path) + "-wal"))
@@ -499,6 +516,9 @@ def deep_health_check(db: Database) -> dict[str, Any]:
             "connected": connected,
             "journal_mode": journal_mode,
             "integrity": integrity.strip(),
+            "integrity_check": integrity_check.strip(),
+            "quick_check": quick_check.strip(),
+            "foreign_key_check": fk_check,
         },
         "disk": {
             "db_size_bytes": db_size,

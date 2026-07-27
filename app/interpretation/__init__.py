@@ -68,6 +68,10 @@ class InterpretationCheckInput:
     page_body_length: int = 0
     is_empty_page: bool = False
     published_at_present: bool | None = None
+    # R-P0-2: 补齐 INTERP-002/004/008 判定所需输入（与 rule_versions 声明对齐）
+    matched_target: bool | None = None        # INTERP-002: 解读对象是否匹配原政策
+    target_url_mismatch: bool = False          # INTERP-004: 解读链接是否错挂到其他政策
+    interpretation_type: str = ""              # INTERP-008: 解读类型（需在 INTERPRETATION_TYPES 中）
 
 
 @dataclass
@@ -269,6 +273,18 @@ def _classify_check(
     # INTERP-003: 解读发布时间缺失.
     if payload.published_at_present is False:
         return ("INTERP-003", "confirmed", True, evidence, "Interpretation published_at is missing.")
+
+    # INTERP-002: 解读对象错误（与原政策不匹配）.
+    if payload.matched_target is False:
+        return ("INTERP-002", "confirmed", True, evidence, "Interpretation target does not match original policy.")
+
+    # INTERP-004: 解读链接错挂.
+    if payload.target_url_mismatch:
+        return ("INTERP-004", "confirmed", True, evidence, "Interpretation link points to wrong target.")
+
+    # INTERP-008: 解读类型缺失或无法识别.
+    if payload.interpretation_type and payload.interpretation_type not in INTERPRETATION_TYPES:
+        return ("INTERP-008", "confirmed", True, evidence, f"Interpretation type '{payload.interpretation_type}' is not recognized.")
 
     # OK — no finding.
     return ("", "ok", False, evidence, "Interpretation check OK.")

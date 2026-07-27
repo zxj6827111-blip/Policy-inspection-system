@@ -51,6 +51,9 @@
 3. 仍在维护窗口内（建议切换后 1 小时内回滚，超过 1 小时须谨慎评估数据损失风险）。
 4. 切换前生产数据库 SHA256 已记录（`pre_cutover_sha256`），用于回滚后比对。
 5. 故障日志与故障数据库副本的存储位置已规划好。
+6. **`appuser` 服务用户仍存在**，且部署目录属主未变（回滚不重建用户）。
+7. **Nginx / systemd / ufw / logrotate 配置未被破坏**——回滚仅触碰代码与数据库，基础设施安全配置原样保留（见 §6.5）。
+8. **`POLICY_AUTH_DISABLED` 未被设置**——回滚后启动仍须 `auth_enabled=True`。
 
 ### 3.1 前置自检命令
 
@@ -181,17 +184,26 @@ pip install -r requirements.txt
 
 ### 步骤 10：启动服务
 
+> ⚠️ 回滚后**必须保持与切换前等价的安全配置**：以 `appuser` 启动、仅绑定 `127.0.0.1`、HTTPS 仍由 Nginx 终止。安全配置保留验证见 §6.5。回滚不涉及 Nginx/systemd/ufw/logrotate 配置文件的回滚——这些基础设施配置在回滚后必须原样保留。
+
 ```bash
-APP_ENV=production POLICY_COOKIE_SECURE=1 pm2 start app
-# 或
-APP_ENV=production POLICY_COOKIE_SECURE=1 uvicorn app.main:app --host 0.0.0.0 --port 8000
+# 必须以 appuser 启动（与 08 runbook §10.1/§10.7 一致）
+sudo -u appuser -i
+cd /opt/policy-inspector
+
+# 方式 A：systemd
+sudo systemctl start policy-inspector
+
+# 方式 B：PM2（必须先 sudo -u appuser）
+APP_ENV=production POLICY_COOKIE_SECURE=1 pm2 start "uvicorn app.main:app --host 127.0.0.1 --port 8000" --name policy-inspector --env production
 ```
 
 确认服务已启动：
 
 ```bash
-pm2 status
-curl -s http://localhost:8000/health
+systemctl status policy-inspector   # 或 pm2 status
+ps -eo user,cmd | grep uvicorn      # USER 列必须为 appuser
+curl -s http://127.0.0.1:8000/health
 ```
 
 ### 步骤 11：运行冒烟脚本
@@ -227,11 +239,20 @@ tail -f logs/access.log  # 应能看到 POST/PUT/DELETE 请求
 | 验证项 | 期望结果 | 检查命令 |
 |--------|----------|----------|
 | 数据库 SHA256 | 与 `pre_cutover_sha256` 一致 | `python -c "import hashlib; print(hashlib.sha256(open('data/policy_inspector.db','rb').read()).hexdigest().upper())"` |
-| `/health` | `status=ok` | `curl -s http://localhost:8000/health` |
-| `/health/deep` | `healthy` | `curl -s http://localhost:8000/health/deep` |
+| `/health` | `status=ok` | `curl -s http://127.0.0.1:8000/health` |
+| `/health/deep` | `healthy` | `curl -s http://127.0.0.1:8000/health/deep` |
 | 关键业务功能恢复 | 登录、巡检、规则配置、审计日志正常 | 人工验证 |
 | 审计日志记录回滚操作 | 含 rollback 相关日志 | 查询 `audit_logs` 表 |
 | 代码 HEAD | `be74df72598ae9ae0feb3a8fd9987c84c5bd8b67` | `git rev-parse HEAD` |
+| 服务运行用户 | `appuser`（非 root） | `ps -eo user,cmd \| grep uvicorn \| grep -v grep` |
+| 应用端口绑定 | 仅 `127.0.0.1:8000`，无 `0.0.0.0:6001/8000` | `ss -ltnp \| grep -E ':8000\|:6001'` |
+| HTTPS 仍生效 | HTTP 301 → HTTPS，HSTS 存在 | `curl -sI http://localhost/ \| head -1` |
+| `.env` 权限 | 600 appuser | `stat -c '%a %U' .env` |
+| DB 文件权限 | 600 appuser | `stat -c '%a %U' data/policy_inspector.db` |
+| 防火墙规则 | 6001/8000 仍 deny | `ufw status \| grep -E '6001\|8000'` |
+| `POLICY_AUTH_DISABLED` | 未设置 | `env \| grep POLICY_AUTH_DISABLED`（应无输出） |
+| 进程监管 | enabled，以 appuser 启动 | `systemctl is-enabled policy-inspector` 或 `pm2 jlist` |
+| logrotate 配置 | 仍存在 | `ls /etc/logrotate.d/policy-inspector` |
 
 ### 5.1 审计日志查询示例
 
@@ -291,6 +312,96 @@ cp logs/*.log archives/logs_YYYYMMDD/
 - 当前生产版本（基线分支 HEAD）
 - 用户可正常使用的时间
 - 后续切换计划（如修复后会重新切换）
+
+### 6.5 安全配置保留验证（R-P1-3 配套）
+
+> 回滚仅回退**代码与数据库**，**不回退基础设施安全配置**。Nginx（HTTPS/HSTS/80→443）、systemd/PM2 单元、ufw/iptables 规则、logrotate、`.env`/DB 文件权限、`appuser` 用户与属主——这些在回滚后必须原样保留，与 `08_production_cutover_runbook.md` 第 10 章等价。
+>
+> 若回滚过程中误删/误改了上述任一配置，必须立即按 08 runbook §10 对应小节恢复，不得在「安全裸奔」状态下恢复写入流量。
+
+#### 6.5.1 基础设施配置保留清单
+
+| 配置项 | 回滚是否触碰 | 保留要求 | 恢复参考 |
+|--------|--------------|----------|----------|
+| `appuser` 用户 | 否 | 用户仍存在 | 08 §10.1 `useradd` |
+| 部署目录属主 | 否 | `appuser:appuser` | 08 §10.1 `chown -R` |
+| Nginx 配置（80→443、HSTS、`proxy_pass 127.0.0.1`） | 否 | 文件未变，`nginx -t` 通过 | 08 §10.2 |
+| TLS 证书与私钥 | 否 | 路径/权限不变 | 08 §10.2 |
+| systemd unit / PM2 进程列表 | 否（仅 restart，不 recreate） | `User=appuser`、`ExecStart` 含 `--host 127.0.0.1` | 08 §10.7 |
+| ufw / iptables / 云安全组 | 否 | 22/80/443 放行，6001/8000/8765 deny | 08 §10.4 |
+| `.env` 文件 | 否（仅可能被 git checkout 覆盖模板） | 权限 600、属主 appuser、不含 `POLICY_AUTH_DISABLED=1` | 08 §10.5 |
+| `data/policy_inspector.db` | 是（restore_database 覆盖） | restore 后立即 `chown appuser:appuser && chmod 600` | 08 §10.5 |
+| logrotate 配置 | 否 | `/etc/logrotate.d/policy-inspector` 仍存在 | 08 §10.6 |
+| 备份目录权限 | 否 | `appuser:appuser`，文件 600 | 08 §10.5 |
+
+#### 6.5.2 回滚后安全复核脚本
+
+```bash
+#!/bin/bash
+# 回滚后安全复核（与 08 runbook §10.8 等价）
+set -u
+fail=0
+
+echo "== [1] 服务运行用户 =="
+u=$(ps -eo user,cmd | grep uvicorn | grep -v grep | awk '{print $1}' | head -1)
+[ "$u" = "appuser" ] && echo "OK appuser" || { echo "FAIL user=$u"; fail=1; }
+
+echo "== [2] 应用端口绑定 =="
+b=$(ss -ltnp | grep -E ':8000|:6001' | grep -v '127.0.0.1')
+[ -z "$b" ] && echo "OK 仅 127.0.0.1" || { echo "FAIL 公网绑定: $b"; fail=1; }
+
+echo "== [3] HTTP->HTTPS =="
+c=$(curl -sI http://localhost/ | head -1)
+echo "$c" | grep -q 301 && echo "OK 301" || { echo "FAIL $c"; fail=1; }
+
+echo "== [4] HSTS =="
+curl -sI https://localhost/ | grep -qi strict-transport-security && echo "OK HSTS" || { echo "FAIL no HSTS"; fail=1; }
+
+echo "== [5] .env 权限 =="
+p=$(stat -c '%a %U' /opt/policy-inspector/.env)
+[ "$p" = "600 appuser" ] && echo "OK" || { echo "FAIL $p"; fail=1; }
+
+echo "== [6] DB 权限 =="
+p=$(stat -c '%a %U' /opt/policy-inspector/data/policy_inspector.db)
+[ "$p" = "600 appuser" ] && echo "OK" || { echo "FAIL $p"; fail=1; }
+
+echo "== [7] 防火墙 6001/8000 =="
+ufw status 2>/dev/null | grep -E '6001|8000' | grep -qi deny && echo "OK deny" || echo "WARN 需人工确认（或 iptables/云安全组）"
+
+echo "== [8] POLICY_AUTH_DISABLED =="
+e=$(env | grep POLICY_AUTH_DISABLED)
+[ -z "$e" ] && echo "OK 未设置" || { echo "FAIL $e"; fail=1; }
+
+echo "== [9] 进程监管 =="
+systemctl is-enabled policy-inspector 2>/dev/null | grep -q enabled && echo "OK systemd enabled" || \
+  (pm2 jlist 2>/dev/null | grep -q policy-inspector && echo "OK pm2" || { echo "FAIL 未托管"; fail=1; })
+
+echo "== [10] logrotate =="
+[ -f /etc/logrotate.d/policy-inspector ] && echo "OK" || { echo "FAIL logrotate 缺失"; fail=1; }
+
+echo ""
+[ $fail -eq 0 ] && echo "✅ 安全复核全部通过" || { echo "❌ 存在失败项，不得恢复写入流量"; exit 1; }
+```
+
+#### 6.5.3 restore_database 后的权限修复
+
+`restore_database`（步骤 6）以 `appuser` 身份执行时，新写入的 DB 文件会继承 `appuser:appuser` 与默认 umask。但若以 root 执行过恢复，或 umask 较宽，必须在步骤 7（SHA256 校验）之后、步骤 10（启动服务）之前显式修复：
+
+```bash
+sudo chown appuser:appuser /opt/policy-inspector/data/policy_inspector.db
+sudo chmod 600 /opt/policy-inspector/data/policy_inspector.db
+# 备份目录同理
+sudo find /opt/policy-inspector/data/backups -type f -exec chmod 600 {} \;
+sudo chown -R appuser:appuser /opt/policy-inspector/data/backups
+```
+
+#### 6.5.4 部分回滚（仅代码回滚）的安全注意
+
+若采用第 7 章「部分回滚」（仅回滚代码、不回滚数据库），除上述清单外，还需额外确认：
+
+- 旧基线代码分支的 `requirements.txt` 不得移除 `appuser` 运行所需的依赖
+- 旧基线代码若使用不同的环境变量名（如 `POLICY_COOKIE_SECURE` 在历史版本曾缺省），必须在 `.env` 中显式补齐
+- 旧基线代码若仍包含 `--host 0.0.0.0` 的启动脚本，**必须**改为 `127.0.0.1` 后再启动，不得沿用历史不安全默认
 
 ---
 
@@ -368,7 +479,7 @@ git checkout codex/fix-snapshot-result-collision
 git rev-parse HEAD  # 预期 be74df72598ae9ae0feb3a8fd9987c84c5bd8b67
 
 # 启动服务
-APP_ENV=production POLICY_COOKIE_SECURE=1 uvicorn app.main:app --host 0.0.0.0 --port 8000
+APP_ENV=production POLICY_COOKIE_SECURE=1 uvicorn app.main:app --host 127.0.0.1 --port 8000
 
 # 冒烟
 python scripts/smoke_test.py --base-url http://localhost:8000 --admin-user admin --admin-pass 'PASSWORD'
@@ -401,9 +512,10 @@ python -c "from app.backup import prune_old_backups; print(prune_old_backups('da
 | 步骤 9：重装旧依赖 | 3 分钟 | 22 分钟 |
 | 步骤 10：启动服务 | 2 分钟 | 24 分钟 |
 | 步骤 11：冒烟脚本 | 5 分钟 | 29 分钟 |
-| 步骤 12：恢复写入流量 | 2 分钟 | 31 分钟 |
+| §6.5 安全复核（恢复写入流量前必做） | 2 分钟 | 31 分钟 |
+| 步骤 12：恢复写入流量 | 2 分钟 | 33 分钟 |
 
-预计回滚总耗时约 31 分钟，建议维护窗口预留 1 小时余量。
+预计回滚总耗时约 33 分钟，建议维护窗口预留 1 小时余量。**§6.5 安全复核未通过前不得恢复写入流量。**
 
 ---
 
@@ -418,6 +530,9 @@ python -c "from app.backup import prune_old_backups; print(prune_old_backups('da
 | 部分回滚导致 schema 不一致 | 中 | 默认采用完整回滚，部分回滚需 DBA 评估 |
 | 回滚窗口超时 | 中 | 维护窗口预留 1 小时余量 |
 | 审计日志在回滚中丢失 | 低 | 备份包含审计日志，恢复后自动找回 |
+| 回滚后安全配置丢失（root 启动/0.0.0.0/无 HTTPS） | 高 | §6.5 安全复核脚本强制校验；restore 后修复 DB 权限；不回滚 Nginx/ufw/logrotate |
+| restore_database 后 DB 权限变宽 | 中 | §6.5.3 显式 `chown appuser && chmod 600` |
+| 基线代码含 `--host 0.0.0.0` 历史默认 | 中 | §6.5.4 强制改为 `127.0.0.1` 后再启动 |
 
 ---
 
@@ -428,10 +543,11 @@ python -c "from app.backup import prune_old_backups; print(prune_old_backups('da
 - 触发条件（7 项）
 - 回滚前置条件（5 项）
 - 回滚步骤（12 步，每步含通过条件）
-- 回滚后验证（6 项）
+- 回滚后验证（含安全配置保留项）
 - 部分回滚选项与风险说明
 - 应急联系、风险缓解、时间线参考
+- **安全配置保留验证（§6.5，配套 R-P1-3）**：基础设施配置保留清单、回滚后安全复核脚本、restore_database 后权限修复、部分回滚安全注意
 
-**实际回滚须在维护窗口内执行**。回滚是破坏性操作，执行前必须完成 dry_run 校验，并由回滚负责人决策。
+**实际回滚须在维护窗口内执行**。回滚是破坏性操作，执行前必须完成 dry_run 校验，并由回滚负责人决策。回滚后必须通过 §6.5 安全复核，方可恢复写入流量。
 
 本 Runbook 通过主开发 AI 自验产出，待独立总验收。

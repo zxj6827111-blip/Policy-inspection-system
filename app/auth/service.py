@@ -205,12 +205,21 @@ class AuthService:
         detail: dict | None = None,
         ip: str = "",
         user_agent: str = "",
+        actor_username: str | None = None,
     ) -> None:
+        """Write an operation audit row.
+
+        When ``actor`` is None (e.g. failed login), pass ``actor_username`` so
+        the attempted identity is still searchable in ``operation_audits``.
+        """
+        resolved_username = (
+            actor.username if actor is not None else (actor_username or "")
+        )
         with self.db.connect() as conn:
             self._audit(
                 conn,
                 actor_user_id=actor.id if actor else None,
-                actor_username=actor.username if actor else "",
+                actor_username=resolved_username,
                 action=action,
                 resource_type=resource_type,
                 resource_id=resource_id,

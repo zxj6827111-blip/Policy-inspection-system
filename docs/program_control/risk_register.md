@@ -84,3 +84,22 @@
 - 缓解：M7 默认只做候选包与切换准备；main 合并方案与 runbook 写入 `docs/final_candidate/`；实际合并与切换必须用户授权
 - 当前状态：OPEN（M7 进入时再评估）
 
+## R-012 独立总验收 FAIL — P0/P1 阻断（2026-07-28）
+
+- 影响：无法进入生产切换；最终封板受阻
+- 可能性：已发生
+- 描述：独立总验收 AI 出具 FAIL 结论，识别 P0×3 + P1×4
+  - R-P0-1：CSRF 缺口（system-settings / backups / logout-simple）
+  - R-P0-2：1500 评测未调用生产规则引擎，P=R=F1=1.0 无独立效力
+  - R-P0-3：规则目录与 DB/代码漂移
+  - R-P1-1：控制面 HEAD 滞留 02cb6e2
+  - R-P1-2：证据完整率 KPI 未实现
+  - R-P1-3：/metrics 匿名、失败登录未审计、cutover runbook 缺口
+  - R-P1-4：无 M6 专项 pytest
+  - R-P1-5：INTERP-002/004/008 判定分支缺失（整改时发现）
+- 缓解：主开发 AI 完成 P0/P1 整改（见 `docs/final_acceptance/remediation_closure_report.md`）
+  - CSRF 三段校验接入；1500 评测改用生产规则模块；规则目录 74 条对齐；控制面 HEAD 对齐 79dacc0；证据完整率模块 + 测试；/metrics 强制登录 + 失败登录审计；cutover runbook 补齐；M6 专项 pytest；INTERP 判定分支补齐
+  - 整改后全量回归 388 passed / 0 failed；1500 评测 engine=production_rule_modules，P=R=F1=1.0000
+- 当前状态：**MITIGATED**（P0/P1 全部关闭，待独立重新总验）
+- 触发重新总验：是（独立总验收 AI 按新版 `10_independent_acceptance_guide.md` 重新执行 12 步）
+

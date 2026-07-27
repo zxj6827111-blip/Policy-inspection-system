@@ -436,6 +436,30 @@ pytest tests/test_m5_reading_interp_rectification.py -v
 | M5 | test_m5_reading_interp_rectification | — | 阅办/解读/整改 |
 | M6 | （无新增，端点冒烟覆盖） | 347 | 性能/可观测性 |
 | M7 | （无新增，回归 + 评测 + 演练） | 347 | 全系统回归 |
+| P0/P1 整改 | test_csrf_admin_writes / test_evidence_completeness / test_m6_observability_ocr_backup | 391 | CSRF / 证据完整率 / M6 专项 / 失败登录审计 |
+
+---
+
+## 附：P0/P1 整改后测试增量（2026-07-28）
+
+独立总验收 FAIL 后，主开发完成整改并新增/扩展测试至全量 **391**：
+
+| 测试文件 | 用例数 | 关联问题 | 覆盖范围 |
+|----------|-------|----------|----------|
+| tests/test_csrf_admin_writes.py | 11 | R-P0-1 / R-RE | system-settings/backups CSRF；logout-simple CSRF；失败登录 actor_username 审计 |
+| tests/test_evidence_completeness.py | 15 | R-P1-2 | 证据完整率 KPI；空库 empty_database 元数据 |
+| tests/test_m6_observability_ocr_backup.py | 18 | R-P1-4 | OCR queue；backup；/health/deep；NAV=21；索引；metrics 401/200 |
+
+整改入库后全量回归：
+
+| 项 | 值 |
+|----|----|
+| 测试条目数 | 391（M7 基线 347 + 整改与增补） |
+| 通过 | 391 |
+| 失败 | 0 |
+| 产物 | tmp/program_control/fix_blockers_full_pytest.txt |
+
+> 工作区本地 DB 哈希可变（gitignore）；生产 DB SHA256 未改。当前测试总数为 391。
 
 ---
 

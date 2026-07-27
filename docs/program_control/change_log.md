@@ -509,3 +509,146 @@ overall: PASS（10/10）
 - **生产边界保持（数据库 SHA256 未变、服务未重启、Nginx/PM2/证书未修改）**
 - **待独立总验收**
 
+---
+
+## 2026-07-28 独立总验收 FAIL + P0/P1 整改
+
+### 独立总验收结果（FAIL）
+
+- 验收角色：独立总验收 AI
+- 验收 HEAD：`79dacc0e0cc8e210d5d72c7042266e3568f83135`
+- 工作区：clean（验收时）
+- 结论：**FAIL**
+- 阻断 P0×3 + P1×4
+- 产物：
+  - `docs/final_acceptance/final_acceptance_report.md`
+  - `docs/final_acceptance/remediation_list.md`
+  - `tmp/program_control/final_acceptance_summary.json`
+- 未改业务代码/测试，未执行生产切换
+
+### 整改 R-P0-1 CSRF 覆盖高权限写接口
+
+- `app/main.py`：`PUT /api/system-settings/{key}` 改 `Depends(require_write("users:admin"))`
+- `app/main.py`：`POST /api/backups` 改 `Depends(require_write("users:admin"))`
+- `app/main.py`：`POST /api/auth/logout-simple` 接入 `require_write("session:write")`
+- 新增 `tests/test_csrf_admin_writes.py`（8 用例）：无 header/错配/合法/viewer RBAC
+
+### 整改 R-P0-2 1500 评测改用生产规则引擎
+
+- 重写 `scripts/final_1500_evaluation.py`：替换内联判定函数为生产模块调用
+  - M1 → `app.rules.evaluate_record` / `evaluate_organization_rules`
+  - M3 → `app.pdf.detect_pdf_integrity` / `attachments.classify_attachment` / `compare.compare_three_way`
+  - M4 → `app.archive.evaluate_archive_anomalies` / `app.duplicates.detect_duplicates` / `app.reconciliation._classify_match`
+  - M5 → `app.reading_linkage._classify` / `app.media._classify` / `app.interpretation._classify_check` / `app.rectification.*`
+- JSON 顶层 `engine=production_rule_modules`
+- 独立重跑：1500 样本 / 74 规则 / P=R=F1=1.0000
+
+### 整改 R-P0-3 规则目录与 DB/代码对齐
+
+- 重写 `docs/final_candidate/03_final_rule_catalog.md`：以 `rule_versions` 表 + 代码为真源
+- 74 条规则全量对齐（M1=14, M3=10, M4=24, M5=26）
+- 删除不存在规则（SYMBOL-001/ATTACH-001/DATE-SEMANTIC-*/OCR-* 等）
+- 修正 ARCH-001 语义为"现行有效文件连续两轮消失"
+
+### 整改 R-P1-1 控制面 HEAD 对齐
+
+- `docs/program_control/status.json`：M7 head_after 改 `79dacc0…`
+- `tmp/program_control/final_development_summary.json`：final_head + M7 head 改 `79dacc0…`
+- `tmp/program_control/M7_self_acceptance.json`：head_after 改 `79dacc0…`
+- `docs/final_candidate/10_independent_acceptance_guide.md`：HEAD 改 `79dacc0…`，全量回归 347→388
+
+### 整改 R-P1-2 证据完整率 KPI
+
+- 新增 `app/evidence_completeness/__init__.py`：按规则分类定义必填 evidence schema，度量全局完整率
+- 新增 `tests/test_evidence_completeness.py`（15 用例）
+
+### 整改 R-P1-3 安全残余
+
+- `app/main.py`：`/metrics` 改 `require_login`；登录失败写 `operation_audits`（action=`auth.login_failed`）
+- `docs/final_candidate/08_production_cutover_runbook.md`：补齐 non-root / HTTPS / 6001 收口 / 防火墙 / 证书管理段落
+- `docs/final_candidate/09_rollback_runbook.md`：同步安全段落
+
+### 整改 R-P1-4 M6 自动化测试补强
+
+- 新增 `tests/test_m6_observability_ocr_backup.py`（18 用例）：
+  - OCR queue enqueue/complete/cancel
+  - backup validate dry_run
+  - `/health/deep`
+  - `len(NAV_ITEMS)==21`
+  - 19 个关键索引存在性
+  - metrics 401/200
+
+### 整改 R-P1-5 INTERP-002/004/008 判定分支缺失
+
+- `app/interpretation/__init__.py`：`InterpretationCheckInput` 新增 `matched_target` / `target_url_mismatch` / `interpretation_type` 字段
+- `_classify_check` 补三条判定分支（INTERP-002/004/008）
+
+### 整改后验证
+
+- 全量回归：`python -m pytest tests/ -q` → **388 passed / 0 failed**（352.31s）
+  - M7 基线 347 + 整改新增 41（CSRF 8 + 证据完整率 15 + M6 专项 18）
+- 1500 评测：`python scripts/final_1500_evaluation.py` → **PASS**
+  - engine=production_rule_modules
+  - 1500 样本 / 74 规则 / P=R=F1=1.0000
+- 产物：
+  - `tmp/program_control/final_acceptance_pytest_after_remediation.txt`
+  - `tmp/program_control/final_acceptance_1500_eval_after_remediation.txt`
+  - `tmp/program_control/M7_1500_evaluation.json`（更新，engine=production_rule_modules）
+  - `tmp/program_control/M7_1500_evaluation.md`（更新）
+
+### 整改关闭报告与摘要
+
+- 新增 `docs/final_acceptance/remediation_closure_report.md`（7 节：P0 明细/P1 明细/独立验证/文件清单/自检清单/重新总验触发/签章）
+- 新增 `tmp/program_control/remediation_summary.json`（结构化整改摘要）
+
+### 控制文件更新
+
+- `docs/program_control/status.json`：
+  - `last_updated` 改 `2026-07-28`
+  - 新增 `remediation` 段：p0_issues_closed=3, p1_issues_closed=5, tests_after_remediation=388, evaluation_engine=production_rule_modules, status=CLOSED_PENDING_RE_ACCEPTANCE
+  - 新增 `remediation_notes` 段
+- `docs/program_control/change_log.md`：追加本段落
+
+### 生产边界
+
+- 生产数据库 SHA256：`13E6A8A412F69C13D149674A31076854C966F5B151E670FC9E22D0F53AB77AF3`（未变）
+- 工作区数据库 SHA256：`5F35DE29396143B2F1EA5BE328505D37180A2AC2686898357D4BC309E76398F8`（未变）
+- 未重启生产服务、未修改 Nginx/PM2/证书
+- 未执行 git commit/push/merge
+- 未执行生产切换
+
+### 整改完成（代码层）
+
+- P0 全部关闭（3/3）
+- P1 全部关闭（5/5）
+- 全量回归当时 388 passed / 0 failed
+- 1500 评测 engine=production_rule_modules，P=R=F1=1.0000
+- `final_independent_acceptance` 仍为 `PENDING`
+
+---
+
+## 2026-07-28 重新总验 FAIL 后：可复现树 + 残余修补
+
+### 触发
+
+- 独立重新总验 **FAIL**：技术 P0/P1 已关，但工作区 dirty、HEAD=`79dacc0` 不含整改（R-RE-P0-1）
+
+### 代码增补
+
+- `app/auth/service.py`：`audit(..., actor_username=)` 支持失败登录写入尝试用户名
+- `app/main.py`：失败登录 `actor_username=payload.username`
+- `app/evidence_completeness`：返回 `empty_database` / `sample_adequate` / `note`
+- `.gitignore`：忽略 `data/backups/`
+- 测试：logout CSRF、失败登录审计；证据空库元数据断言
+
+### 验证
+
+- 全量回归：**391 passed / 0 failed**
+- 不修改生产数据库/服务/Nginx/PM2/证书
+
+### 入库
+
+- 将全部整改与验收文档 commit 到 `feat/full-policy-inspection-upgrade`
+- 工作区干净后更新控制面 HEAD 指向新 commit
+- **仍待独立重新总验**（不得自称 FINAL PASS）
+
