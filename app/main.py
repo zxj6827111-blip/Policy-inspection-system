@@ -1534,3 +1534,391 @@ async def attachment_process_endpoint(
         "notes": result.notes,
     }
 
+
+# ===================== M4: Archive / Duplicates / Reconciliation =====================
+
+class ArchiveObservationRequest(BaseModel):
+    job_id: int | None = None
+    target_key: str = ""
+    source_level: str = "district"
+    source_site: str = ""
+    channel_id: str = ""
+    url: str = ""
+    present: bool = True
+    http_status: int | None = None
+    page_status: str = "ok"
+    content_hash: str = ""
+    notes: str = ""
+
+
+class FingerprintRequest(BaseModel):
+    page_document_number: str = ""
+    title: str = ""
+    authored_date: str | None = None
+    issuing_agency: str = ""
+    body_text: str = ""
+    pdf_hash: str = ""
+    attachment_hashes: list[str] = Field(default_factory=list)
+
+
+class ExcludeArchiveRequest(BaseModel):
+    rule_code: str
+    reason: str = Field(max_length=500)
+    resolved_by: str = ""
+
+
+class ExcludeDuplicateRequest(BaseModel):
+    document_id_a: int
+    document_id_b: int
+    duplicate_type: str
+    reason: str = Field(max_length=500)
+    resolved_by: str = ""
+
+
+class ExcludeReconRequest(BaseModel):
+    municipal_document_id: int
+    district_document_id: int | None = None
+    reason: str = Field(max_length=500)
+    resolved_by: str = ""
+
+
+@app.post("/api/archive/observations/{doc_id}")
+async def record_archive_observation(
+    doc_id: int,
+    payload: ArchiveObservationRequest,
+    request: Request,
+    user: CurrentUser = Depends(require_write("jobs:write")),
+    auth: AuthService = Depends(get_auth_service),
+):
+    """Record one round of archive observation for a document (M4)."""
+    from app.archive import ArchiveObservationInput, record_observation
+    obs = ArchiveObservationInput(
+        document_id=doc_id,
+        job_id=payload.job_id,
+        target_key=payload.target_key,
+        source_level=payload.source_level,
+        source_site=payload.source_site,
+        channel_id=payload.channel_id,
+        url=payload.url,
+        present=payload.present,
+        http_status=payload.http_status,
+        page_status=payload.page_status,
+        content_hash=payload.content_hash,
+        notes=payload.notes,
+    )
+    observation_id = record_observation(db, obs)
+    ip, ua = _client_meta(request)
+    auth.audit(
+        actor=user, action="archive.observation.record",
+        resource_type="archive_observations", resource_id=str(observation_id),
+        detail={"document_id": doc_id, "source_level": payload.source_level,
+                "present": payload.present},
+        ip=ip, user_agent=ua,
+    )
+    return {"observation_id": observation_id, "document_id": doc_id}
+
+
+@app.get("/api/archive/observations/{doc_id}")
+async def list_archive_observations(
+    doc_id: int,
+    source_level: str | None = Query(default=None),
+    _user: CurrentUser = Depends(require_login),
+):
+    """List archive observations for a document."""
+    from app.archive import list_observations
+    return list_observations(db, doc_id, source_level=source_level)
+
+
+@app.post("/api/archive/evaluate/{doc_id}")
+async def evaluate_archive(
+    doc_id: int,
+    request: Request,
+    user: CurrentUser = Depends(require_write("jobs:write")),
+    auth: AuthService = Depends(get_auth_service),
+    migration_search_urls: list[str] | None = None,
+):
+    """Evaluate ARCH-001~006 anomalies for a document (M4)."""
+    from app.archive import evaluate_archive_anomalies
+    findings = evaluate_archive_anomalies(
+        db, document_id=doc_id, migration_search_urls=migration_search_urls,
+    )
+    ip, ua = _client_meta(request)
+    auth.audit(
+        actor=user, action="archive.evaluate", resource_type="policy_documents",
+        resource_id=str(doc_id),
+        detail={"findings_count": len(findings),
+                "rule_codes": [f.rule_code for f in findings]},
+        ip=ip, user_agent=ua,
+    )
+    return {
+        "document_id": doc_id,
+        "findings": [
+            {
+                "rule_code": f.rule_code,
+                "severity": f.severity,
+                "machine_status": f.machine_status,
+                "allow_customer_output": f.allow_customer_output,
+                "evidence_count": len(f.evidence),
+                "notes": f.notes,
+            }
+            for f in findings
+        ],
+    }
+
+
+@app.get("/api/archive/findings")
+async def list_archive_findings(
+    status: str | None = Query(default=None),
+    _user: CurrentUser = Depends(require_login),
+):
+    """List ARCH-* findings, optionally filtered by status."""
+    from app.archive import list_findings
+    return list_findings(db, status=status)
+
+
+@app.post("/api/archive/findings/{doc_id}/exclude")
+async def exclude_archive_finding(
+    doc_id: int,
+    payload: ExcludeArchiveRequest,
+    request: Request,
+    user: CurrentUser = Depends(require_write("jobs:write")),
+    auth: AuthService = Depends(get_auth_service),
+):
+    """Exclude an archive finding (normal废止/失效/迁移可排除)."""
+    from app.archive import exclude_finding
+    exclude_finding(
+        db, document_id=doc_id, rule_code=payload.rule_code,
+        reason=payload.reason, resolved_by=payload.resolved_by or user.username,
+    )
+    ip, ua = _client_meta(request)
+    auth.audit(
+        actor=user, action="archive.finding.exclude",
+        resource_type="archive_findings",
+        resource_id=f"{doc_id}:{payload.rule_code}",
+        detail={"reason": payload.reason}, ip=ip, user_agent=ua,
+    )
+    return {"ok": True, "document_id": doc_id, "rule_code": payload.rule_code}
+
+
+@app.post("/api/fingerprints/{doc_id}")
+async def compute_document_fingerprint(
+    doc_id: int,
+    payload: FingerprintRequest,
+    request: Request,
+    user: CurrentUser = Depends(require_write("jobs:write")),
+    auth: AuthService = Depends(get_auth_service),
+):
+    """Compute and persist a document fingerprint (M4)."""
+    from app.duplicates import FingerprintInputs, compute_fingerprint, persist_fingerprint
+    inputs = FingerprintInputs(
+        document_id=doc_id,
+        page_document_number=payload.page_document_number,
+        title=payload.title,
+        authored_date=payload.authored_date,
+        issuing_agency=payload.issuing_agency,
+        body_text=payload.body_text,
+        pdf_hash=payload.pdf_hash,
+        attachment_hashes=payload.attachment_hashes,
+    )
+    fp = compute_fingerprint(inputs)
+    persist_fingerprint(db, fp)
+    ip, ua = _client_meta(request)
+    auth.audit(
+        actor=user, action="fingerprint.compute",
+        resource_type="document_fingerprints", resource_id=str(doc_id),
+        detail={"fingerprint_hash": fp.fingerprint_hash[:16]},
+        ip=ip, user_agent=ua,
+    )
+    return {
+        "document_id": doc_id,
+        "normalized_doc_number": fp.normalized_doc_number,
+        "normalized_title": fp.normalized_title,
+        "body_hash": fp.body_hash,
+        "pdf_hash": fp.pdf_hash,
+        "fingerprint_hash": fp.fingerprint_hash,
+    }
+
+
+@app.get("/api/fingerprints/{doc_id}")
+async def get_document_fingerprint(doc_id: int, _user: CurrentUser = Depends(require_login)):
+    """Retrieve a document's stored fingerprint."""
+    from app.duplicates import get_fingerprint
+    fp = get_fingerprint(db, doc_id)
+    if not fp:
+        raise HTTPException(404, "未找到指纹")
+    return fp.__dict__
+
+
+@app.post("/api/duplicates/detect/{doc_id}")
+async def detect_duplicates_endpoint(
+    doc_id: int,
+    request: Request,
+    user: CurrentUser = Depends(require_write("jobs:write")),
+    auth: AuthService = Depends(get_auth_service),
+    candidate_ids: list[int] | None = None,
+):
+    """Detect duplicates for a document (M4)."""
+    from app.duplicates import detect_duplicates
+    matches = detect_duplicates(db, document_id=doc_id, candidate_ids=candidate_ids)
+    ip, ua = _client_meta(request)
+    auth.audit(
+        actor=user, action="duplicates.detect",
+        resource_type="policy_documents", resource_id=str(doc_id),
+        detail={"matches_count": len(matches),
+                "types": [m.duplicate_type for m in matches]},
+        ip=ip, user_agent=ua,
+    )
+    return {
+        "document_id": doc_id,
+        "matches": [
+            {
+                "document_id_a": m.document_id_a,
+                "document_id_b": m.document_id_b,
+                "duplicate_type": m.duplicate_type,
+                "similarity_score": m.similarity_score,
+                "is_normal": m.is_normal,
+                "machine_status": m.machine_status,
+                "notes": m.notes,
+            }
+            for m in matches
+        ],
+    }
+
+
+@app.get("/api/duplicates")
+async def list_duplicates_endpoint(
+    document_id: int | None = Query(default=None),
+    duplicate_type: str | None = Query(default=None),
+    is_normal: bool | None = Query(default=None),
+    status: str | None = Query(default=None),
+    _user: CurrentUser = Depends(require_login),
+):
+    """List duplicate pairs with optional filters."""
+    from app.duplicates import list_duplicates
+    return list_duplicates(
+        db, document_id=document_id, duplicate_type=duplicate_type,
+        is_normal=is_normal, status=status,
+    )
+
+
+@app.post("/api/duplicates/exclude")
+async def exclude_duplicate_endpoint(
+    payload: ExcludeDuplicateRequest,
+    request: Request,
+    user: CurrentUser = Depends(require_write("jobs:write")),
+    auth: AuthService = Depends(get_auth_service),
+):
+    """Exclude a duplicate pair (normal cross-channel sync etc.)."""
+    from app.duplicates import exclude_duplicate
+    exclude_duplicate(
+        db, document_id_a=payload.document_id_a,
+        document_id_b=payload.document_id_b,
+        duplicate_type=payload.duplicate_type,
+        reason=payload.reason,
+        resolved_by=payload.resolved_by or user.username,
+    )
+    ip, ua = _client_meta(request)
+    auth.audit(
+        actor=user, action="duplicates.exclude",
+        resource_type="duplicate_pairs",
+        resource_id=f"{payload.document_id_a}:{payload.document_id_b}:{payload.duplicate_type}",
+        detail={"reason": payload.reason}, ip=ip, user_agent=ua,
+    )
+    return {"ok": True}
+
+
+@app.post("/api/reconciliation/reconcile/{municipal_id}")
+async def reconcile_document_endpoint(
+    municipal_id: int,
+    request: Request,
+    user: CurrentUser = Depends(require_write("jobs:write")),
+    auth: AuthService = Depends(get_auth_service),
+):
+    """Reconcile one municipal document against district candidates (M4)."""
+    from app.reconciliation import reconcile_document
+    matches = reconcile_document(db, municipal_id=municipal_id)
+    ip, ua = _client_meta(request)
+    auth.audit(
+        actor=user, action="reconciliation.reconcile",
+        resource_type="policy_documents", resource_id=str(municipal_id),
+        detail={"matches_count": len(matches),
+                "statuses": [m.match_status for m in matches]},
+        ip=ip, user_agent=ua,
+    )
+    return {
+        "municipal_document_id": municipal_id,
+        "matches": [
+            {
+                "district_document_id": m.district_document_id,
+                "match_status": m.match_status,
+                "similarity_score": m.similarity_score,
+                "title_match": m.title_match,
+                "doc_number_match": m.doc_number_match,
+                "date_match": m.date_match,
+                "body_match": m.body_match,
+                "attachment_match": m.attachment_match,
+                "machine_status": m.machine_status,
+                "notes": m.notes,
+            }
+            for m in matches
+        ],
+    }
+
+
+@app.post("/api/reconciliation/reconcile-all")
+async def reconcile_all_endpoint(
+    request: Request,
+    user: CurrentUser = Depends(require_write("jobs:write")),
+    auth: AuthService = Depends(get_auth_service),
+    limit: int | None = Query(default=None, ge=1, le=10000),
+):
+    """Run reconciliation across all unmatched municipal documents (M4)."""
+    from app.reconciliation import reconcile_all
+    summary = reconcile_all(db, limit=limit)
+    ip, ua = _client_meta(request)
+    auth.audit(
+        actor=user, action="reconciliation.reconcile_all",
+        resource_type="reconciliation_matches",
+        detail=summary, ip=ip, user_agent=ua,
+    )
+    return summary
+
+
+@app.get("/api/reconciliation/matches")
+async def list_recon_matches_endpoint(
+    match_status: str | None = Query(default=None),
+    status: str | None = Query(default=None),
+    document_id: int | None = Query(default=None),
+    _user: CurrentUser = Depends(require_login),
+):
+    """List reconciliation matches with optional filters."""
+    from app.reconciliation import list_matches
+    return list_matches(
+        db, match_status=match_status, status=status, document_id=document_id,
+    )
+
+
+@app.post("/api/reconciliation/exclude")
+async def exclude_recon_endpoint(
+    payload: ExcludeReconRequest,
+    request: Request,
+    user: CurrentUser = Depends(require_write("jobs:write")),
+    auth: AuthService = Depends(get_auth_service),
+):
+    """Exclude a reconciliation match."""
+    from app.reconciliation import exclude_match
+    exclude_match(
+        db, municipal_document_id=payload.municipal_document_id,
+        district_document_id=payload.district_document_id,
+        reason=payload.reason,
+        resolved_by=payload.resolved_by or user.username,
+    )
+    ip, ua = _client_meta(request)
+    auth.audit(
+        actor=user, action="reconciliation.exclude",
+        resource_type="reconciliation_matches",
+        resource_id=f"{payload.municipal_document_id}:{payload.district_document_id}",
+        detail={"reason": payload.reason}, ip=ip, user_agent=ua,
+    )
+    return {"ok": True}
+
