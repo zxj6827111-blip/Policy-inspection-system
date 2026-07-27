@@ -342,7 +342,13 @@ class Database:
     def connect(self) -> Iterator[sqlite3.Connection]:
         conn = sqlite3.connect(self.path, timeout=30, check_same_thread=False)
         conn.row_factory = sqlite3.Row
+        # M6 锁治理：显式设置 PRAGMA（connect timeout=30 等效，但连接后显式声明更稳健）
         conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute("PRAGMA busy_timeout=30000")  # 30s，与 connect timeout 一致
+        # WAL 模式下 synchronous=NORMAL 在写性能与数据安全间取平衡（崩溃不损坏，仅断电风险）
+        conn.execute("PRAGMA synchronous=NORMAL")
+        # cache_size 正数=页数，负数=KB。设 -65536 = 64MB，提升读吞吐
+        conn.execute("PRAGMA cache_size=-65536")
         try:
             yield conn
             conn.commit()
@@ -360,6 +366,7 @@ class Database:
             self._migrate_m3(conn)
             self._migrate_m4(conn)
             self._migrate_m5(conn)
+            self._migrate_m6(conn)
 
     @staticmethod
     def _migrate(conn: sqlite3.Connection) -> None:
@@ -540,6 +547,12 @@ class Database:
         from app.migrations.m5 import run_m5_migration
 
         run_m5_migration(conn)
+
+    @staticmethod
+    def _migrate_m6(conn: sqlite3.Connection) -> None:
+        from app.migrations.m6 import run_m6_migration
+
+        run_m6_migration(conn)
 
     def create_job(
         self, districts: list[str], mode: str, safety: dict[str, Any], max_documents: int = 0,

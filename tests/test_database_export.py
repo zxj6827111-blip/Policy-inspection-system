@@ -86,7 +86,7 @@ def test_database_and_excel_export(tmp_path, monkeypatch):
     monkeypatch.setattr("app.exporter.EXPORT_DIR", tmp_path)
     output = export_job(db, job_id)
     workbook = load_workbook(output)
-    assert workbook.sheetnames == ["问题汇总", "超期与日期问题", "文号与机构问题", "外链问题", "全量明细", "元数据问题", "扫描运行记录"]
+    assert workbook.sheetnames == ["问题汇总", "超期与日期问题", "文号与机构问题", "外链问题", "全量明细", "元数据问题", "PDF 与附件问题", "异常归档问题", "重复数据问题", "双渠道对账差异", "阅办联动问题", "媒体资源问题", "政策解读问题", "整改任务跟踪", "扫描运行记录"]
     assert workbook["全量明细"]["F2"].value == "测试文件"
     assert workbook["全量明细"]["AB2"].hyperlink.target == "https://example.test/10001.html"
     assert workbook["超期与日期问题"]["E2"].value == datetime(2026, 1, 1)

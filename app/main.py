@@ -74,6 +74,13 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="上海区级政策文件安全巡检系统", version="0.2.0-phase1", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "app" / "static")), name="static")
 
+# M6: 请求上下文中间件（request_id + 请求日志）
+try:
+    from app.observability import RequestContextMiddleware
+    app.add_middleware(RequestContextMiddleware)
+except Exception:  # noqa: BLE001 — 中间件可选，不得阻断启动
+    pass
+
 
 # M1: Protect API documentation in production (fail-closed).
 # /docs, /redoc, /openapi.json are accessible only when APP_ENV != production.
@@ -2253,4 +2260,370 @@ async def list_overdue_tasks_endpoint(_user: CurrentUser = Depends(require_login
     """List overdue rectification tasks (RECT-002)."""
     from app.rectification import detect_overdue_tasks
     return detect_overdue_tasks(db)
+
+
+# ===================== M6: 监控 / OCR 队列 / 系统设置 / 备份 / 全局聚合 =====================
+
+
+@app.get("/metrics")
+async def metrics_endpoint(request: Request, _user: CurrentUser | None = Depends(get_optional_user)):
+    """Prometheus 风格 metrics 端点。
+
+    生产环境需登录（auth_enabled=true 时）；非生产或未启用鉴权时公开，便于本地开发。
+    受 system_settings.metrics_enabled 控制；关闭时返回 404。
+    """
+    with db.connect() as conn:
+        metrics_enabled = conn.execute(
+            "SELECT value FROM system_settings WHERE key='metrics_enabled'"
+        ).fetchone()
+    if metrics_enabled and str(metrics_enabled["value"]).lower() not in {"true", "1", "yes"}:
+        raise HTTPException(404, "metrics disabled")
+    from app.observability import get_metrics, format_metrics_prometheus
+    data = get_metrics(db)
+    # JSON 响应优先（便于 API 客户端）；Accept: text/plain 时返回 Prometheus 文本
+    accept = request.headers.get("accept", "")
+    if "text/plain" in accept or "prometheus" in accept:
+        return PlainTextResponse(format_metrics_prometheus(data))
+    return data
+
+
+class PlainTextResponse(JSONResponse):
+    media_type = "text/plain; charset=utf-8"
+
+    def __init__(self, content: str):
+        super().__init__(content=content, media_type=self.media_type)
+
+
+@app.get("/health/deep")
+async def health_deep_endpoint():
+    """深度健康检查（含数据库完整性、磁盘、计数）。公开端点，用于 readiness/liveness 探针。"""
+    from app.observability import deep_health_check
+    result = deep_health_check(db)
+    status_code = 200 if result["status"] != "unhealthy" else 503
+    return JSONResponse(content=result, status_code=status_code)
+
+
+@app.get("/api/ocr-queue")
+async def ocr_queue_list_endpoint(
+    status: str | None = None,
+    limit: int = Query(default=100, ge=1, le=500),
+    _user: CurrentUser = Depends(require_login),
+):
+    """列出 OCR 队列项（M6-4）。"""
+    from app.ocr_queue import list_queue
+    return list_queue(db, status=status, limit=limit)
+
+
+@app.get("/api/ocr-queue/depth")
+async def ocr_queue_depth_endpoint(_user: CurrentUser = Depends(require_login)):
+    """OCR 队列深度统计（M6-4）。"""
+    from app.ocr_queue import queue_depth
+    return queue_depth(db)
+
+
+class OcrEnqueueRequest(BaseModel):
+    job_id: int | None = None
+    priority: int | None = Field(default=None, ge=1, le=1000)
+    max_attempts: int | None = Field(default=None, ge=1, le=10)
+    requested_by: str = "api"
+
+
+@app.post("/api/ocr-queue/enqueue/{doc_id}")
+async def ocr_queue_enqueue_endpoint(
+    doc_id: int,
+    payload: OcrEnqueueRequest,
+    request: Request,
+    user: CurrentUser = Depends(require_write("jobs:write")),
+    auth: AuthService = Depends(get_auth_service),
+):
+    """将文档入队 OCR 处理（M6-4）。"""
+    from app.ocr_queue import enqueue
+    item_id = enqueue(
+        db, doc_id, job_id=payload.job_id, priority=payload.priority,
+        max_attempts=payload.max_attempts, requested_by=user.username,
+    )
+    ip, ua = _client_meta(request)
+    auth.audit(
+        actor=user, action="ocr.queue.enqueue",
+        resource_type="ocr_queue", resource_id=str(item_id),
+        detail={"document_id": doc_id, "priority": payload.priority},
+        ip=ip, user_agent=ua,
+    )
+    return {"item_id": item_id, "document_id": doc_id}
+
+
+class OcrRunBatchRequest(BaseModel):
+    max_items: int = Field(default=10, ge=1, le=100)
+    worker_id: str = "api-batch"
+
+
+@app.post("/api/ocr-queue/run-batch")
+async def ocr_queue_run_batch_endpoint(
+    payload: OcrRunBatchRequest,
+    request: Request,
+    user: CurrentUser = Depends(require_write("jobs:write")),
+    auth: AuthService = Depends(get_auth_service),
+):
+    """批量处理 OCR 队列（M6-4）。"""
+    from app.ocr_queue import run_batch
+    result = run_batch(db, max_items=payload.max_items, worker_id=payload.worker_id)
+    ip, ua = _client_meta(request)
+    auth.audit(
+        actor=user, action="ocr.queue.run_batch",
+        resource_type="ocr_queue", resource_id="",
+        detail=result, ip=ip, user_agent=ua,
+    )
+    return result
+
+
+@app.get("/api/system-settings")
+async def system_settings_list_endpoint(
+    category: str | None = None,
+    _user: CurrentUser = Depends(require_login),
+):
+    """列出系统设置（M6）。"""
+    with db.connect() as conn:
+        if category:
+            rows = conn.execute(
+                "SELECT * FROM system_settings WHERE category=? ORDER BY key",
+                (category,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM system_settings ORDER BY category, key"
+            ).fetchall()
+    return [dict(r) for r in rows]
+
+
+class UpdateSettingRequest(BaseModel):
+    value: str
+    description: str | None = None
+
+
+@app.put("/api/system-settings/{key}")
+async def update_system_setting_endpoint(
+    key: str,
+    payload: UpdateSettingRequest,
+    request: Request,
+    user: CurrentUser = Depends(require_roles("admin")),
+    auth: AuthService = Depends(get_auth_service),
+):
+    """更新系统设置（仅 admin，M6）。"""
+    from app.db import utc_now
+    with db.connect() as conn:
+        existing = conn.execute(
+            "SELECT * FROM system_settings WHERE key=?", (key,)
+        ).fetchone()
+        if not existing:
+            raise HTTPException(404, f"系统设置 {key} 不存在")
+        before = dict(existing)
+        conn.execute(
+            """UPDATE system_settings
+               SET value=?, description=?, updated_at=?, updated_by=?
+               WHERE key=?""",
+            (payload.value, payload.description or existing["description"],
+             utc_now(), user.username, key),
+        )
+    ip, ua = _client_meta(request)
+    auth.audit(
+        actor=user, action="system.setting.update",
+        resource_type="system_settings", resource_id=key,
+        before={"value": before["value"]}, after={"value": payload.value},
+        ip=ip, user_agent=ua,
+    )
+    return {"key": key, "value": payload.value}
+
+
+@app.get("/api/backups")
+async def backups_list_endpoint(
+    _user: CurrentUser = Depends(require_roles("admin", "auditor")),
+):
+    """列出数据库备份（admin/auditor，M6-7）。"""
+    from app.backup import list_backups
+    from app.config import BASE_DIR
+    backup_dir = BASE_DIR / "data" / "backups"
+    return list_backups(backup_dir)
+
+
+class CreateBackupRequest(BaseModel):
+    label: str = "api"
+    prune: bool = False
+    retention_days: int = Field(default=30, ge=1, le=365)
+
+
+@app.post("/api/backups")
+async def backups_create_endpoint(
+    payload: CreateBackupRequest,
+    request: Request,
+    user: CurrentUser = Depends(require_roles("admin")),
+    auth: AuthService = Depends(get_auth_service),
+):
+    """创建数据库在线备份（仅 admin，M6-7）。"""
+    from app.backup import backup_database, prune_old_backups
+    from app.config import BASE_DIR
+    backup_dir = BASE_DIR / "data" / "backups"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    path = backup_database(db, backup_dir, label=payload.label)
+    pruned = []
+    if payload.prune:
+        pruned = prune_old_backups(backup_dir, retention_days=payload.retention_days)
+    ip, ua = _client_meta(request)
+    auth.audit(
+        actor=user, action="backup.create",
+        resource_type="backup", resource_id=str(path.name),
+        detail={"label": payload.label, "pruned": len(pruned)},
+        ip=ip, user_agent=ua,
+    )
+    return {"backup": str(path), "pruned": pruned}
+
+
+@app.get("/api/overview")
+async def overview_endpoint(_user: CurrentUser = Depends(require_login)):
+    """全局总览聚合统计（跨任务，M6-1 首页总览数据源）。
+
+    汇总最近 30 个任务 + 全局 findings 分桶 + 队列深度 + 整改概览，
+    供「首页总览」导航项渲染仪表盘。
+    """
+    with db.connect() as conn:
+        jobs = conn.execute(
+            "SELECT * FROM scan_jobs ORDER BY id DESC LIMIT 30"
+        ).fetchall()
+        finding_buckets = {"confirmed_problem": 0, "suspected": 0, "insufficient_data": 0,
+                            "collection_error": 0, "auto_excluded": 0, "human_excluded": 0,
+                            "customer_formal": 0, "total": 0}
+        for bucket_row in conn.execute(
+            """SELECT
+                SUM(CASE WHEN machine_status='confirmed_by_rule' AND human_status='human_confirmed' THEN 1 ELSE 0 END) AS confirmed_problem,
+                SUM(CASE WHEN machine_status='suspected' AND human_status='unreviewed' THEN 1 ELSE 0 END) AS suspected,
+                SUM(CASE WHEN machine_status='insufficient_data' THEN 1 ELSE 0 END) AS insufficient_data,
+                SUM(CASE WHEN machine_status='auto_excluded' THEN 1 ELSE 0 END) AS auto_excluded,
+                SUM(CASE WHEN human_status='human_dismissed' THEN 1 ELSE 0 END) AS human_excluded,
+                SUM(CASE WHEN is_customer_formal=1 THEN 1 ELSE 0 END) AS customer_formal,
+                COUNT(*) AS total
+               FROM rule_findings WHERE COALESCE(is_current,1)=1"""
+        ).fetchall():
+            finding_buckets.update({k: int(v or 0) for k, v in dict(bucket_row).items()})
+        jobs_active = conn.execute(
+            "SELECT COUNT(*) FROM scan_jobs WHERE status IN ('pending','running','cooling')"
+        ).fetchone()[0]
+        sites_total = len(SCAN_SITES)
+        overdue_count = conn.execute(
+            """SELECT COUNT(*) FROM rectification_tasks
+               WHERE status NOT IN ('signoff','failed','cancelled')
+               AND deadline IS NOT NULL AND deadline < ?""",
+            (utc_now(),),
+        ).fetchone()[0] if _table_exists(conn, "rectification_tasks") else 0
+        archive_findings = conn.execute(
+            "SELECT COUNT(*) FROM archive_findings WHERE COALESCE(is_current,1)=1"
+        ).fetchone()[0] if _table_exists(conn, "archive_findings") else 0
+        duplicate_pairs = conn.execute(
+            "SELECT COUNT(*) FROM duplicate_pairs"
+        ).fetchone()[0] if _table_exists(conn, "duplicate_pairs") else 0
+        recon_matches = conn.execute(
+            "SELECT COUNT(*) FROM reconciliation_matches"
+        ).fetchone()[0] if _table_exists(conn, "reconciliation_matches") else 0
+    return {
+        "jobs": [dict(j) for j in jobs],
+        "jobs_active": int(jobs_active),
+        "sites_total": sites_total,
+        "finding_buckets": finding_buckets,
+        "rectification_overdue": int(overdue_count),
+        "archive_findings": int(archive_findings),
+        "duplicate_pairs": int(duplicate_pairs),
+        "recon_matches": int(recon_matches),
+    }
+
+
+def _table_exists(conn, name: str) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
+    ).fetchone() is not None
+
+
+NAV_ITEMS = [
+    {"key": "overview", "label": "首页总览", "icon": "home", "group": "main", "requires_login": True,
+     "api": "/api/overview", "description": "全局仪表盘与最近任务"},
+    {"key": "scan-jobs", "label": "扫描任务", "icon": "job", "group": "main", "requires_login": True,
+     "api": "/api/jobs", "description": "扫描任务列表与状态"},
+    {"key": "confirmed-problems", "label": "确认问题", "icon": "issue", "group": "findings", "requires_login": True,
+     "api": "/api/findings/pdf?bucket=confirmed_problem", "description": "客户正式问题"},
+    {"key": "review-queue", "label": "待复核线索", "icon": "review", "group": "findings", "requires_login": True,
+     "api": "/api/jobs/0/review-queue", "description": "待人工复核的疑似线索"},
+    {"key": "insufficient-data", "label": "数据不足", "icon": "data", "group": "findings", "requires_login": True,
+     "api": "/api/findings/pdf?bucket=insufficient_data", "description": "证据不足以判定"},
+    {"key": "collection-errors", "label": "采集异常", "icon": "alert", "group": "findings", "requires_login": True,
+     "api": "/api/jobs/0/scan-exceptions", "description": "采集阶段异常"},
+    {"key": "auto-excluded", "label": "已自动排除", "icon": "auto", "group": "excluded", "requires_login": True,
+     "api": "/api/findings/pdf?bucket=auto_excluded", "description": "规则自动排除"},
+    {"key": "human-excluded", "label": "已人工排除", "icon": "human", "group": "excluded", "requires_login": True,
+     "api": "/api/findings/pdf?bucket=human_excluded", "description": "人工排除"},
+    {"key": "archive", "label": "异常归档", "icon": "archive", "group": "quality", "requires_login": True,
+     "api": "/api/archive/findings", "description": "ARCH-001~006 归档问题"},
+    {"key": "duplicates", "label": "重复数据", "icon": "duplicate", "group": "quality", "requires_login": True,
+     "api": "/api/duplicates", "description": "DUP-001~008 重复对"},
+    {"key": "reconciliation", "label": "双渠道对账", "icon": "recon", "group": "quality", "requires_login": True,
+     "api": "/api/reconciliation/matches", "description": "市区双渠道匹配与差异"},
+    {"key": "pdf-attachments", "label": "PDF 与附件", "icon": "pdf", "group": "documents", "requires_login": True,
+     "api": "/api/findings/pdf", "description": "PDF 与附件检查结果"},
+    {"key": "interpretations", "label": "政策解读", "icon": "interp", "group": "documents", "requires_login": True,
+     "api": "/api/interpretations", "description": "INTERP-001~008 解读检查"},
+    {"key": "reading-linkage", "label": "阅办联动", "icon": "read", "group": "documents", "requires_login": True,
+     "api": "/api/reading-checks", "description": "READ-001~005 阅办检查"},
+    {"key": "rectification", "label": "整改任务", "icon": "rect", "group": "closure", "requires_login": True,
+     "api": "/api/rectification/tasks", "description": "整改任务列表"},
+    {"key": "signoff", "label": "复查销号", "icon": "signoff", "group": "closure", "requires_login": True,
+     "api": "/api/rectification/tasks?status=signoff", "description": "已销号任务"},
+    {"key": "rule-effect", "label": "规则效果", "icon": "rule", "group": "governance", "requires_login": True,
+     "api": "/api/rule-effect", "description": "规则精度与降级"},
+    {"key": "knowledge", "label": "机构知识库", "icon": "kb", "group": "governance", "requires_login": True,
+     "api": "/api/organizations", "description": "机构与机关代字"},
+    {"key": "users", "label": "用户与权限", "icon": "user", "group": "system", "requires_login": True,
+     "roles": ["admin"], "api": "/api/users", "description": "用户管理"},
+    {"key": "audits", "label": "操作审计", "icon": "audit", "group": "system", "requires_login": True,
+     "roles": ["admin", "auditor"], "api": "/api/audits", "description": "审计日志"},
+    {"key": "settings", "label": "系统设置", "icon": "settings", "group": "system", "requires_login": True,
+     "roles": ["admin"], "api": "/api/system-settings", "description": "系统配置"},
+]
+
+
+@app.get("/api/nav-items")
+async def nav_items_endpoint(user: CurrentUser | None = Depends(get_optional_user)):
+    """返回 21 项导航结构，按当前用户角色过滤可见项（M6-1）。
+
+    未登录用户只能看到无需登录的项（目前全部需登录，故未登录返回空列表）。
+    """
+    if not user:
+        return []
+    user_roles = set(user.roles)
+    visible = []
+    for item in NAV_ITEMS:
+        required_roles = item.get("roles")
+        if required_roles and not (user_roles & set(required_roles)):
+            continue
+        visible.append({
+            "key": item["key"], "label": item["label"], "icon": item["icon"],
+            "group": item["group"], "api": item["api"],
+            "description": item["description"],
+        })
+    return visible
+
+
+@app.get("/api/organizations")
+async def organizations_endpoint(
+    district: str | None = None,
+    _user: CurrentUser = Depends(require_login),
+):
+    """机构知识库列表（M6-1 机构知识库导航项数据源）。"""
+    from app.knowledge import load_knowledge
+    with db.connect() as conn:
+        records = load_knowledge(conn, district=district)
+    return [
+        {
+            "id": r.id, "district": r.district, "name": r.name,
+            "symbol": r.symbol, "aliases": list(r.aliases),
+            "valid_from": r.valid_from, "valid_to": r.valid_to,
+            "source": r.source,
+        }
+        for r in records
+    ]
 

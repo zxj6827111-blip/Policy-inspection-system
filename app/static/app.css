@@ -32,7 +32,8 @@ a { color: var(--brand-600); }
 
 /* ===== shell ===== */
 .shell { display: flex; min-height: calc(100vh - 64px); }
-.sidebar { flex: 0 0 250px; background: #fff; border-right: 1px solid var(--line); padding: 12px 10px 20px; display: flex; flex-direction: column; }
+.sidebar { flex: 0 0 250px; background: #fff; border-right: 1px solid var(--line); padding: 12px 10px 20px; display: flex; flex-direction: column; max-height: calc(100vh - 64px); overflow: hidden; }
+#nav-items { flex: 1; min-height: 0; overflow-y: auto; }
 .side-group { margin-top: 4px; }
 .side-group > summary { list-style: none; cursor: pointer; display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--ink-500); font-weight: 650; letter-spacing: .4px; padding: 10px 12px 6px; user-select: none; }
 .side-group > summary::-webkit-details-marker { display: none; }
@@ -250,8 +251,52 @@ dialog::backdrop { background: rgb(18 41 62 / 45%); }
 @media (max-width: 1024px) { .ov-grid { grid-template-columns: repeat(2, 1fr); } .stat-row { grid-template-columns: repeat(3, 1fr); } .steps { grid-template-columns: 1fr; } .finding-content { grid-template-columns: 1fr; } }
 @media (max-width: 820px) {
   .shell { flex-direction: column; }
-  .sidebar { flex: none; border-right: 0; border-bottom: 1px solid var(--line); }
+  .sidebar { flex: none; border-right: 0; border-bottom: 1px solid var(--line); max-height: none; overflow: visible; }
+  #nav-items { overflow: visible; }
   .side-safety { display: none; }
   .ov-grid { grid-template-columns: 1fr; }
   .stat-row { grid-template-columns: repeat(2, 1fr); }
+}
+
+/* ============================================================
+   M6-1：21 项导航最终 UI
+   ============================================================ */
+
+/* ----- 侧栏导航项（emoji 图标） ----- */
+.side-item .nav-icon { flex: 0 0 22px; width: 22px; height: 22px; display: inline-flex; align-items: center; justify-content: center; font-size: 15px; line-height: 1; }
+.nav-empty { padding: 18px 14px; font-size: 12px; color: var(--ink-300); text-align: center; }
+
+/* ----- 首页总览：仪表盘统计卡 ----- */
+.ov-stats { margin-bottom: 14px; min-height: 40px; }
+.g-stat-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(168px, 1fr)); gap: 12px; }
+.g-stat { padding: 14px 16px; display: grid; gap: 4px; }
+.g-stat .label { font-size: 12px; color: var(--ink-500); }
+.g-stat .value { font-size: 22px; font-weight: 700; color: var(--ink-900); }
+.g-stat .hint { font-size: 11.5px; color: var(--ink-300); }
+#ov-recent-jobs { margin-bottom: 6px; }
+
+/* ----- 站点扫描折叠区（嵌在首页总览里） ----- */
+.site-scan-section { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 0 18px 18px; margin-top: 16px; box-shadow: 0 1px 2px rgb(22 50 74 / 4%); }
+.site-scan-section > summary { list-style: none; cursor: pointer; display: flex; align-items: center; gap: 8px; padding: 14px 0; font-size: 14px; font-weight: 650; color: var(--ink-900); user-select: none; }
+.site-scan-section > summary::-webkit-details-marker { display: none; }
+.site-scan-section > summary::before { content: "▸"; color: var(--ink-300); font-size: 12px; transition: transform .15s; }
+.site-scan-section[open] > summary::before { transform: rotate(90deg); }
+.site-scan-section > summary .g-count { margin-left: auto; background: var(--neutral-50); border: 1px solid var(--line); border-radius: 999px; padding: 0 8px; font-size: 11px; line-height: 17px; color: var(--ink-500); font-weight: 600; }
+.site-scan-section > summary .g-alert { background: var(--warn-50); border: 1px solid var(--warn-line); color: var(--warn-700); border-radius: 999px; padding: 0 8px; font-size: 11px; line-height: 17px; font-weight: 650; margin-left: 6px; }
+.site-scan-section .site-head { margin-top: 14px; }
+
+/* ----- 通用视图：表格 / 详情 ----- */
+.generic-table { font-size: 12.5px; }
+.generic-table th { font-size: 11.5px; white-space: nowrap; }
+.generic-table td { max-width: 360px; overflow-wrap: anywhere; }
+.generic-list { margin: 0; padding-left: 18px; display: grid; gap: 4px; font-size: 13px; color: var(--ink-700); }
+.generic-detail { margin-top: 14px; border-color: var(--brand-600); box-shadow: 0 2px 8px rgb(31 90 168 / 8%); }
+.generic-detail .panel-head { padding-top: 12px; }
+
+@media (max-width: 1024px) {
+  .g-stat-grid { grid-template-columns: repeat(3, 1fr); }
+}
+@media (max-width: 720px) {
+  .g-stat-grid { grid-template-columns: repeat(2, 1fr); }
+  .generic-table td { max-width: 220px; }
 }

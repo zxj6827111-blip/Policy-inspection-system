@@ -153,30 +153,44 @@ def test_baseline_and_item_stats_apis_expose_completed_full_runs_only(tmp_path, 
 
 
 def test_index_exposes_district_and_sixteen_municipal_sites(tmp_path, monkeypatch):
+    """M6-1 UI rewrite: 21-item navigation + dynamic site-scan page.
+
+    Initial HTML no longer embeds the 17 site cards inline; instead it exposes
+    a page-overview / page-site skeleton and the site list is rendered via
+    /api/scan-sites. We verify both the skeleton and the API payload.
+    """
     monkeypatch.setattr(main_module, "db", Database(tmp_path / "index.db"))
     monkeypatch.setattr(main_module, "manager", JobManager(main_module.db))
     with TestClient(main_module.app) as client:
         response = client.get("/")
+        sites_response = client.get("/api/scan-sites")
 
     assert response.status_code == 200
     html = response.text
-    # 站点中心式界面：侧栏必须暴露全部 17 个站点入口
-    assert html.count('data-nav="site"') == 17
-    assert 'data-site="putuo_district"' in html
-    assert 'data-site="municipal_putuo"' in html
-    assert 'data-site="municipal_chongming"' in html
-    assert 'data-site="municipal_huangpu"' in html
-    assert 'data-site="municipal_pudong"' in html
-    assert 'id="group-district"' in html
-    assert 'id="group-municipal"' in html
-    # 总览与站点详情两个视图骨架、批量启动与任务中心入口
+    # 21 项导航骨架：sidebar、首页总览、站点详情、批量启动、任务中心入口
+    assert 'id="nav-sidebar"' in html
+    assert 'id="nav-items"' in html
     assert 'id="page-overview"' in html
     assert 'id="page-site"' in html
     assert 'id="batch-start"' in html
     assert 'id="task-center-btn"' in html
+    assert 'id="site-scan-btn"' in html
+    assert 'id="site-scan-section"' in html
+    assert 'id="ov-grid"' in html
     # 旧的手动模式/基线选择表单不应回归
     assert 'name="mode"' not in html
     assert 'name="baseline_job_id"' not in html
+
+    # 17 个站点通过 /api/scan-sites 暴露（区级 1 + 市级 16）
+    assert sites_response.status_code == 200
+    sites = sites_response.json()
+    assert len(sites) == 17
+    keys = {site["key"] for site in sites}
+    assert "putuo_district" in keys
+    assert "municipal_putuo" in keys
+    assert "municipal_chongming" in keys
+    assert "municipal_huangpu" in keys
+    assert "municipal_pudong" in keys
 
 
 
