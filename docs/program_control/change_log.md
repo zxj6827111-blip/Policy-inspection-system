@@ -85,65 +85,70 @@
 
 ---
 
-## 2026-07-27 M2 启动
-
-### M2-1 基线记录
-
-- 分支：`feat/full-policy-inspection-upgrade`
-- 开始 HEAD：`9ddcf2117cd55e55c49e50309560e2cb31d35f8d`
-- 生产数据库 SHA256：`13e6a8a412f69c13d149674a31076854c966f5b151e670fc9e22d0f53ab77af3`（未变）
-
-### M2-2 数据库迁移
-
-- `app/migrations/m2.py`：新增 `review_assignments`、`rule_effect_snapshots` 表
-- `finding_reviews` 新增 `review_round` 列；`rule_versions` 新增 `auto_confirm_allowed`/`degraded`/`degraded_reason`/`degraded_at` 列
-- 通过 `Database.initialize()` 自动幂等执行
-- 阈值常量：`AUTO_CONFIRM_PRECISION_THRESHOLD=0.95`、`SUSPECTED_PRECISION_THRESHOLD=0.80`
-
-### M2-3 服务层
-
-- `app/review_batch.py`：`batch_review` + `cluster_findings`
-- `app/review_dual.py`：`assign_dual_review` / `submit_dual_review` / `arbitrate` / `list_dual_assignments` / `compute_consistency_rate`
-- `app/rule_effect.py`：`compute_rule_effectiveness` + `snapshot_rule_effectiveness`（修复 SQL WHERE 重复语法错误）
-- `app/rule_degradation.py`：`evaluate_rule_degradation`
-
-### M2-4 API 端点
-
-- 10 个 M2 端点加入 `app/main.py`，全部经 `require_write("review:write")` 或 `require_login` 校验
-- 写操作落 `operation_audits`
-
-### M2-5 1,000 条样本评测
-
-- `scripts/generate_m2_samples.py`：分配 AGENCY-001 300 / DATE-001 200 / DOC-001 200 / META-001 100 / LINK-001 200
-- 代理标签基于 R-007 启发式精度
-- `evaluate_samples` 调用规则效果中心输出 precision/FPR
-
-### M2-6 测试
-
-- `tests/test_m2_review_rule_effect.py` 15 用例
-- 修复 SQL 语法错误、快照参数计数、双用户 CSRF 切换、动态 user_id
-- 全部通过
-
-### M2 完成
-
-- M2 专项：15 passed
-- 全量回归：211 passed
-- 产物：
-  - `docs/milestones/M2/development_report.md`
-  - `docs/milestones/M2/self_acceptance_report.md`
-  - `tmp/program_control/M2_self_acceptance.json`
-  - `tmp/program_control/M2_commands.txt`
-  - `tmp/program_control/M2_test_output.txt`
-- status.json 更新：M2=DONE，M3=IN_PROGRESS
-- 自动进入 M3
-
----
-
 ## 2026-07-27 M3 启动
 
 ### M3-1 基线记录
 
 - 分支：`feat/full-policy-inspection-upgrade`
-- 开始 HEAD：（待 M2 提交后记录）
+- 开始 HEAD：`39d652624753c95a7b70d61050adc65862e8f291`
+- 生产数据库 SHA256：`13e6a8a412f69c13d149674a31076854c966f5b151e670fc9e22d0f53ab77af3`（未变）
+
+### M3-2 依赖安装
+
+新增 `requirements.txt`：pypdf、pdfplumber、pdfminer.six、Pillow、pytesseract
+Tesseract 二进制 v5.5.0 系统已安装。
+
+### M3-3 数据库迁移
+
+- `app/migrations/m3.py`：新增 `pdf_extractions`、`attachment_records` 表
+- `policy_documents` 新增 11 列：pdf_url/path/hash/text/page_count/metadata_json、ocr_text/status/confidence、pdf_extracted_at/pdf_status
+- 种子 M3 规则版本：PDF-001~007、ATT-001~003 (v1.0.0)
+- 通过 `Database.initialize()` 自动幂等执行
+
+### M3-4 模块结构
+
+```
+app/
+├── migrations/m3.py
+├── pdf/__init__.py、compare.py、semantics.py、date_semantics.py、attachments.py
+├── ocr/__init__.py
+└── pdf_service.py
+```
+
+### M3-5 API 端点
+
+10 个 M3 端点加入 `app/main.py`：
+- GET /api/pdf/documents/{doc_id}、/pages/{page_no}、/compare、/evidence
+- GET /api/pdf/ocr/status/{doc_id}
+- POST /api/pdf/ocr/retry/{doc_id}、/api/pdf/documents/{doc_id}/process、/api/attachments/{doc_id}/process
+- GET /api/attachments/{doc_id}、/api/findings/pdf
+
+### M3-6 测试
+
+- `tests/test_m3_pdf_ocr_compare.py` 44 用例
+- 修复加密 PDF 检测（使用非空 user_password）、外键约束（先 seed scan_jobs）、文号语义 before/after 上下文窗口
+- 全部通过
+
+### M3 完成
+
+- M3 专项：44 passed
+- 全量回归：255 passed
+- 产物：
+  - `docs/milestones/M3/development_report.md`
+  - `docs/milestones/M3/self_acceptance_report.md`
+  - `tmp/program_control/M3_self_acceptance.json`
+  - `tmp/program_control/M3_commands.txt`
+  - `tmp/program_control/M3_test_output.txt`
+- status.json 更新：M3=DONE，M4=IN_PROGRESS
+- 自动进入 M4
+
+---
+
+## 2026-07-27 M4 启动
+
+### M4-1 基线记录
+
+- 分支：`feat/full-policy-inspection-upgrade`
+- 开始 HEAD：（待 M3 提交后记录）
 - 生产数据库 SHA256：未变
 

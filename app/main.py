@@ -1228,3 +1228,309 @@ async def rule_degradation_endpoint(
     )
     return result
 
+
+# ===================== M3: PDF / OCR / Three-way compare =====================
+
+class PdfProcessRequest(BaseModel):
+    pdf_payload_b64: str
+    page_title: str = ""
+    page_document_number: str = ""
+    page_issuing_agency: str = ""
+    page_authored_date: str | None = None
+    body_text: str = ""
+    run_ocr: bool = True
+    run_compare: bool = True
+
+
+class AttachmentProcessRequest(BaseModel):
+    url: str
+    filename: str
+    expected_kind: str = ""
+    payload_b64: str | None = None
+    fetch_error: str = ""
+
+
+@app.get("/api/pdf/documents/{doc_id}")
+async def pdf_document_status(doc_id: int, _user: CurrentUser = Depends(require_login)):
+    """Return a document's PDF extraction summary."""
+    with db.connect() as conn:
+        row = conn.execute(
+            """SELECT id, title, pdf_url, pdf_path, pdf_hash, pdf_status,
+                pdf_page_count, ocr_status, ocr_confidence,
+                pdf_extracted_at, length(pdf_text) AS pdf_text_len,
+                length(ocr_text) AS ocr_text_len
+            FROM policy_documents WHERE id=?""",
+            (doc_id,),
+        ).fetchone()
+    if not row:
+        raise HTTPException(404, "文档不存在")
+    return dict(row)
+
+
+@app.get("/api/pdf/documents/{doc_id}/pages/{page_no}")
+async def pdf_page_text(doc_id: int, page_no: int, _user: CurrentUser = Depends(require_login)):
+    """Return per-page PDF text and bbox evidence."""
+    if page_no < 1:
+        raise HTTPException(400, "page_no 必须 >= 1")
+    with db.connect() as conn:
+        row = conn.execute(
+            """SELECT document_id, page_number, text, bbox_json, source_type,
+                confidence, char_count, extracted_at
+            FROM pdf_extractions WHERE document_id=? AND page_number=?""",
+            (doc_id, page_no),
+        ).fetchone()
+    if not row:
+        raise HTTPException(404, "页面不存在")
+    import json as _json
+    d = dict(row)
+    d["bbox_json"] = _json.loads(d["bbox_json"]) if d["bbox_json"] else []
+    return d
+
+
+@app.get("/api/pdf/documents/{doc_id}/compare")
+async def pdf_compare_status(doc_id: int, _user: CurrentUser = Depends(require_login)):
+    """Return three-way comparison result (page/body/PDF)."""
+    with db.connect() as conn:
+        doc = conn.execute(
+            """SELECT id, title, page_document_number, issuing_agency,
+                authored_date, body_text, pdf_text, pdf_metadata_json
+            FROM policy_documents WHERE id=?""",
+            (doc_id,),
+        ).fetchone()
+        if not doc:
+            raise HTTPException(404, "文档不存在")
+        findings = conn.execute(
+            """SELECT id, rule_code, severity, detail, page_value, body_value,
+                evidence, machine_status, human_status, created_at
+            FROM rule_findings
+            WHERE document_id=? AND rule_code LIKE 'PDF-%'
+            ORDER BY id DESC""",
+            (doc_id,),
+        ).fetchall()
+        evidence_rows = conn.execute(
+            """SELECT fe.* FROM finding_evidence fe
+            JOIN rule_findings rf ON rf.id=fe.finding_id
+            WHERE rf.document_id=? AND rf.rule_code LIKE 'PDF-%'""",
+            (doc_id,),
+        ).fetchall()
+    import json as _json
+    metadata = _json.loads(doc["pdf_metadata_json"]) if doc["pdf_metadata_json"] else {}
+    return {
+        "document_id": doc_id,
+        "page": {
+            "title": doc["title"],
+            "document_number": doc["page_document_number"],
+            "issuing_agency": doc["issuing_agency"],
+            "authored_date": doc["authored_date"],
+        },
+        "pdf_metadata": metadata,
+        "pdf_text_excerpt": (doc["pdf_text"] or "")[:500],
+        "body_text_excerpt": (doc["body_text"] or "")[:500],
+        "findings": [dict(f) for f in findings],
+        "evidence": [dict(e) for e in evidence_rows],
+    }
+
+
+@app.get("/api/pdf/documents/{doc_id}/evidence")
+async def pdf_evidence(doc_id: int, _user: CurrentUser = Depends(require_login)):
+    """Return all PDF finding evidence (page numbers + bbox) for a document."""
+    with db.connect() as conn:
+        rows = conn.execute(
+            """SELECT fe.id, fe.finding_id, fe.page_number, fe.bbox, fe.confidence,
+                fe.source_type, fe.raw_value, fe.excerpt, rf.rule_code
+            FROM finding_evidence fe
+            JOIN rule_findings rf ON rf.id=fe.finding_id
+            WHERE rf.document_id=? AND rf.rule_code LIKE 'PDF-%'""",
+            (doc_id,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+@app.get("/api/pdf/ocr/status/{doc_id}")
+async def ocr_status_endpoint(doc_id: int, _user: CurrentUser = Depends(require_login)):
+    """Return OCR status for a document."""
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT ocr_status, ocr_confidence, length(ocr_text) AS ocr_text_len FROM policy_documents WHERE id=?",
+            (doc_id,),
+        ).fetchone()
+    if not row:
+        raise HTTPException(404, "文档不存在")
+    return dict(row)
+
+
+@app.post("/api/pdf/ocr/retry/{doc_id}")
+async def ocr_retry_endpoint(
+    doc_id: int,
+    request: Request,
+    user: CurrentUser = Depends(require_write("jobs:write")),
+    auth: AuthService = Depends(get_auth_service),
+):
+    """Retry OCR for a document (admin/operator only)."""
+    import base64
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT id, pdf_path FROM policy_documents WHERE id=?",
+            (doc_id,),
+        ).fetchone()
+    if not row:
+        raise HTTPException(404, "文档不存在")
+    pdf_path = row["pdf_path"]
+    if not pdf_path:
+        raise HTTPException(400, "文档无 PDF 缓存，无法重试 OCR")
+    from pathlib import Path
+    p = Path(pdf_path)
+    if not p.exists():
+        raise HTTPException(400, "PDF 缓存文件丢失")
+    payload = p.read_bytes()
+    from app.ocr import ocr_pdf
+    result = ocr_pdf(payload)
+    now = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()
+    with db.connect() as conn:
+        conn.execute(
+            "UPDATE policy_documents SET ocr_status=?, ocr_confidence=?, ocr_text=? WHERE id=?",
+            (result.status, result.avg_confidence, result.full_text, doc_id),
+        )
+    ip, ua = _client_meta(request)
+    auth.audit(
+        actor=user, action="pdf.ocr_retry", resource_type="policy_documents",
+        resource_id=str(doc_id),
+        detail={"status": result.status, "avg_conf": result.avg_confidence},
+        ip=ip, user_agent=ua,
+    )
+    return {"status": result.status, "avg_confidence": result.avg_confidence}
+
+
+@app.get("/api/attachments/{doc_id}")
+async def list_attachments(doc_id: int, _user: CurrentUser = Depends(require_login)):
+    """List attachment records and ATT-001~003 findings for a document."""
+    with db.connect() as conn:
+        atts = conn.execute(
+            "SELECT * FROM attachment_records WHERE document_id=? ORDER BY id",
+            (doc_id,),
+        ).fetchall()
+        findings = conn.execute(
+            """SELECT id, rule_code, severity, detail, page_value, body_value,
+                evidence, machine_status, created_at
+            FROM rule_findings
+            WHERE document_id=? AND rule_code LIKE 'ATT-%'
+            ORDER BY id DESC""",
+            (doc_id,),
+        ).fetchall()
+    return {"attachments": [dict(a) for a in atts], "findings": [dict(f) for f in findings]}
+
+
+@app.get("/api/findings/pdf")
+async def list_pdf_findings(
+    rule_code: str | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+    _user: CurrentUser = Depends(require_login),
+):
+    """List PDF-001~007 findings, optionally filtered by rule_code."""
+    if rule_code and not rule_code.startswith("PDF-"):
+        raise HTTPException(400, "rule_code must start with PDF-")
+    with db.connect() as conn:
+        if rule_code:
+            rows = conn.execute(
+                """SELECT * FROM rule_findings
+                WHERE rule_code=? ORDER BY id DESC LIMIT ?""",
+                (rule_code, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """SELECT * FROM rule_findings
+                WHERE rule_code LIKE 'PDF-%' ORDER BY id DESC LIMIT ?""",
+                (limit,),
+            ).fetchall()
+    return [dict(r) for r in rows]
+
+
+@app.post("/api/pdf/documents/{doc_id}/process")
+async def pdf_process_endpoint(
+    doc_id: int,
+    payload: PdfProcessRequest,
+    request: Request,
+    user: CurrentUser = Depends(require_write("jobs:write")),
+    auth: AuthService = Depends(get_auth_service),
+):
+    """Trigger M3 PDF processing for a document (admin/operator only).
+
+    Accepts base64-encoded PDF bytes; orchestrates integrity check,
+    text extraction, OCR fallback, and three-way comparison.
+    """
+    import base64
+    from app.pdf_service import process_document_pdf
+    try:
+        pdf_bytes = base64.b64decode(payload.pdf_payload_b64)
+    except Exception as exc:
+        raise HTTPException(400, f"base64 解码失败: {exc}") from exc
+    result = process_document_pdf(
+        db,
+        document_id=doc_id,
+        pdf_payload=pdf_bytes,
+        page_title=payload.page_title,
+        page_document_number=payload.page_document_number,
+        page_issuing_agency=payload.page_issuing_agency,
+        page_authored_date=payload.page_authored_date,
+        body_text=payload.body_text,
+        run_ocr=payload.run_ocr,
+        run_compare=payload.run_compare,
+    )
+    ip, ua = _client_meta(request)
+    auth.audit(
+        actor=user, action="pdf.process", resource_type="policy_documents",
+        resource_id=str(doc_id),
+        detail={"pdf_status": result.pdf_status, "ocr_status": result.ocr_status,
+                "findings": result.findings_generated, "rules": result.rule_codes},
+        ip=ip, user_agent=ua,
+    )
+    return {
+        "document_id": result.document_id,
+        "pdf_status": result.pdf_status,
+        "ocr_status": result.ocr_status,
+        "page_count": result.page_count,
+        "findings_generated": result.findings_generated,
+        "rule_codes": result.rule_codes,
+        "error": result.error,
+    }
+
+
+@app.post("/api/attachments/{doc_id}/process")
+async def attachment_process_endpoint(
+    doc_id: int,
+    payload: AttachmentProcessRequest,
+    request: Request,
+    user: CurrentUser = Depends(require_write("jobs:write")),
+    auth: AuthService = Depends(get_auth_service),
+):
+    """Classify a single attachment for a document."""
+    import base64
+    from app.pdf_service import process_attachment
+    pdf_bytes = None
+    if payload.payload_b64:
+        try:
+            pdf_bytes = base64.b64decode(payload.payload_b64)
+        except Exception as exc:
+            raise HTTPException(400, f"base64 解码失败: {exc}") from exc
+    result = process_attachment(
+        db,
+        document_id=doc_id,
+        url=payload.url,
+        filename=payload.filename,
+        expected_kind=payload.expected_kind,
+        payload=pdf_bytes,
+        fetch_error=payload.fetch_error,
+    )
+    ip, ua = _client_meta(request)
+    auth.audit(
+        actor=user, action="attachment.process", resource_type="attachment_records",
+        resource_id=str(doc_id),
+        detail={"url": payload.url, "status": result.status, "kind": result.detected_kind},
+        ip=ip, user_agent=ua,
+    )
+    return {
+        "status": result.status,
+        "detected_kind": result.detected_kind,
+        "notes": result.notes,
+    }
+

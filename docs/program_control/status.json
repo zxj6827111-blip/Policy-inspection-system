@@ -1,14 +1,14 @@
 {
   "project": "Policy-inspection-system",
   "plan_version": "V3.0",
-  "current_milestone": "M3",
+  "current_milestone": "M4",
   "overall_status": "IN_PROGRESS",
   "milestones": {
     "M0": "DONE",
     "M1": "DONE",
     "M2": "DONE",
-    "M3": "IN_PROGRESS",
-    "M4": "PENDING",
+    "M3": "DONE",
+    "M4": "IN_PROGRESS",
     "M5": "PENDING",
     "M6": "PENDING",
     "M7": "PENDING"
@@ -46,6 +46,14 @@
       "self_acceptance": "PASS",
       "tests_passed": 15,
       "full_regression_passed": 211,
+      "completed_date": "2026-07-27"
+    },
+    "M3": {
+      "branch": "feat/full-policy-inspection-upgrade",
+      "head_before": "39d652624753c95a7b70d61050adc65862e8f291",
+      "self_acceptance": "PASS",
+      "tests_passed": 44,
+      "full_regression_passed": 255,
       "completed_date": "2026-07-27"
     }
   },

@@ -8,3 +8,8 @@ openpyxl==3.1.5
 pytest==8.4.1
 pytest-asyncio==1.1.0
 chinese-calendar>=1.10,<2
+pypdf>=4.3,<5
+pdfplumber>=0.11,<1
+pdfminer.six>=20240706
+Pillow>=10.4,<12
+pytesseract>=0.3.10,<0.4
