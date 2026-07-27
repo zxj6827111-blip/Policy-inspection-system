@@ -1,7 +1,7 @@
 {
   "project": "Policy-inspection-system",
   "plan_version": "V3.0",
-  "current_milestone": "M5",
+  "current_milestone": "M6",
   "overall_status": "IN_PROGRESS",
   "milestones": {
     "M0": "DONE",
@@ -9,8 +9,8 @@
     "M2": "DONE",
     "M3": "DONE",
     "M4": "DONE",
-    "M5": "PENDING",
-    "M6": "PENDING",
+    "M5": "DONE",
+    "M6": "IN_PROGRESS",
     "M7": "PENDING"
   },
   "baseline": {
@@ -64,6 +64,14 @@
       "tests_passed": 45,
       "full_regression_passed": 300,
       "completed_date": "2026-07-27"
+    },
+    "M5": {
+      "branch": "feat/full-policy-inspection-upgrade",
+      "head_before": "35d51f4",
+      "self_acceptance": "PASS",
+      "tests_passed": 47,
+      "full_regression_passed": 347,
+      "completed_date": "2026-07-27"
     }
   },
   "production_boundary": {
@@ -76,5 +84,6 @@
   },
   "final_independent_acceptance": "PENDING",
   "last_updated": "2026-07-27",
-  "last_updated_by": "primary_dev_ai"
+  "last_updated_by": "primary_dev_ai",
+  "m5_notes": "M5 PASS: reading linkage (READ-001~005), media (MEDIA-001~006), interpretation (INTERP-001~008), rectification (RECT-001~007); 26 rules with version 1.0.0; 47 M5 tests + 347 full regression passed; production boundary held."
 }

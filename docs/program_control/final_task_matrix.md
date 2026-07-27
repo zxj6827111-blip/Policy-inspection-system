@@ -71,14 +71,14 @@
 
 | 编号 | 任务 | 状态 | 完成日期 | 产物 |
 |---:|---|---|---|---|
-| M5-1 | 阅办联动深度检查 | PENDING |  |  |
-| M5-2 | 图片/视频/附件可用性检查 | PENDING |  |  |
-| M5-3 | 多类型政策解读检查 | PENDING |  |  |
-| M5-4 | 解读对象匹配 | PENDING |  |  |
-| M5-5 | 整改任务创建/下发/反馈 | PENDING |  |  |
-| M5-6 | 复查与销号 | PENDING |  |  |
-| M5-7 | 超期提醒与复发识别 | PENDING |  |  |
-| M5-8 | M5 自验报告 | PENDING |  | docs/milestones/M5/self_acceptance_report.md |
+| M5-1 | 阅办联动深度检查 | DONE | 2026-07-27 | app/reading_linkage/__init__.py（READ-001~005） |
+| M5-2 | 图片/视频/附件可用性检查 | DONE | 2026-07-27 | app/media/__init__.py（MEDIA-001~006） |
+| M5-3 | 多类型政策解读检查 | DONE | 2026-07-27 | app/interpretation/__init__.py（INTERP-001~008） |
+| M5-4 | 解读对象匹配 | DONE | 2026-07-27 | _compute_match + has_interpretation_mismatch |
+| M5-5 | 整改任务创建/下发/反馈 | DONE | 2026-07-27 | app/rectification/__init__.py create_task |
+| M5-6 | 复查与销号 | DONE | 2026-07-27 | transition_status + 状态机 + signoff |
+| M5-7 | 超期提醒与复发识别 | DONE | 2026-07-27 | detect_overdue + detect_recurrence + RECT-002/005 |
+| M5-8 | M5 自验报告 | DONE | 2026-07-27 | docs/milestones/M5/self_acceptance_report.md |
 
 ## M6 最终 UI、口径、性能与演练
 

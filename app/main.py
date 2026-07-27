@@ -1922,3 +1922,335 @@ async def exclude_recon_endpoint(
     )
     return {"ok": True}
 
+
+# ===================== M5: Reading Linkage / Media / Interpretation / Rectification =====================
+
+class ReadingCheckRequest(BaseModel):
+    job_id: int | None = None
+    button_label: str = ""
+    button_selector: str = ""
+    button_present: bool = True
+    clickable: bool | None = None
+    target_url: str = ""
+    http_status: int | None = None
+    page_status: str = "unknown"
+    page_title: str = ""
+    page_body_length: int = 0
+    has_no_data_placeholder: bool = False
+
+
+@app.post("/api/reading-checks/{doc_id}")
+async def record_reading_check_endpoint(
+    doc_id: int,
+    payload: ReadingCheckRequest,
+    request: Request,
+    user: CurrentUser = Depends(require_write("jobs:write")),
+    auth: AuthService = Depends(get_auth_service),
+):
+    """Record a reading/handling linkage check for a document (M5)."""
+    from app.reading_linkage import ReadingLinkageInput, record_reading_check
+    result = record_reading_check(db, ReadingLinkageInput(
+        document_id=doc_id, job_id=payload.job_id,
+        button_label=payload.button_label, button_selector=payload.button_selector,
+        button_present=payload.button_present, clickable=payload.clickable,
+        target_url=payload.target_url, http_status=payload.http_status,
+        page_status=payload.page_status, page_title=payload.page_title,
+        page_body_length=payload.page_body_length,
+        has_no_data_placeholder=payload.has_no_data_placeholder,
+    ))
+    ip, ua = _client_meta(request)
+    auth.audit(
+        actor=user, action="reading.check.record",
+        resource_type="reading_linkage_checks", resource_id=str(result.check_id),
+        detail={"document_id": doc_id, "rule_code": result.rule_code},
+        ip=ip, user_agent=ua,
+    )
+    return {
+        "check_id": result.check_id, "document_id": doc_id,
+        "rule_code": result.rule_code, "machine_status": result.machine_status,
+        "allow_customer_output": result.allow_customer_output,
+    }
+
+
+@app.get("/api/reading-checks")
+async def list_reading_checks_endpoint(
+    document_id: int | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+    _user: CurrentUser = Depends(require_login),
+):
+    """List reading linkage checks."""
+    from app.reading_linkage import list_reading_checks
+    return list_reading_checks(db, document_id=document_id, limit=limit)
+
+
+class MediaCheckRequest(BaseModel):
+    job_id: int | None = None
+    media_type: str
+    media_url: str
+    source_area: str = ""
+    http_status: int | None = None
+    status: str = "pending"
+    content_type: str = ""
+    content_hash: str = ""
+    size_bytes: int = 0
+    detected_kind: str = ""
+    duration_seconds: float | None = None
+
+
+@app.post("/api/media-checks/{doc_id}")
+async def record_media_check_endpoint(
+    doc_id: int,
+    payload: MediaCheckRequest,
+    request: Request,
+    user: CurrentUser = Depends(require_write("jobs:write")),
+    auth: AuthService = Depends(get_auth_service),
+):
+    """Record an image/video/attachment availability check (M5)."""
+    from app.media import MediaCheckInput, record_media_check
+    result = record_media_check(db, MediaCheckInput(
+        document_id=doc_id, job_id=payload.job_id,
+        media_type=payload.media_type, media_url=payload.media_url,
+        source_area=payload.source_area, http_status=payload.http_status,
+        status=payload.status, content_type=payload.content_type,
+        content_hash=payload.content_hash, size_bytes=payload.size_bytes,
+        detected_kind=payload.detected_kind, duration_seconds=payload.duration_seconds,
+    ))
+    ip, ua = _client_meta(request)
+    auth.audit(
+        actor=user, action="media.check.record",
+        resource_type="media_checks", resource_id=str(result.check_id),
+        detail={"document_id": doc_id, "rule_code": result.rule_code},
+        ip=ip, user_agent=ua,
+    )
+    return {
+        "check_id": result.check_id, "document_id": doc_id,
+        "media_type": payload.media_type,
+        "rule_code": result.rule_code, "machine_status": result.machine_status,
+        "allow_customer_output": result.allow_customer_output,
+    }
+
+
+@app.get("/api/media-checks")
+async def list_media_checks_endpoint(
+    document_id: int | None = Query(default=None),
+    media_type: str | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+    _user: CurrentUser = Depends(require_login),
+):
+    """List media checks."""
+    from app.media import list_media_checks
+    return list_media_checks(
+        db, document_id=document_id, media_type=media_type, limit=limit,
+    )
+
+
+class InterpretationRequest(BaseModel):
+    interpretation_type: str
+    interpretation_url: str
+    title: str = ""
+    published_at: str | None = None
+    target_document_id: int | None = None
+    target_doc_number: str = ""
+    target_title: str = ""
+
+
+@app.post("/api/interpretations/{doc_id}")
+async def create_interpretation_endpoint(
+    doc_id: int,
+    payload: InterpretationRequest,
+    request: Request,
+    user: CurrentUser = Depends(require_write("jobs:write")),
+    auth: AuthService = Depends(get_auth_service),
+):
+    """Create a policy interpretation record for a document (M5)."""
+    from app.interpretation import InterpretationInput, create_interpretation
+    interp_id = create_interpretation(db, InterpretationInput(
+        document_id=doc_id, interpretation_type=payload.interpretation_type,
+        interpretation_url=payload.interpretation_url, title=payload.title,
+        published_at=payload.published_at,
+        target_document_id=payload.target_document_id,
+        target_doc_number=payload.target_doc_number,
+        target_title=payload.target_title,
+    ))
+    ip, ua = _client_meta(request)
+    auth.audit(
+        actor=user, action="interpretation.create",
+        resource_type="policy_interpretations", resource_id=str(interp_id),
+        detail={"document_id": doc_id, "type": payload.interpretation_type},
+        ip=ip, user_agent=ua,
+    )
+    return {"interpretation_id": interp_id, "document_id": doc_id}
+
+
+class InterpretationCheckRequest(BaseModel):
+    job_id: int | None = None
+    link_status: str = "unknown"
+    http_status: int | None = None
+    has_image: bool | None = None
+    image_status: str = "unknown"
+    has_video: bool | None = None
+    video_status: str = "unknown"
+    page_body_length: int = 0
+    is_empty_page: bool = False
+    published_at_present: bool | None = None
+
+
+@app.post("/api/interpretations/{interp_id}/check")
+async def record_interpretation_check_endpoint(
+    interp_id: int,
+    payload: InterpretationCheckRequest,
+    request: Request,
+    user: CurrentUser = Depends(require_write("jobs:write")),
+    auth: AuthService = Depends(get_auth_service),
+):
+    """Record a check for a policy interpretation (M5)."""
+    from app.interpretation import InterpretationCheckInput, record_interpretation_check
+    result = record_interpretation_check(db, InterpretationCheckInput(
+        interpretation_id=interp_id, job_id=payload.job_id,
+        link_status=payload.link_status, http_status=payload.http_status,
+        has_image=payload.has_image, image_status=payload.image_status,
+        has_video=payload.has_video, video_status=payload.video_status,
+        page_body_length=payload.page_body_length,
+        is_empty_page=payload.is_empty_page,
+        published_at_present=payload.published_at_present,
+    ))
+    ip, ua = _client_meta(request)
+    auth.audit(
+        actor=user, action="interpretation.check.record",
+        resource_type="interpretation_checks", resource_id=str(result.check_id),
+        detail={"interpretation_id": interp_id, "rule_code": result.rule_code},
+        ip=ip, user_agent=ua,
+    )
+    return {
+        "check_id": result.check_id, "interpretation_id": interp_id,
+        "rule_code": result.rule_code, "machine_status": result.machine_status,
+        "allow_customer_output": result.allow_customer_output,
+    }
+
+
+@app.get("/api/interpretations")
+async def list_interpretations_endpoint(
+    document_id: int | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+    _user: CurrentUser = Depends(require_login),
+):
+    """List policy interpretations."""
+    from app.interpretation import list_interpretations
+    return list_interpretations(db, document_id=document_id, limit=limit)
+
+
+class RectificationTaskRequest(BaseModel):
+    finding_id: int | None = None
+    document_id: int
+    rule_code: str = ""
+    title: str = ""
+    description: str = ""
+    responsible_unit: str = ""
+    responsible_person: str = ""
+    deadline: str | None = None
+    priority: str = "normal"
+    parent_task_id: int | None = None
+    before_evidence: list[dict] = Field(default_factory=list)
+
+
+@app.post("/api/rectification/tasks")
+async def create_rectification_task_endpoint(
+    payload: RectificationTaskRequest,
+    request: Request,
+    user: CurrentUser = Depends(require_write("jobs:write")),
+    auth: AuthService = Depends(get_auth_service),
+):
+    """Create a rectification task (M5)."""
+    from app.rectification import RectificationTaskInput, create_task
+    result = create_task(db, RectificationTaskInput(
+        finding_id=payload.finding_id, document_id=payload.document_id,
+        rule_code=payload.rule_code, title=payload.title, description=payload.description,
+        responsible_unit=payload.responsible_unit, responsible_person=payload.responsible_person,
+        deadline=payload.deadline, priority=payload.priority,
+        parent_task_id=payload.parent_task_id,
+        before_evidence_json=payload.before_evidence,
+    ), actor=user.username)
+    ip, ua = _client_meta(request)
+    auth.audit(
+        actor=user, action="rectification.task.create",
+        resource_type="rectification_tasks", resource_id=str(result.task_id),
+        detail={"document_id": payload.document_id, "rule_code": payload.rule_code,
+                "rule_codes_emitted": result.rule_codes_emitted},
+        ip=ip, user_agent=ua,
+    )
+    return {
+        "task_id": result.task_id, "document_id": result.document_id,
+        "rule_codes_emitted": result.rule_codes_emitted,
+    }
+
+
+class RectificationTransitionRequest(BaseModel):
+    to_status: str
+    actor: str = ""
+    reason: str = ""
+    feedback_notes: str = ""
+    after_evidence: list[dict] = Field(default_factory=list)
+    deadline: str | None = None
+
+
+@app.post("/api/rectification/tasks/{task_id}/transition")
+async def transition_rectification_task_endpoint(
+    task_id: int,
+    payload: RectificationTransitionRequest,
+    request: Request,
+    user: CurrentUser = Depends(require_write("jobs:write")),
+    auth: AuthService = Depends(get_auth_service),
+):
+    """Transition a rectification task status (M5)."""
+    from app.rectification import transition_status
+    result = transition_status(
+        db, task_id, payload.to_status,
+        actor=payload.actor or user.username, reason=payload.reason,
+        feedback_notes=payload.feedback_notes,
+        after_evidence=payload.after_evidence or None,
+        deadline=payload.deadline,
+    )
+    ip, ua = _client_meta(request)
+    auth.audit(
+        actor=user, action="rectification.task.transition",
+        resource_type="rectification_tasks", resource_id=str(task_id),
+        detail=result, ip=ip, user_agent=ua,
+    )
+    return result
+
+
+@app.get("/api/rectification/tasks")
+async def list_rectification_tasks_endpoint(
+    document_id: int | None = Query(default=None),
+    status: str | None = Query(default=None),
+    overdue_only: bool = Query(default=False),
+    limit: int = Query(default=100, ge=1, le=500),
+    _user: CurrentUser = Depends(require_login),
+):
+    """List rectification tasks with optional filters."""
+    from app.rectification import list_tasks
+    return list_tasks(
+        db, document_id=document_id, status=status,
+        overdue_only=overdue_only, limit=limit,
+    )
+
+
+@app.get("/api/rectification/tasks/{task_id}")
+async def get_rectification_task_endpoint(
+    task_id: int, _user: CurrentUser = Depends(require_login),
+):
+    """Get a single rectification task with status history."""
+    from app.rectification import get_task, get_status_history
+    task = get_task(db, task_id)
+    if not task:
+        raise HTTPException(404, "整改任务不存在")
+    task["status_history"] = get_status_history(db, task_id)
+    return task
+
+
+@app.get("/api/rectification/overdue")
+async def list_overdue_tasks_endpoint(_user: CurrentUser = Depends(require_login)):
+    """List overdue rectification tasks (RECT-002)."""
+    from app.rectification import detect_overdue_tasks
+    return detect_overdue_tasks(db)
+

@@ -1,0 +1,26 @@
+# M5 命令执行记录
+# 里程碑: M5 阅办联动、政策解读与整改闭环
+# 分支: feat/full-policy-inspection-upgrade
+# 开始时间: 2026-07-27
+
+## 基线记录
+git status --short
+git log --oneline -10
+
+## M5 测试运行
+.\.venv\Scripts\python.exe -m pytest tests/test_m5_reading_interp_rectification.py -v --tb=short
+# 结果: 47 passed, 1 warning in 24.23s
+
+## 全量回归测试
+.\.venv\Scripts\python.exe -m pytest --tb=short -q
+# 结果: 347 passed, 1 warning in 535.22s (0:08:55)
+
+## 提交
+git add app/migrations/m5.py app/reading_linkage/ app/media/ app/interpretation/ app/rectification/ app/db.py app/main.py tests/test_m5_reading_interp_rectification.py docs/milestones/M5/ tmp/program_control/M5_* docs/program_control/status.json docs/program_control/change_log.md docs/program_control/final_task_matrix.md
+git commit -m "M5: reading linkage, media checks, policy interpretation, rectification closure"
+
+## 生产边界校验
+# - 未修改生产数据库 (production_database_modified = false)
+# - 未重启生产服务 (production_service_restarted = false)
+# - 未修改生产 Nginx/PM2/证书
+# - 未执行高频外部扫描

@@ -359,6 +359,7 @@ class Database:
             self._migrate_m2(conn)
             self._migrate_m3(conn)
             self._migrate_m4(conn)
+            self._migrate_m5(conn)
 
     @staticmethod
     def _migrate(conn: sqlite3.Connection) -> None:
@@ -533,6 +534,12 @@ class Database:
         from app.migrations.m4 import run_m4_migration
 
         run_m4_migration(conn)
+
+    @staticmethod
+    def _migrate_m5(conn: sqlite3.Connection) -> None:
+        from app.migrations.m5 import run_m5_migration
+
+        run_m5_migration(conn)
 
     def create_job(
         self, districts: list[str], mode: str, safety: dict[str, Any], max_documents: int = 0,

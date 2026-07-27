@@ -208,3 +208,79 @@ app/
 - 生产数据库 SHA256：未变
 - 范围：阅办联动深度检查 / 多类型政策解读 / 整改、复查、销号 / 超期和复发
 
+### M5-2 数据库迁移
+
+- 新增 6 张表：`reading_linkage_checks`、`media_checks`、`policy_interpretations`、`interpretation_checks`、`rectification_tasks`、`rectification_status_history`
+- `policy_documents` 新增 4 列：`reading_check_status`、`interpretation_count`、`has_interpretation_mismatch`、`rectification_status`
+- 种子 M5 规则版本 26 条：READ-001~005、MEDIA-001~006、INTERP-001~008、RECT-001~007 (v1.0.0)
+- 迁移幂等：`test_migration_is_idempotent` 验证
+
+### M5-3 模块结构
+
+```
+app/
+├── migrations/m5.py
+├── reading_linkage/__init__.py
+├── media/__init__.py
+├── interpretation/__init__.py
+└── rectification/__init__.py
+```
+
+### M5-4 规则实现
+
+- READ-001~005：阅办按钮缺失 / 不可点击 / 跳转失败 / 空白页 / 暂无数据
+- MEDIA-001~006：图片缺失 / 破损 / 视频缺失 / 失效 / 空资源 / 403-429 拦截
+- INTERP-001~008：解读链接失效 / 对象错误 / 发布时间缺失 / 错挂 / 图片失效 / 视频失效 / 空白 / 类型缺失
+- RECT-001~007：无责任单位 / 超期 / 证据缺失 / 未通过未重发 / 销号后复发 / 状态历史缺失 / 期限缺失
+- 403/429/验证码/临时网络问题 → `transient_error`，`allow_customer_output=false`，不进入客户正式问题
+- 解读对象匹配：规范化文号 + 规范化标题计算置信度，低于阈值则 `has_interpretation_mismatch=1`
+
+### M5-5 API 端点
+
+9 个 M5 端点加入 `app/main.py`（全部带 auth/CSRF/audit）：
+- POST /api/reading-checks/{doc_id}
+- POST /api/media-checks/{doc_id}
+- POST /api/interpretations/{doc_id}、/api/interpretation-checks/{interp_id}
+- POST /api/rectification/tasks、/api/rectification/tasks/{task_id}/transition
+- GET /api/rectification/tasks/{task_id}、/api/rectification/overdue、/api/rectification/recurrence
+
+### M5-6 测试
+
+- `tests/test_m5_reading_interp_rectification.py` 47 用例
+- 修复 `MediaCheckInput` dataclass 字段顺序错误（非默认参数 `media_type` 必须在默认参数 `job_id` 之前）
+- 全部通过
+
+### M5 完成
+
+- M5 专项：47 passed
+- 全量回归：347 passed（M4 完成时 300，M5 新增 47）
+- V3.0 §11.5 门禁全部 PASS：
+  - 正常重定向不误报
+  - 403/429 不进入正式问题
+  - 视频页面打开但视频失效可识别
+  - 200 空页面可识别
+  - 解读对象错误可识别
+  - 所有正式问题可创建整改任务
+  - 整改前后证据完整
+  - 状态可追溯
+  - 销号后复发可识别
+- 产物：
+  - `docs/milestones/M5/development_report.md`
+  - `docs/milestones/M5/self_acceptance_report.md`
+  - `tmp/program_control/M5_self_acceptance.json`
+  - `tmp/program_control/M5_commands.txt`
+  - `tmp/program_control/M5_test_output.txt`
+- status.json 更新：M5=DONE，M6=IN_PROGRESS
+- 自动进入 M6
+
+---
+
+## 2026-07-27 M6 启动
+
+### M6-1 基线记录
+
+- 分支：`feat/full-policy-inspection-upgrade`
+- 开始 HEAD：M5 完成后提交点
+- 生产数据库 SHA256：未变
+- 范围：最终 UI / 口径 / 性能 / OCR 队列 / 数据库锁治理 / 日志监控 / 备份恢复回滚 / 生产副本演练
+
