@@ -356,6 +356,7 @@ class Database:
             self._migrate(conn)
             self._seed_agencies(conn)
             self._migrate_phase1(conn)
+            self._migrate_m2(conn)
 
     @staticmethod
     def _migrate(conn: sqlite3.Connection) -> None:
@@ -512,6 +513,12 @@ class Database:
         run_phase1_migration(conn)
         run_closeout_migration(conn)
         seed_organizations(conn)
+
+    @staticmethod
+    def _migrate_m2(conn: sqlite3.Connection) -> None:
+        from app.migrations.m2 import run_m2_migration
+
+        run_m2_migration(conn)
 
     def create_job(
         self, districts: list[str], mode: str, safety: dict[str, Any], max_documents: int = 0,

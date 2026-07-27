@@ -128,6 +128,34 @@ class CreateUserRequest(BaseModel):
     display_name: str = ""
 
 
+class BatchReviewRequest(BaseModel):
+    finding_ids: list[int] = Field(default_factory=list)
+    decision: str
+    reason_code: str = "other"
+    note: str = Field(default="", max_length=500)
+
+
+class DualAssignRequest(BaseModel):
+    finding_ids: list[int] = Field(default_factory=list)
+    first_reviewer_id: int
+    first_reviewer_username: str
+    second_reviewer_id: int
+    second_reviewer_username: str
+
+
+class DualReviewRequest(BaseModel):
+    round: int = Field(ge=1, le=2)
+    decision: str
+    reason_code: str = "other"
+    note: str = Field(default="", max_length=500)
+
+
+class ArbitrateRequest(BaseModel):
+    decision: str
+    reason_code: str = "other"
+    note: str = Field(default="", max_length=500)
+
+
 def _set_session_cookies(response: Response, session_id: str, csrf_token: str, expires) -> None:
     secure = os.environ.get("POLICY_COOKIE_SECURE", "").lower() in {"1", "true", "yes"}
     response.set_cookie(
@@ -931,4 +959,272 @@ async def review_finding(
                 ),
             )
     return {"ok": True, "human_status": human, "review_status": review_status, "counts": counts}
+
+
+# ---------- M2: batch review, dual review, rule effect center ----------
+
+
+@app.post("/api/findings/batch-review")
+async def batch_review_endpoint(
+    payload: BatchReviewRequest,
+    request: Request,
+    user: CurrentUser = Depends(require_write("review:write")),
+    auth: AuthService = Depends(get_auth_service),
+):
+    """M2: apply one review decision to many findings at once."""
+    from app.review_batch import batch_review
+
+    if not payload.finding_ids:
+        raise HTTPException(400, "请至少选择一个问题记录")
+    result = batch_review(
+        db,
+        finding_ids=payload.finding_ids,
+        decision=payload.decision,
+        reason_code=payload.reason_code,
+        note=payload.note,
+        reviewer_id=user.id,
+        reviewer_username=user.username,
+    )
+    ip, ua = _client_meta(request)
+    auth.audit(
+        actor=user,
+        action="finding.batch_review",
+        resource_type="findings",
+        detail={
+            "ids": payload.finding_ids[:50],
+            "decision": payload.decision,
+            "reason_code": payload.reason_code,
+            "updated": result.updated,
+            "skipped": result.skipped,
+        },
+        ip=ip,
+        user_agent=ua,
+    )
+    return {
+        "ok": True,
+        "total": result.total,
+        "updated": result.updated,
+        "skipped": result.skipped,
+        "errors": result.errors,
+    }
+
+
+@app.get("/api/jobs/{job_id}/finding-clusters")
+async def finding_clusters(
+    job_id: int,
+    dimension: str = Query(default="rule_code"),
+    _user: CurrentUser = Depends(require_login),
+):
+    """M2: cluster finding ids by rule_code/district/source_site/document_number_prefix."""
+    from app.review_batch import cluster_findings
+
+    if not db.get_job(job_id):
+        raise HTTPException(404, "任务不存在")
+    try:
+        groups = cluster_findings(db, job_id=job_id, dimension=dimension)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {
+        "dimension": dimension,
+        "groups": [
+            {"key": key, "count": len(ids), "finding_ids": ids}
+            for key, ids in sorted(groups.items(), key=lambda kv: -len(kv[1]))
+        ],
+    }
+
+
+@app.post("/api/findings/dual-assign")
+async def dual_assign_endpoint(
+    payload: DualAssignRequest,
+    request: Request,
+    user: CurrentUser = Depends(require_write("review:write")),
+    auth: AuthService = Depends(get_auth_service),
+):
+    """M2: assign two reviewers for dual-person review."""
+    from app.review_dual import assign_dual_review
+
+    if not payload.finding_ids:
+        raise HTTPException(400, "请至少选择一个问题记录")
+    try:
+        inserted = assign_dual_review(
+            db,
+            finding_ids=payload.finding_ids,
+            first_reviewer_id=payload.first_reviewer_id,
+            first_reviewer_username=payload.first_reviewer_username,
+            second_reviewer_id=payload.second_reviewer_id,
+            second_reviewer_username=payload.second_reviewer_username,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    ip, ua = _client_meta(request)
+    auth.audit(
+        actor=user,
+        action="finding.dual_assign",
+        resource_type="findings",
+        detail={
+            "ids": payload.finding_ids[:50],
+            "first": payload.first_reviewer_username,
+            "second": payload.second_reviewer_username,
+            "inserted": inserted,
+        },
+        ip=ip,
+        user_agent=ua,
+    )
+    return {"ok": True, "assigned": inserted, "requested": len(payload.finding_ids)}
+
+
+@app.post("/api/findings/{finding_id}/dual-review")
+async def dual_review_endpoint(
+    finding_id: int,
+    payload: DualReviewRequest,
+    request: Request,
+    user: CurrentUser = Depends(require_write("review:write")),
+    auth: AuthService = Depends(get_auth_service),
+):
+    """M2: submit one reviewer's decision in dual-person review."""
+    from app.review_dual import submit_dual_review
+
+    try:
+        result = submit_dual_review(
+            db,
+            finding_id=finding_id,
+            reviewer_id=user.id,
+            reviewer_username=user.username,
+            round_num=payload.round,
+            decision=payload.decision,
+            reason_code=payload.reason_code,
+            note=payload.note,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    ip, ua = _client_meta(request)
+    auth.audit(
+        actor=user,
+        action="finding.dual_review",
+        resource_type="finding",
+        resource_id=str(finding_id),
+        detail=result,
+        ip=ip,
+        user_agent=ua,
+    )
+    return result
+
+
+@app.post("/api/findings/{finding_id}/arbitrate")
+async def arbitrate_endpoint(
+    finding_id: int,
+    payload: ArbitrateRequest,
+    request: Request,
+    user: CurrentUser = Depends(require_write("review:write")),
+    auth: AuthService = Depends(get_auth_service),
+):
+    """M2: arbitrator resolves a dual-review disagreement."""
+    from app.review_dual import arbitrate
+
+    try:
+        result = arbitrate(
+            db,
+            finding_id=finding_id,
+            arbitrator_id=user.id,
+            arbitrator_username=user.username,
+            decision=payload.decision,
+            reason_code=payload.reason_code,
+            note=payload.note,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    ip, ua = _client_meta(request)
+    auth.audit(
+        actor=user,
+        action="finding.arbitrate",
+        resource_type="finding",
+        resource_id=str(finding_id),
+        detail=result,
+        ip=ip,
+        user_agent=ua,
+    )
+    return result
+
+
+@app.get("/api/jobs/{job_id}/dual-assignments")
+async def dual_assignments_endpoint(
+    job_id: int, _user: CurrentUser = Depends(require_login)
+):
+    """M2: list dual-review assignments for a job."""
+    from app.review_dual import list_dual_assignments
+
+    if not db.get_job(job_id):
+        raise HTTPException(404, "任务不存在")
+    return list_dual_assignments(db, job_id=job_id)
+
+
+@app.get("/api/consistency-rate")
+async def consistency_rate_endpoint(
+    job_id: int | None = Query(default=None),
+    _user: CurrentUser = Depends(require_login),
+):
+    """M2: overall dual-review consistency rate."""
+    from app.review_dual import compute_consistency_rate
+
+    return compute_consistency_rate(db, job_id=job_id)
+
+
+@app.get("/api/rule-effect")
+async def rule_effect_endpoint(
+    job_id: int | None = Query(default=None),
+    _user: CurrentUser = Depends(require_login),
+):
+    """M2: rule effect center — per-rule precision, false-positive rate, top dismissal reasons."""
+    from app.rule_effect import compute_rule_effectiveness
+
+    return compute_rule_effectiveness(db, job_id=job_id)
+
+
+@app.post("/api/rule-effect/snapshot")
+async def rule_effect_snapshot_endpoint(
+    request: Request,
+    job_id: int | None = Query(default=None),
+    snapshot_kind: str = Query(default="live"),
+    user: CurrentUser = Depends(require_write("review:write")),
+    auth: AuthService = Depends(get_auth_service),
+):
+    """M2: persist current rule effectiveness as a snapshot for trend tracking."""
+    from app.rule_effect import snapshot_rule_effectiveness
+
+    if snapshot_kind not in {"live", "sample", "evaluation"}:
+        raise HTTPException(400, "snapshot_kind 必须是 live/sample/evaluation")
+    result = snapshot_rule_effectiveness(db, job_id=job_id, snapshot_kind=snapshot_kind)
+    ip, ua = _client_meta(request)
+    auth.audit(
+        actor=user,
+        action="rule_effect.snapshot",
+        resource_type="rule_effect",
+        detail=result,
+        ip=ip,
+        user_agent=ua,
+    )
+    return result
+
+
+@app.post("/api/rule-effect/degrade")
+async def rule_degradation_endpoint(
+    request: Request,
+    job_id: int | None = Query(default=None),
+    user: CurrentUser = Depends(require_write("review:write")),
+    auth: AuthService = Depends(get_auth_service),
+):
+    """M2: evaluate and apply rule degradation based on precision thresholds."""
+    from app.rule_degradation import evaluate_rule_degradation
+
+    result = evaluate_rule_degradation(db, job_id=job_id)
+    ip, ua = _client_meta(request)
+    auth.audit(
+        actor=user,
+        action="rule_effect.degrade",
+        resource_type="rule_versions",
+        detail={"degraded": result["degraded"], "restored": result["restored"]},
+        ip=ip,
+        user_agent=ua,
+    )
+    return result
 
