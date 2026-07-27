@@ -20,15 +20,15 @@
 
 | 编号 | 任务 | 状态 | 完成日期 | 产物 |
 |---:|---|---|---|---|
-| M1-1 | 生产 fail-closed 校验 | PENDING |  |  |
-| M1-2 | API 文档保护（/docs /redoc /openapi.json） | PENDING |  |  |
-| M1-3 | 多角色权限矩阵验证 | PENDING |  |  |
-| M1-4 | finding/rule_version/evidence 验证 | PENDING |  |  |
-| M1-5 | review lineage 验证 | PENDING |  |  |
-| M1-6 | 统计口径验证 | PENDING |  |  |
-| M1-7 | 机构与机关代字规则验证 | PENDING |  |  |
-| M1-8 | 指定样本回归（普委办〔2013〕41号 等） | PENDING |  |  |
-| M1-9 | M1 自验报告 | PENDING |  | docs/milestones/M1/self_acceptance_report.md |
+| M1-1 | 生产 fail-closed 校验 | DONE | 2026-07-27 | 已有测试 test_auth_fail_closed_production_forbids_disabled |
+| M1-2 | API 文档保护（/docs /redoc /openapi.json） | DONE | 2026-07-27 | app/main.py protect_api_docs 中间件 + 7 测试 |
+| M1-3 | 多角色权限矩阵验证 | DONE | 2026-07-27 | tests/test_role_permission_matrix.py 5 项 |
+| M1-4 | finding/rule_version/evidence 验证 | DONE | 2026-07-27 | 已有测试覆盖 |
+| M1-5 | review lineage 验证 | DONE | 2026-07-27 | 已有测试 test_human_conclusion_inherited_on_resave |
+| M1-6 | 统计口径验证 | DONE | 2026-07-27 | 已有测试 test_agency_001_not_customer_formal |
+| M1-7 | 机构与机关代字规则验证 | DONE | 2026-07-27 | 已有测试 test_puweiban_2013_41 等 |
+| M1-8 | 指定样本回归（普委办〔2013〕41号 等） | DONE | 2026-07-27 | 已有测试覆盖 |
+| M1-9 | M1 自验报告 | DONE | 2026-07-27 | docs/milestones/M1/self_acceptance_report.md |
 
 ## M2 人工标注与规则效果治理
 

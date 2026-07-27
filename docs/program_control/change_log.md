@@ -60,3 +60,36 @@
 - 开始 HEAD：`e9c2fb24fb46fb79f814b253e6b1482fc0a58b48`
 - 生产数据库 SHA256：`13e6a8a412f69c13d149674a31076854c966f5b151e670fc9e22d0f53ab77af3`（未变）
 
+### M1-2 实现 API 文档保护
+
+- `app/main.py` 新增 `protect_api_docs` 中间件
+- 生产环境 `/docs` `/redoc` `/openapi.json` 返回 404
+- 非生产环境保持可访问
+
+### M1-3 多角色权限矩阵测试
+
+- 新增 `tests/test_role_permission_matrix.py`（5 项：operator/auditor/viewer 边界 + 能力合约 + UI 可达）
+- 注册 `real_auth` pytest mark
+
+### M1-4 全量回归
+
+- 196 passed（184 + 7 文档保护 + 5 角色矩阵）
+- 生产数据库 SHA256 未变
+
+### M1 完成
+
+- HEAD：`9ddcf2117cd55e55c49e50309560e2cb31d35f8d`
+- 产物：`docs/milestones/M1/development_report.md`、`docs/milestones/M1/self_acceptance_report.md`、`tmp/program_control/M1_self_acceptance.json`、`tmp/program_control/M1_commands.txt`、`tmp/program_control/M1_test_output.txt`
+- status.json 更新：M1=DONE，M2=IN_PROGRESS
+- 自动进入 M2
+
+---
+
+## 2026-07-27 M2 启动
+
+### M2-1 基线记录
+
+- 分支：`feat/full-policy-inspection-upgrade`
+- 开始 HEAD：`9ddcf2117cd55e55c49e50309560e2cb31d35f8d`
+- 生产数据库 SHA256：`13e6a8a412f69c13d149674a31076854c966f5b151e670fc9e22d0f53ab77af3`（未变）
+
