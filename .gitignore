@@ -24,5 +24,8 @@ tmp/
 *.db-shm
 
 # Local planning docs (not part of accepted product tree)
-政策巡检系统整体改造实施方案.md
 
+
+# Local planning markdown at repo root (not product deliverables)
+*实施方案*.md
+*实施方*.md
