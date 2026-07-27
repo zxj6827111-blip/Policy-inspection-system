@@ -5,7 +5,7 @@
 > 生成日期：2026-07-27
 > 项目：上海区级政策文件安全巡检系统
 > 当前分支：feat/full-policy-inspection-upgrade
-> 当前 HEAD：02cb6e22341e2940abb0e657d27b9ba2c7b2cae9
+> 当前 HEAD：c1c6102c1e5cf7ddc6cf280e5def70b1419e2c9c
 
 ---
 

@@ -4,7 +4,7 @@
 > 修订日期：2026-07-28
 > 文档性质：主开发 AI 自验产出，待独立总验收
 > 当前分支：feat/full-policy-inspection-upgrade
-> 当前 HEAD：79dacc0e0cc8e210d5d72c7042266e3568f83135
+> 当前 HEAD：c1c6102c1e5cf7ddc6cf280e5def70b1419e2c9c
 > 真源：`data/policy_inspector.db` 的 `rule_versions` 表 + 代码实现
 
 ---

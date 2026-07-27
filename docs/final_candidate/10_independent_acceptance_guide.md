@@ -1,4 +1,4 @@
-# 上海区级政策文件安全巡检系统 独立总验收入口指南
+﻿# 上海区级政策文件安全巡检系统 独立总验收入口指南
 
 | 版本 | 生成日期 | 文档状态 | 适用阶段 |
 |----------|------------|----------------------|------------|
@@ -33,7 +33,7 @@
 | 项目 | 基线值 |
 |------|--------|
 | 当前分支 | feat/full-policy-inspection-upgrade |
-| 当前 HEAD | （以 `git rev-parse HEAD` 为准；整改入库后须与 status.json remediation head 一致，工作区干净） |
+| 当前 HEAD | `c1c6102c1e5cf7ddc6cf280e5def70b1419e2c9c` 或其后代（含控制面对齐 commit）；`status.json` remediation.head 指向整改代码提交；工作区干净 |
 | 生产分支 | codex/fix-snapshot-result-collision |
 | 生产 HEAD | be74df72598ae9ae0feb3a8fd9987c84c5bd8b67 |
 | 工作区数据库 SHA256 | 本地副本可变（gitignored）；记录验收当时 `Get-FileHash` 即可 |
@@ -363,7 +363,7 @@ GET /api/nav-items
 | 序号 | 门禁项 | 验收方式 | 预期结果 | 实际结果 |
 |------|--------|----------|----------|----------|
 | 1 | M0-M7 全部自验 PASS | 核对 status.json 与自验摘要 | 全部 DONE |  |
-| 2 | 全量回归 388 passed / 0 failed | 运行 pytest | 388 passed |  |
+| 2 | 全量回归 391 passed / 0 failed | 运行 pytest | 391 passed |  |
 | 3 | 1,500 评测 P/R/F1 = 1.0000（生产规则引擎） | 运行 final_1500_evaluation.py，核对 engine=production_rule_modules | P/R/F1=1.0 |  |
 | 4 | M6-8 演练 10/10 PASS | 运行 rehearsal_backup_restore.py | 10/10 |  |
 | 5 | 生产数据库 SHA256 未变 | 核对生产数据库哈希 | 与基线一致 |  |
@@ -390,7 +390,7 @@ GET /api/nav-items
 关键门禁（任一失败即 FAIL）：
 
 - 门禁 1：M0-M7 全部自验 PASS
-- 门禁 2：全量回归 388 passed / 0 failed
+- 门禁 2：全量回归 391 passed / 0 failed
 - 门禁 3：1,500 评测 P/R/F1 = 1.0000（生产规则引擎）
 - 门禁 5：生产数据库 SHA256 未变
 - 门禁 6：生产服务未重启
@@ -421,13 +421,13 @@ GET /api/nav-items
 验收日期：2026-07-28
 验收基线：
   - 分支：feat/full-policy-inspection-upgrade
-  - HEAD：79dacc0e0cc8e210d5d72c7042266e3568f83135
-  - 工作区数据库 SHA256：1EAEC1D8957E4D1250770F688D40A93E9D51387C24EC03BA9C0F19095E6434CE
+  - HEAD：c1c6102c1e5cf7ddc6cf280e5def70b1419e2c9c（或后续 control 对齐 commit）
+  - 工作区数据库 SHA256：本地记录实际值（gitignored）
   - 生产数据库 SHA256（未变）：13E6A8A412F69C13D149674A31076854C966F5B151E670FC9E22D0F53AB77AF3
 
 门禁结果：
   1. M0-M7 全部自验 PASS - PASS
-  2. 全量回归 388 passed / 0 failed - PASS
+  2. 全量回归 391 passed / 0 failed - PASS
   3. 1,500 评测 P/R/F1 = 1.0000（生产规则引擎） - PASS
   4. M6-8 演练 10/10 PASS - PASS
   5. 生产数据库 SHA256 未变 - PASS
@@ -502,7 +502,7 @@ GET /api/nav-items
 | 验收人员 |  |
 | 验收日期 | 2026-07-28 |
 | 验收基线分支 | feat/full-policy-inspection-upgrade |
-| 验收基线 HEAD | 79dacc0e0cc8e210d5d72c7042266e3568f83135 |
+| 验收基线 HEAD | c1c6102c1e5cf7ddc6cf280e5def70b1419e2c9c |
 | 工作区数据库 SHA256 |  |
 | 生产数据库 SHA256 |  |
 | 全量回归结果 |  |
@@ -649,10 +649,10 @@ python scripts/smoke_test.py
 | 项 | 值 |
 |----|----|
 | 分支 | feat/full-policy-inspection-upgrade |
-| HEAD | 79dacc0e0cc8e210d5d72c7042266e3568f83135 |
-| 工作区数据库 SHA256 | 1EAEC1D8957E4D1250770F688D40A93E9D51387C24EC03BA9C0F19095E6434CE |
+| HEAD | c1c6102c1e5cf7ddc6cf280e5def70b1419e2c9c |
+| 工作区数据库 SHA256 | (local workspace hash; gitignored) |
 | 生产数据库 SHA256 | 13E6A8A412F69C13D149674A31076854C966F5B151E670FC9E22D0F53AB77AF3 |
-| 全量回归 | 388 passed / 0 failed |
+| 全量回归 | 391 passed / 0 failed |
 | 1,500 评测 | P=R=F1=Accuracy=1.0000（调用生产规则引擎） |
 | M6-8 演练 | 10/10 PASS |
 | 冒烟测试 | 15/15 PASS |
