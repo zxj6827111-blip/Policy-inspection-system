@@ -75,6 +75,24 @@ app = FastAPI(title="上海区级政策文件安全巡检系统", version="0.2.0
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "app" / "static")), name="static")
 
 
+# M1: Protect API documentation in production (fail-closed).
+# /docs, /redoc, /openapi.json are accessible only when APP_ENV != production.
+# In production these paths return 404 to avoid leaking the API surface.
+_DOCS_PATHS = {"/docs", "/redoc", "/openapi.json"}
+
+
+@app.middleware("http")
+async def protect_api_docs(request: Request, call_next):
+    path = request.url.path.rstrip("/") or "/"
+    if path in _DOCS_PATHS:
+        from app.runtime_config import AppEnv, get_runtime_settings
+
+        settings = get_runtime_settings()
+        if settings.app_env == AppEnv.PRODUCTION:
+            return JSONResponse({"detail": "API 文档在生产环境已禁用"}, status_code=404)
+    return await call_next(request)
+
+
 class CreateJobRequest(BaseModel):
     targets: list[str] = Field(default_factory=list)
     districts: list[str] = Field(default_factory=list)
