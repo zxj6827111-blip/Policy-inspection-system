@@ -13,6 +13,7 @@ from chinese_calendar import is_workday
 from app.config import EXPORT_DIR, ensure_directories, resolve_target
 from app.db import Database
 from app.rules import DOC_NUMBER_RE, WorkdayCalendar, normalize_document_number
+from app.findings_model import enrich_finding_row, is_customer_formal_problem
 
 
 HEAD_FILL = PatternFill("solid", fgColor="1F4E78")
@@ -53,7 +54,17 @@ def _timeliness(authored, published) -> tuple[int | None, str]:
     return count, "超期" if count > 20 else "合规"
 
 
+def _finding_export_flags(f: dict) -> tuple:
+    return (
+        f.get("machine_status") or "",
+        f.get("human_status") or "",
+        f.get("rule_version") or "",
+        "是" if f.get("is_customer_formal") else "否",
+    )
+
+
 def _format_sheet(sheet) -> None:
+
     sheet.freeze_panes = "A2"
     sheet.auto_filter.ref = sheet.dimensions
     for cell in sheet[1]:
@@ -133,10 +144,15 @@ def export_job(db: Database, job_id: int) -> Path:
             WHERE job_id=? GROUP BY district,action""", (job_id,)
         ).fetchall()
 
+    findings = [enrich_finding_row(dict(row)) for row in findings]
+    findings = [f for f in findings if int(f.get('is_current', 1) or 1) == 1]
+    # 问题汇总仅统计客户正式问题；明细表仍输出全部 finding（含 AGENCY 线索）。
+    formal_findings = [f for f in findings if f.get("is_customer_formal")]
+
     workbook = Workbook()
     workbook.remove(workbook.active)
     findings_by_document: dict[int, list] = {}
-    for finding in findings:
+    for finding in formal_findings:
         findings_by_document.setdefault(int(finding["document_id"]), []).append(finding)
     categories: dict[tuple[str, str], int] = {}
     mapped_findings: set[int] = set()
@@ -153,7 +169,7 @@ def export_job(db: Database, job_id: int) -> Path:
             mapped_findings.add(int(finding["id"]))
             key = (item_result["source_label"], finding["category"])
             categories[key] = categories.get(key, 0) + 1
-    for finding in findings:
+    for finding in formal_findings:
         if int(finding["id"]) in mapped_findings:
             continue
         source = finding["source_site"] or finding["district"]
@@ -200,16 +216,18 @@ def export_job(db: Database, job_id: int) -> Path:
             ))
     _write_sheet(
         workbook, "问题汇总",
-        ["扫描来源", "问题类型", "数量", "扫描状态", "扫描完整度", "已覆盖", "详情检查", "复用/跳过",
+        ["扫描来源", "问题类型", "客户正式问题数", "扫描状态", "扫描完整度", "已覆盖", "详情检查", "复用/跳过",
          "预计总数", "预计剩余", "暂停/未完成原因"], summary_rows,
     )
 
     date_rows = [(f["source_site"] or "市级平台", f["district"], f["source_id"], f["title"], _excel_date(f["authored_date"]),
                   _excel_date(f["published_date"]), _workday_count(f["detail"]),
                   "日期倒置" if f["rule_code"] == "DATE-002" else "超期", f["page_document_number"],
-                  "页面", f["rule_code"], f["detail"], f["review_status"], f["url"])
+                  "页面", f["rule_code"], f["detail"], f["review_status"],
+                  f.get("machine_status") or "", f.get("human_status") or "", f.get("rule_version") or "",
+                  "是" if f.get("is_customer_formal") else "否", f["url"])
                  for f in findings if f["category"] == "日期问题"]
-    _write_sheet(workbook, "超期与日期问题", ["栏目名称", "区县", "文件ID", "标题", "成文日期", "发布日期", "工作日差", "时效状态", "文号", "文号来源", "规则", "问题详情", "复核状态", "链接"], date_rows)
+    _write_sheet(workbook, "超期与日期问题", ["栏目名称", "区县", "文件ID", "标题", "成文日期", "发布日期", "工作日差", "时效状态", "文号", "文号来源", "规则", "问题详情", "复核状态", "机器状态", "人工状态", "规则版本", "是否客户正式问题", "链接"], date_rows)
 
     doc_rows = []
     for finding in findings:
@@ -219,8 +237,11 @@ def export_job(db: Database, job_id: int) -> Path:
         doc_rows.append((finding["source_site"] or "市级平台", finding["district"], finding["source_id"], finding["title"],
                          _excel_date(finding["authored_date"]), number_type, number_year, number_index, combined,
                          "页面", finding["issuing_agency"], finding["body_value"], finding["rule_code"],
-                         finding["detail"], finding["evidence"], finding["review_status"], finding["url"]))
-    _write_sheet(workbook, "文号与机构问题", ["栏目名称", "区县", "文件ID", "标题", "成文日期", "文号类型", "文号年份", "文号编号", "组合文号", "文号来源", "发文机构", "正文值", "问题类型", "问题详情", "证据", "复核状态", "链接"], doc_rows)
+                         finding["detail"], finding["evidence"], finding["review_status"],
+                         finding.get("machine_status") or "", finding.get("human_status") or "",
+                         finding.get("rule_version") or "",
+                         "是" if finding.get("is_customer_formal") else "否", finding["url"]))
+    _write_sheet(workbook, "文号与机构问题", ["栏目名称", "区县", "文件ID", "标题", "成文日期", "文号类型", "文号年份", "文号编号", "组合文号", "文号来源", "发文机构", "正文值", "问题类型", "问题详情", "证据", "复核状态", "机器状态", "人工状态", "规则版本", "是否客户正式问题", "链接"], doc_rows)
 
     link_rows = [
         (

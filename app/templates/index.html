@@ -8,6 +8,12 @@
 </head>
 <body>
   <header class="topbar">
+    <div id="auth-bar" class="auth-bar">
+      <span id="auth-user">未登录</span>
+      <button type="button" class="btn-ghost-dark" id="login-btn">登录</button>
+      <button type="button" class="btn-ghost-dark" id="logout-btn" hidden>退出</button>
+    </div>
+
     <div>
       <h1>政策文件安全巡检系统</h1>
       <p class="sub">受控采集 · 同域串行 · 风控信号自动暂停</p>
@@ -87,7 +93,7 @@
         <div class="card" id="legacy-card" hidden style="overflow:hidden; margin-top:16px">
           <div class="panel-head"><h3>其他历史任务</h3><span class="muted-note">与当前站点配置不完全对应的早期任务</span></div>
           <div class="table-wrap"><table class="mini" id="legacy-table">
-            <thead><tr><th>任务</th><th>来源</th><th>模式</th><th>状态</th><th>进度</th><th>问题</th><th>创建时间</th><th>结果</th></tr></thead>
+            <thead><tr><th>任务</th><th>来源</th><th>模式</th><th>状态</th><th>进度</th><th title="客户正式问题数 formal_finding_count">正式问题</th><th title="线索合计 finding_total_count / finding_count">线索</th><th>创建时间</th><th>结果</th></tr></thead>
             <tbody id="legacy-body"></tbody>
           </table></div>
         </div>
@@ -160,9 +166,19 @@
 
             <!-- 问题复核 -->
             <div class="card" id="findings-panel" hidden>
+          <div class="bucket-chips" id="finding-buckets">
+            <span>确认问题 <b id="rc-confirmed-problem">0</b></span>
+            <span>待复核线索 <b id="rc-suspected">0</b></span>
+            <span>数据不足 <b id="rc-insufficient">0</b></span>
+            <span>采集异常 <b id="rc-collection">0</b></span>
+            <span>自动排除 <b id="rc-auto">0</b></span>
+            <span>人工排除 <b id="rc-human">0</b></span>
+            <span>客户正式 <b id="rc-customer-formal">0</b></span>
+          </div>
+
               <div class="panel-head"><h3>问题复核</h3><span class="muted-note">当前任务的复核队列</span></div>
               <div class="review-filters">
-                <button type="button" class="chip-filter review-filter" data-status="pending">待复核 <b id="rc-pending">0</b></button>
+                <button type="button" class="chip-filter review-filter" data-status="suspected">待复核线索 <b id="rc-pending">0</b></button>
                 <button type="button" class="chip-filter review-filter" data-status="confirmed">确认异常 <b id="rc-confirmed">0</b></button>
                 <button type="button" class="chip-filter review-filter" data-status="dismissed">已排除 <b id="rc-dismissed">0</b></button>
                 <button type="button" class="chip-filter review-filter" data-status="all">全部</button>
@@ -184,7 +200,7 @@
             <div class="card" style="overflow:hidden">
               <div class="panel-head"><h3>本站点历史任务</h3></div>
               <div class="table-wrap"><table class="mini">
-                <thead><tr><th>任务</th><th>模式</th><th>状态</th><th>进度</th><th>问题</th><th>创建时间</th><th>结果</th></tr></thead>
+                <thead><tr><th>任务</th><th>模式</th><th>状态</th><th>进度</th><th title="客户正式问题数 formal_finding_count">正式问题</th><th title="线索合计 finding_total_count / finding_count">线索</th><th>创建时间</th><th>结果</th></tr></thead>
                 <tbody id="site-history-body"></tbody>
               </table></div>
               <p class="muted-note panel-pad" id="site-history-empty" hidden>暂无记录。完成首次全量后，这里会显示每次扫描的结果与 Excel 下载。</p>
@@ -202,7 +218,7 @@
               <div class="rail-pad"><dl class="kv" id="rail-info"></dl></div>
             </div>
             <div class="card" id="rail-findings-card" hidden>
-              <div class="rail-head"><h4>待复核问题</h4></div>
+              <div class="rail-head"><h4>客户正式问题</h4><p class="muted-note" style="margin:4px 0 0;font-size:12px">非线索总数</p></div>
               <div class="rail-pad"><div class="rail-big num" id="rail-findings-num">0</div></div>
             </div>
             <div class="card" id="rail-notes-card" hidden>
@@ -251,6 +267,8 @@
 
   <!-- ===== 证据定位 ===== -->
   <dialog id="evidence-dialog" class="evidence-dialog" aria-labelledby="evidence-title">
+  <div id="evidence-fields" class="evidence-fields"></div>
+
     <div class="dlg-head">
       <div><h3 id="evidence-title">问题证据定位</h3><p id="evidence-subtitle"></p></div>
       <button type="button" class="dlg-close" id="evidence-close">✕</button>
@@ -258,8 +276,8 @@
     <div class="dlg-body">
       <div class="evidence-actions"><a id="evidence-source" class="btn btn-sm" target="_blank" rel="noopener noreferrer">打开原政策页面</a></div>
       <dl class="kv evidence-fields">
-        <dt>页面值</dt><dd id="evidence-page-value">-</dd>
-        <dt>正文值</dt><dd id="evidence-body-value">-</dd>
+        <dt>页面值</dt><dd id="evidence-page-value" hidden>-</dd>
+        <dt>正文值</dt><dd id="evidence-body-value" hidden>-</dd>
         <dt>规则证据</dt><dd id="evidence-rule-text">-</dd>
       </dl>
       <p class="muted-note">红框表示规则命中的已采集文本；未在正文中出现的页面字段会保留在上方证据区。</p>
@@ -271,3 +289,16 @@
   <script src="/static/app.js?v=20260726-sitecentric2"></script>
 </body>
 </html>
+
+<dialog id="login-dialog">
+  <form method="dialog" id="login-form" class="login-form">
+    <h3>登录</h3>
+    <label>用户名 <input id="login-username" name="username" required></label>
+    <label>密码 <input id="login-password" name="password" type="password" required></label>
+    <p id="login-error" class="error" hidden></p>
+    <menu>
+      <button type="submit" class="btn btn-primary" id="login-submit">登录</button>
+      <button type="button" class="btn" id="login-cancel" value="cancel">取消</button>
+    </menu>
+  </form>
+</dialog>

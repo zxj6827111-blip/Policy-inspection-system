@@ -40,8 +40,13 @@ function toast(message) {
   const box = $('#toast'); box.textContent = message; box.style.display = 'block';
   clearTimeout(box._timer); box._timer = setTimeout(() => { box.style.display = 'none'; }, 4500);
 }
+let csrfToken = '';
 async function api(url, options = {}) {
-  const response = await fetch(url, {headers: {'Content-Type': 'application/json'}, ...options});
+  const headers = {'Content-Type': 'application/json', ...(options.headers || {})};
+  if (csrfToken && options.method && !['GET','HEAD'].includes(String(options.method).toUpperCase())) {
+    headers['X-CSRF-Token'] = csrfToken;
+  }
+  const response = await fetch(url, {...options, headers, credentials: 'same-origin'});
   if (!response.ok) { const data = await response.json().catch(() => ({})); throw new Error(data.detail || `请求失败 ${response.status}`); }
   return response.json();
 }
@@ -177,7 +182,7 @@ function renderLegacyJobs() {
       <td>${job.mode === 'full' ? '全量' : '增量'}</td>
       <td><span class="pill ${job.status === 'completed' ? 'pill-ok' : 'pill-neutral'}">${statusNames[job.status] || job.status}</span></td>
       <td class="num">${fmtNum(job.examined_count)}/${job.estimated_total ? fmtNum(job.estimated_total) : '?'}</td>
-      <td class="num">${fmtNum(job.finding_count)}</td>
+      <td class="num" title="客户正式问题 formal_finding_count">${fmtNum(job.formal_finding_count != null ? job.formal_finding_count : 0)}</td><td class="num" title="线索合计 finding_total_count">${fmtNum(job.finding_total_count != null ? job.finding_total_count : job.finding_count)}</td>
       <td class="num">${fmtTime(job.created_at)}</td>
       <td><a class="btn btn-sm" href="/api/jobs/${job.id}/export">Excel</a></td>
     </tr>`).join('');
@@ -339,7 +344,7 @@ function renderStats(site, job) {
     <div class="stat"><span class="label">新增</span><div class="value num">${fmtNum(added)}</div></div>
     <div class="stat"><span class="label">基线复用</span><div class="value num">${fmtNum(reused)}</div><div class="hint">未开详情直接复用</div></div>
     <div class="stat"><span class="label">表头完整</span><div class="value num" id="stat-header">${cached ? fmtNum(cached.complete_header) : '…'}</div><div class="hint" id="stat-header-hint">${cached ? `缺字段 ${fmtNum(cached.incomplete_header)} · 无表头 PASS ${fmtNum(cached.no_header_pass)}` : '读取中'}</div></div>
-    <div class="stat"><span class="label">发现问题</span><div class="value num link" id="stat-findings">${fmtNum(job.finding_count)}</div><div class="hint">点击查看复核 ↓</div></div>`;
+    <div class="stat"><span class="label">客户正式问题</span><div class="value num link" id="stat-findings">${fmtNum(job.formal_finding_count != null ? job.formal_finding_count : 0)}</div><div class="hint">线索合计 ${fmtNum(job.finding_total_count != null ? job.finding_total_count : job.finding_count)} · 点击复核 ↓</div></div>`;
   const findingsTile = $('#stat-findings');
   if (findingsTile) findingsTile.addEventListener('click', () => {
     const panel = $('#findings-panel');
@@ -396,8 +401,8 @@ function renderRail(site, state, job) {
     }
   }
   $('#rail-notes-card').hidden = !(state.code === 'fresh' || state.code === 'invalid');
-  $('#rail-findings-card').hidden = !job || !Number(job.finding_count);
-  if (job) $('#rail-findings-num').textContent = fmtNum(job.finding_count);
+  $('#rail-findings-card').hidden = !job || !Number(job.formal_finding_count != null ? job.formal_finding_count : 0);
+  if (job) $('#rail-findings-num').textContent = fmtNum(job.formal_finding_count != null ? job.formal_finding_count : 0);
 }
 
 function renderSiteHistory(site) {
@@ -418,7 +423,7 @@ function renderSiteHistory(site) {
       <td>${job.mode === 'full' ? '全量' : `增量<small> · 基线 #${job.baseline_job_id ?? '-'}</small>`}</td>
       <td><span class="pill ${pillClass}">${statusNames[job.status] || job.status}${isBaseline ? ' · 现行基准' : ''}</span>${incomplete ? ' <em class="history-warning">记录不完整</em>' : ''}</td>
       <td><span class="mini-progress"><span style="width:${percent}%"></span></span><span class="num">${fmtNum(examined)}/${total ? fmtNum(total) : '?'}</span></td>
-      <td class="num">${fmtNum(job.finding_count)}</td>
+      <td class="num" title="客户正式问题 formal_finding_count">${fmtNum(job.formal_finding_count != null ? job.formal_finding_count : 0)}</td><td class="num" title="线索合计 finding_total_count">${fmtNum(job.finding_total_count != null ? job.finding_total_count : job.finding_count)}</td>
       <td class="num">${fmtTime(job.created_at)}</td>
       <td><a class="btn btn-sm" href="/api/jobs/${job.id}/export">Excel</a></td>
     </tr>`;
@@ -466,6 +471,16 @@ async function renderFindings(jobId) {
   const totalCount = Object.values(queue.counts).reduce((sum, value) => sum + value, 0);
   panel.hidden = totalCount === 0;
   if (panel.hidden) return;
+  const buckets = queue.bucket_counts || {};
+  const setText = (id, val) => { const el = $(id); if (el) el.textContent = fmtNum(val || 0); };
+  setText('#rc-pending', queue.counts.pending);
+  setText('#rc-suspected', buckets.suspected);
+  setText('#rc-confirmed-problem', buckets.confirmed_problem);
+  setText('#rc-insufficient', buckets.insufficient_data);
+  setText('#rc-collection', buckets.collection_error);
+  setText('#rc-auto', buckets.auto_excluded);
+  setText('#rc-human', buckets.human_excluded);
+  setText('#rc-customer-formal', buckets.customer_formal);
   $('#rc-pending').textContent = fmtNum(queue.counts.pending);
   $('#rc-confirmed').textContent = fmtNum(queue.counts.confirmed);
   $('#rc-dismissed').textContent = fmtNum(queue.counts.dismissed);
@@ -517,14 +532,31 @@ async function renderScanExceptions(jobId) {
   }
 }
 
-async function openEvidence(findingId) {
+async async function openEvidence(findingId) {
   const finding = await api(`/api/findings/${findingId}/evidence`);
   $('#evidence-subtitle').textContent = `${finding.district} · ${finding.title} · ${finding.rule_code}`;
-  $('#evidence-source').href = validatedUrl(finding.url);
-  $('#evidence-page-value').textContent = finding.page_value || '-';
-  $('#evidence-body-value').textContent = finding.body_value || '-';
-  $('#evidence-rule-text').textContent = finding.evidence || finding.detail || '-';
-  $('#evidence-body').innerHTML = highlightEvidence(finding.body_text, [finding.page_value, finding.body_value]);
+  const source = $('#evidence-source');
+  if (source) source.href = validatedUrl(finding.url);
+  const fieldsBox = $('#evidence-fields');
+  const fields = finding.evidence_fields || [];
+  if (fieldsBox) {
+    if (fields.length) {
+      fieldsBox.innerHTML = fields.map(item => `<div class="evidence-field"><span class="finding-label">${escapeHtml(item.field_name || item.source_type || '字段')}</span><p>${escapeHtml(item.raw_value || item.excerpt || '-')}</p></div>`).join('');
+    } else {
+      fieldsBox.innerHTML = `<div class="evidence-field"><span class="finding-label">机器状态</span><p>${escapeHtml(finding.machine_status || '-')}</p></div>
+        <div class="evidence-field"><span class="finding-label">人工状态</span><p>${escapeHtml(finding.human_status || '-')}</p></div>
+        <div class="evidence-field"><span class="finding-label">规则版本</span><p>${escapeHtml(finding.rule_version || '-')}</p></div>
+        <div class="evidence-field"><span class="finding-label">详情</span><p>${escapeHtml(finding.detail || '-')}</p></div>`;
+    }
+  }
+  const pageVal = $('#evidence-page-value');
+  const bodyVal = $('#evidence-body-value');
+  if (pageVal) pageVal.textContent = finding.page_value || '-';
+  if (bodyVal) bodyVal.textContent = finding.body_value || '-';
+  const ruleText = $('#evidence-rule-text');
+  if (ruleText) ruleText.textContent = finding.evidence || finding.detail || '-';
+  const body = $('#evidence-body');
+  if (body) body.innerHTML = highlightEvidence(finding.body_text, [finding.page_value, finding.body_value, ...(fields.map(f => f.raw_value || ''))]);
   $('#evidence-dialog').showModal();
 }
 
@@ -752,3 +784,57 @@ api('/health').then(() => {
 });
 poll().catch(error => toast(error.message));
 setInterval(() => poll().catch(() => {}), 3000);
+
+
+// ----- phase1 auth -----
+async function refreshAuth() {
+  try {
+    const me = await api('/api/auth/me');
+    const label = $('#auth-user');
+    const loginBtn = $('#login-btn');
+    const logoutBtn = $('#logout-btn');
+    if (me.authenticated) {
+      if (label) label.textContent = `${me.username}（${(me.roles || []).join(',') || 'user'}）`;
+      if (loginBtn) loginBtn.hidden = true;
+      if (logoutBtn) logoutBtn.hidden = false;
+    } else {
+      if (label) label.textContent = '未登录';
+      if (loginBtn) loginBtn.hidden = false;
+      if (logoutBtn) logoutBtn.hidden = true;
+    }
+  } catch (_) {}
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  const loginBtn = $('#login-btn');
+  const logoutBtn = $('#logout-btn');
+  const dialog = $('#login-dialog');
+  const form = $('#login-form');
+  if (loginBtn && dialog) loginBtn.addEventListener('click', () => dialog.showModal());
+  const cancel = $('#login-cancel');
+  if (cancel && dialog) cancel.addEventListener('click', () => dialog.close());
+  if (form) form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const username = $('#login-username').value.trim();
+    const password = $('#login-password').value;
+    const err = $('#login-error');
+    try {
+      const result = await api('/api/auth/login', {method: 'POST', body: JSON.stringify({username, password})});
+      csrfToken = result.csrf_token || '';
+      if (err) err.hidden = true;
+      dialog.close();
+      await refreshAuth();
+      toast('登录成功');
+    } catch (ex) {
+      if (err) { err.hidden = false; err.textContent = ex.message || '登录失败'; }
+    }
+  });
+  if (logoutBtn) logoutBtn.addEventListener('click', async () => {
+    try {
+      await api('/api/auth/logout-simple', {method: 'POST', body: '{}'});
+    } catch (_) {}
+    csrfToken = '';
+    await refreshAuth();
+  });
+  refreshAuth();
+});
