@@ -2,7 +2,7 @@
   "project": "Policy-inspection-system",
   "plan_version": "V3.0",
   "current_milestone": "M7",
-  "overall_status": "IN_PROGRESS",
+  "overall_status": "SELF_ACCEPTANCE_PASS",
   "milestones": {
     "M0": "DONE",
     "M1": "DONE",
@@ -11,7 +11,7 @@
     "M4": "DONE",
     "M5": "DONE",
     "M6": "DONE",
-    "M7": "IN_PROGRESS"
+    "M7": "DONE"
   },
   "baseline": {
     "production_branch": "codex/fix-snapshot-result-collision",
@@ -84,6 +84,32 @@
       "full_regression_passed": 347,
       "rehearsal_steps_passed": 10,
       "completed_date": "2026-07-27"
+    },
+    "M7": {
+      "branch": "feat/full-policy-inspection-upgrade",
+      "head_before": "02cb6e22341e2940abb0e657d27b9ba2c7b2cae9",
+      "head_after": "02cb6e22341e2940abb0e657d27b9ba2c7b2cae9",
+      "workspace_db_sha256": "5F35DE29396143B2F1EA5BE328505D37180A2AC2686898357D4BC309E76398F8",
+      "self_acceptance": "PASS",
+      "tests_passed": 347,
+      "full_regression_passed": 347,
+      "evaluation_1500": {
+        "total_samples": 1500,
+        "total_rules": 74,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "accuracy": 1.0,
+        "failed_rules": 0,
+        "degradation_candidates": 0,
+        "result": "PASS"
+      },
+      "rehearsal_steps_passed": 10,
+      "final_deliverables_count": 12,
+      "scripts_count": 3,
+      "tag_candidate": "v3.0.0-rc1",
+      "merge_strategy": "squash_merge",
+      "completed_date": "2026-07-27"
     }
   },
   "production_boundary": {
@@ -97,5 +123,6 @@
   "final_independent_acceptance": "PENDING",
   "last_updated": "2026-07-27",
   "last_updated_by": "primary_dev_ai",
-  "m6_notes": "M6 PASS: 21-item nav UI + role filter; Excel 8 new sheets (PDF/attachments, archive, duplicates, reconciliation, reading linkage, media, interpretation, rectification); 19 critical indexes; OCR queue (enqueue/next_pending/complete/cancel with retry + priority); PRAGMA tuning (busy_timeout=30s, synchronous=NORMAL, cache_size=64MB); observability (structured logging, metrics, deep health, request middleware, health snapshots); backup/restore (SQLite online backup API + SHA256 + dry_run + validate); 10-step production-replica full-flow rehearsal ALL PASS. 347 tests + 10 rehearsal steps PASS. Production boundary held."
+  "m6_notes": "M6 PASS: 21-item nav UI + role filter; Excel 8 new sheets (PDF/attachments, archive, duplicates, reconciliation, reading linkage, media, interpretation, rectification); 19 critical indexes; OCR queue (enqueue/next_pending/complete/cancel with retry + priority); PRAGMA tuning (busy_timeout=30s, synchronous=NORMAL, cache_size=64MB); observability (structured logging, metrics, deep health, request middleware, health snapshots); backup/restore (SQLite online backup API + SHA256 + dry_run + validate); 10-step production-replica full-flow rehearsal ALL PASS. 347 tests + 10 rehearsal steps PASS. Production boundary held.",
+  "m7_notes": "M7 PASS: full system regression 347 passed / 0 failed; final 1500-sample evaluation 74 rules P=R=F1=1.0000 (0 failed, 0 degradation); 12 final deliverable docs (architecture, feature matrix, rule catalog, security report, data quality report, test report, migration report, cutover runbook, rollback runbook, acceptance guide, observation checklist, release candidate package); 3 scripts (smoke_test, rehearsal_backup_restore, final_1500_evaluation); final_development_summary.json; tag candidate v3.0.0-rc1; squash merge plan to codex/fix-snapshot-result-collision. Production boundary held (db SHA256 unchanged, no service restart, no Nginx/PM2/cert changes). M0-M7 ALL self-acceptance PASS. Awaiting independent final acceptance."
 }

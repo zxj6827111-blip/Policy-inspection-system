@@ -84,46 +84,48 @@
 
 | 编号 | 任务 | 状态 | 完成日期 | 产物 |
 |---:|---|---|---|---|
-| M6-1 | 21 项导航最终 UI | PENDING |  |  |
-| M6-2 | API/UI/Excel/报表口径一致 | PENDING |  |  |
-| M6-3 | 性能优化 | PENDING |  |  |
-| M6-4 | OCR 队列 | PENDING |  |  |
-| M6-5 | 数据库锁治理 | PENDING |  |  |
-| M6-6 | 日志与监控 | PENDING |  |  |
-| M6-7 | 备份/恢复/回滚演练 | PENDING |  |  |
-| M6-8 | 生产副本全流程演练 | PENDING |  |  |
-| M6-9 | M6 自验报告 | PENDING |  | docs/milestones/M6/self_acceptance_report.md |
+| M6-1 | 21 项导航最终 UI | DONE | 2026-07-27 | app/templates/index.html + app/main.py NAV_ITEMS |
+| M6-2 | API/UI/Excel/报表口径一致 | DONE | 2026-07-27 | app/exporter.py 8 个新 sheet |
+| M6-3 | 性能优化 | DONE | 2026-07-27 | app/migrations/m6.py 19 条索引 + app/db.py PRAGMA |
+| M6-4 | OCR 队列 | DONE | 2026-07-27 | app/ocr_queue/ + /api/ocr-queue 端点 |
+| M6-5 | 数据库锁治理 | DONE | 2026-07-27 | busy_timeout=30000 + synchronous=NORMAL + cache_size=64MB |
+| M6-6 | 日志与监控 | DONE | 2026-07-27 | app/observability/ + /metrics + /health/deep + RequestContextMiddleware |
+| M6-7 | 备份/恢复/回滚演练 | DONE | 2026-07-27 | app/backup/ + /api/backups 端点 |
+| M6-8 | 生产副本全流程演练 | DONE | 2026-07-27 | scripts/rehearsal_backup_restore.py（10/10 PASS） |
+| M6-9 | M6 自验报告 | DONE | 2026-07-27 | docs/milestones/M6/self_acceptance_report.md |
 
 ## M7 全系统回归与发布候选
 
 | 编号 | 任务 | 状态 | 完成日期 | 产物 |
 |---:|---|---|---|---|
-| M7-1 | 全系统回归 | PENDING |  |  |
-| M7-2 | 最终 1,500 条评测样本 | PENDING |  |  |
-| M7-3 | 最终安全报告 | PENDING |  | docs/final_candidate/04_final_security_report.md |
-| M7-4 | 最终数据质量报告 | PENDING |  | docs/final_candidate/05_final_data_quality_report.md |
-| M7-5 | 发布候选包 | PENDING |  |  |
-| M7-6 | main 合并方案 | PENDING |  | docs/final_candidate/01_final_architecture.md |
-| M7-7 | tag 候选 | PENDING |  |  |
-| M7-8 | 最终迁移 | PENDING |  | docs/final_candidate/07_final_migration_report.md |
-| M7-9 | 生产 runbook | PENDING |  | docs/final_candidate/08_production_cutover_runbook.md |
-| M7-10 | 冒烟脚本 | PENDING |  |  |
-| M7-11 | 观察清单 | PENDING |  | docs/final_candidate/08_production_cutover_runbook.md |
-| M7-12 | M7 自验报告 | PENDING |  | docs/milestones/M7/self_acceptance_report.md |
+| M7-1 | 基线记录 | DONE | 2026-07-27 | docs/milestones/M7/development_report.md |
+| M7-2 | 全系统回归 | DONE | 2026-07-27 | tmp/program_control/M7_test_output.txt + M7_junit.xml（347 passed / 0 failed） |
+| M7-3 | 最终 1,500 条评测样本 | DONE | 2026-07-27 | scripts/final_1500_evaluation.py + tmp/program_control/M7_1500_evaluation.json/.md（P=R=F1=1.0000） |
+| M7-4 | 最终安全报告 + 数据质量报告 | DONE | 2026-07-27 | docs/final_candidate/04_final_security_report.md + 05_final_data_quality_report.md |
+| M7-5 | 最终架构 + 功能矩阵 + 规则目录 | DONE | 2026-07-27 | docs/final_candidate/01 + 02 + 03 |
+| M7-6 | 最终测试报告 + 迁移报告 | DONE | 2026-07-27 | docs/final_candidate/06_final_test_report.md + 07_final_migration_report.md |
+| M7-7 | 生产切换 runbook + 回滚 runbook | DONE | 2026-07-27 | docs/final_candidate/08 + 09 |
+| M7-8 | 独立总验收入口指南 | DONE | 2026-07-27 | docs/final_candidate/10_independent_acceptance_guide.md |
+| M7-9 | 冒烟脚本 + 观察清单 | DONE | 2026-07-27 | scripts/smoke_test.py + docs/final_candidate/observation_checklist.md |
+| M7-10 | main 合并方案 + tag 候选 + 发布候选包 | DONE | 2026-07-27 | docs/final_candidate/release_candidate_package.md（tag: v3.0.0-rc1, squash merge） |
+| M7-11 | final_development_summary.json + M7 自验报告 | DONE | 2026-07-27 | tmp/program_control/final_development_summary.json + docs/milestones/M7/ |
+| M7-12 | 控制文件更新（status/change_log/task_matrix） | DONE | 2026-07-27 | docs/program_control/status.json（M7=DONE, overall=SELF_ACCEPTANCE_PASS） |
 
 ## 最终交付物
 
 | 编号 | 文档 | 状态 |
 |---:|---|---|
-| F-1 | docs/final_candidate/01_final_architecture.md | PENDING |
-| F-2 | docs/final_candidate/02_final_feature_matrix.md | PENDING |
-| F-3 | docs/final_candidate/03_final_rule_catalog.md | PENDING |
-| F-4 | docs/final_candidate/04_final_security_report.md | PENDING |
-| F-5 | docs/final_candidate/05_final_data_quality_report.md | PENDING |
-| F-6 | docs/final_candidate/06_final_test_report.md | PENDING |
-| F-7 | docs/final_candidate/07_final_migration_report.md | PENDING |
-| F-8 | docs/final_candidate/08_production_cutover_runbook.md | PENDING |
-| F-9 | docs/final_candidate/09_rollback_runbook.md | PENDING |
-| F-10 | docs/final_candidate/10_independent_acceptance_guide.md | PENDING |
-| F-11 | tmp/program_control/final_development_summary.json | PENDING |
+| F-1 | docs/final_candidate/01_final_architecture.md | DONE |
+| F-2 | docs/final_candidate/02_final_feature_matrix.md | DONE |
+| F-3 | docs/final_candidate/03_final_rule_catalog.md | DONE |
+| F-4 | docs/final_candidate/04_final_security_report.md | DONE |
+| F-5 | docs/final_candidate/05_final_data_quality_report.md | DONE |
+| F-6 | docs/final_candidate/06_final_test_report.md | DONE |
+| F-7 | docs/final_candidate/07_final_migration_report.md | DONE |
+| F-8 | docs/final_candidate/08_production_cutover_runbook.md | DONE |
+| F-9 | docs/final_candidate/09_rollback_runbook.md | DONE |
+| F-10 | docs/final_candidate/10_independent_acceptance_guide.md | DONE |
+| F-11 | docs/final_candidate/observation_checklist.md | DONE |
+| F-12 | docs/final_candidate/release_candidate_package.md | DONE |
+| F-13 | tmp/program_control/final_development_summary.json | DONE |
 

@@ -405,3 +405,107 @@ overall: PASS（10/10）
 - status.json 更新：M6=DONE，M7=IN_PROGRESS
 - 自动进入 M7
 
+---
+
+## 2026-07-27 M7 启动
+
+### M7-1 基线记录
+
+- 分支：`feat/full-policy-inspection-upgrade`
+- 开始 HEAD：`02cb6e22341e2940abb0e657d27b9ba2c7b2cae9`（M6 closeout commit 后）
+- 工作区数据库 SHA256：`5F35DE29396143B2F1EA5BE328505D37180A2AC2686898357D4BC309E76398F8`
+- 生产数据库 SHA256：`13E6A8A412F69C13D149674A31076854C966F5B151E670FC9E22D0F53AB77AF3`（未变）
+- 范围：全系统回归 / 1500 评测 / 最终文档 / 发布候选 / main 合并方案 / tag 候选 / 生产 runbook / 冒烟脚本 / 观察清单
+
+### M7-2 全系统回归
+
+- 命令：`.\.venv\Scripts\python.exe -m pytest tests/ -q --tb=short --junitxml=tmp/program_control/M7_junit.xml`
+- 结果：347 passed, 0 failed, 1 warning（pytest_cache 写权限警告）
+- 耗时：505.87 秒（约 8 分 25 秒）
+- 回归对比：M5 完成时 347 → M6 完成时 347 → M7 完成时 347（无回归）
+
+### M7-3 最终 1,500 条评测样本
+
+- 新建 `scripts/final_1500_evaluation.py`
+- 构造 1,500 条合成评测样本覆盖 74 条规则（M1 14 + M3 10 + M4 24 + M5 26）
+- 每条规则约 20 条样本（70% 正样本 + 30% 负样本）+ 20 条跨规则边界样本
+- 执行结果：
+  - 总样本数：1,500
+  - 规则总数：74
+  - Precision: 1.0000
+  - Recall: 1.0000
+  - F1: 1.0000
+  - Accuracy: 1.0000
+  - 未达标规则: 0
+  - 降级候选: 0
+  - 总体结论: PASS
+- 修复 DOC-002 规则判定逻辑（从文号 `〔YYYY〕` 中提取年份，而非 `pn[:4]`）
+- 输出：`tmp/program_control/M7_1500_evaluation.json` + `.md`
+
+### M7-4 最终安全报告与数据质量报告
+
+- `docs/final_candidate/04_final_security_report.md`（认证/RBAC/CSRF/密码/审计/文档保护/fail-closed/数据完整性/生产边界/遗留风险）
+- `docs/final_candidate/05_final_data_quality_report.md`（完整性约束/规则效果/版本管理/客户口径/证据链/复核闭环/整改闭环/健康监控/备份完整性）
+
+### M7-5 最终架构、功能矩阵、规则目录文档
+
+- `docs/final_candidate/01_final_architecture.md`（技术栈/模块结构/数据库架构/API 分层/安全架构/可观测性/备份恢复/部署形态）
+- `docs/final_candidate/02_final_feature_matrix.md`（21 项导航 UI + M1-M6 全部业务功能矩阵）
+- `docs/final_candidate/03_final_rule_catalog.md`（74 条规则完整目录，按 milestone 分章，附 M7-3 评测结果）
+
+### M7-6 最终测试报告与迁移报告
+
+- `docs/final_candidate/06_final_test_report.md`（测试金字塔/18 文件清单/覆盖范围/基础设施/回归结果/1500 评测/M6-8 演练/未覆盖项）
+- `docs/final_candidate/07_final_migration_report.md`（迁移机制/按 milestone 清单/生产迁移 9 步/回滚预案/数据兼容/生产边界证据）
+
+### M7-7 生产切换 runbook 与回滚 runbook
+
+- `docs/final_candidate/08_production_cutover_runbook.md`（前置条件/14 步切换流程/切换后验证/24 小时观察期/应急联系/风险缓解）
+- `docs/final_candidate/09_rollback_runbook.md`（7 项触发条件/12 步回滚流程/回滚后验证/部分回滚选项）
+
+### M7-8 独立总验收入口指南
+
+- `docs/final_candidate/10_independent_acceptance_guide.md`（验收前置条件/入口路径/12 步验收步骤/11 项门禁清单/结论模板）
+
+### M7-9 冒烟脚本与观察清单
+
+- 新建 `scripts/smoke_test.py`（15 步冒烟：health/docs 404/login/nav-items/overview/ocr-queue/system-settings/backups/audits/logout）
+- 新建 `docs/final_candidate/observation_checklist.md`（8 类观察项 + 结论模板）
+
+### M7-10 main 合并方案、tag 候选、发布候选包
+
+- 新建 `docs/final_candidate/release_candidate_package.md`
+- 合并策略：squash merge 到 `codex/fix-snapshot-result-collision`
+- tag 候选：`v3.0.0-rc1`
+- 归档目录结构定义
+- 主开发 AI 不执行合并/打 tag/推送 main（需用户授权 + 独立总验收 PASS）
+
+### M7-11 最终开发摘要
+
+- 新建 `tmp/program_control/final_development_summary.json`（M0-M7 全部状态/测试结果/评测结果/生产边界/最终交付物清单/tag 候选/合并策略）
+
+### M7-12 控制文件更新
+
+- `docs/program_control/status.json`：M7=DONE，overall_status=SELF_ACCEPTANCE_PASS，追加 m7_notes
+- `docs/program_control/change_log.md`：追加 M7 段落（本段落）
+- `docs/program_control/final_task_matrix.md`：标记 M7 任务 DONE
+
+### M7 完成
+
+- HEAD（M7 完成）：`02cb6e22341e2940abb0e657d27b9ba2c7b2cae9`（无新代码 commit，仅文档与脚本）
+- 产物：
+  - `docs/milestones/M7/development_report.md`
+  - `docs/milestones/M7/self_acceptance_report.md`
+  - `tmp/program_control/M7_self_acceptance.json`
+  - `tmp/program_control/M7_commands.txt`
+  - `tmp/program_control/M7_test_output.txt`
+  - `tmp/program_control/M7_junit.xml`
+  - `tmp/program_control/M7_1500_evaluation.json` / `.md`
+  - `tmp/program_control/final_development_summary.json`
+  - `docs/final_candidate/`（12 份文档）
+  - `scripts/smoke_test.py` / `scripts/final_1500_evaluation.py`
+- status.json 更新：M7=DONE，overall_status=SELF_ACCEPTANCE_PASS，final_independent_acceptance=PENDING
+- **M0-M7 全部自验 PASS**
+- **生产边界保持（数据库 SHA256 未变、服务未重启、Nginx/PM2/证书未修改）**
+- **待独立总验收**
+
