@@ -16,3 +16,13 @@ data/*.err.log
 data/*.out.log
 data/exports/*.xlsx
 output/
+
+# Phase1 formalization / local artifacts
+tmp/
+*.db
+*.db-wal
+*.db-shm
+
+# Local planning docs (not part of accepted product tree)
+政策巡检系统整体改造实施方案.md
+

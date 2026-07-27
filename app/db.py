@@ -355,6 +355,7 @@ class Database:
             conn.executescript(SCHEMA)
             self._migrate(conn)
             self._seed_agencies(conn)
+            self._migrate_phase1(conn)
 
     @staticmethod
     def _migrate(conn: sqlite3.Connection) -> None:
@@ -502,6 +503,16 @@ class Database:
             [(d, a, json.dumps(x, ensure_ascii=False), json.dumps(p, ensure_ascii=False)) for d, a, x, p in rows],
         )
 
+
+    @staticmethod
+    def _migrate_phase1(conn: sqlite3.Connection) -> None:
+        from app.migrations.phase1 import run_phase1_migration
+        from app.migrations.closeout import run_closeout_migration
+        from app.knowledge.organizations import seed_organizations
+        run_phase1_migration(conn)
+        run_closeout_migration(conn)
+        seed_organizations(conn)
+
     def create_job(
         self, districts: list[str], mode: str, safety: dict[str, Any], max_documents: int = 0,
         baseline_job_id: int | None = None,
@@ -548,6 +559,9 @@ class Database:
             return dict(row) if row else None
 
     def list_jobs(self, limit: int = 30) -> list[dict[str, Any]]:
+        """List jobs with live finding count semantics (formal vs total)."""
+        from app.finding_counts import compute_counts_from_rows
+
         with self.connect() as conn:
             rows = conn.execute(
                 """SELECT j.*,
@@ -555,7 +569,17 @@ class Database:
                 FROM scan_jobs j ORDER BY j.id DESC LIMIT ?""",
                 (limit,),
             ).fetchall()
-            return [dict(row) for row in rows]
+            result: list[dict[str, Any]] = []
+            for row in rows:
+                item = dict(row)
+                findings = conn.execute(
+                    "SELECT * FROM rule_findings WHERE job_id=? AND COALESCE(is_current,1)=1",
+                    (item["id"],),
+                ).fetchall()
+                live = compute_counts_from_rows([dict(r) for r in findings])
+                item.update(live)
+                result.append(item)
+            return result
 
     def active_job(self) -> dict[str, Any] | None:
         with self.connect() as conn:
