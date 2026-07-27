@@ -11,10 +11,10 @@
 |---:|---|---|---|---|
 | M0-1 | 创建总控文件（status/change_log/risk/task_matrix/V3 方案） | DONE | 2026-07-27 | docs/program_control/* |
 | M0-2 | 记录基线（分支/HEAD/数据库 SHA256/测试数） | DONE | 2026-07-27 | docs/milestones/M0/development_report.md |
-| M0-3 | 创建 `feat/full-policy-inspection-upgrade` 分支 | IN_PROGRESS |  |  |
-| M0-4 | 提交 .gitignore 改进，工作区干净 | PENDING |  |  |
-| M0-5 | 全量测试通过（≥184） | PENDING |  | tmp/program_control/M0_test_output.txt |
-| M0-6 | M0 自验报告 | PENDING |  | docs/milestones/M0/self_acceptance_report.md |
+| M0-3 | 创建 `feat/full-policy-inspection-upgrade` 分支 | DONE | 2026-07-27 | feat/full-policy-inspection-upgrade |
+| M0-4 | 提交 .gitignore 改进，工作区干净 | DONE | 2026-07-27 | commit e9c2fb2 |
+| M0-5 | 全量测试通过（≥184） | DONE | 2026-07-27 | tmp/program_control/M0_test_output.txt |
+| M0-6 | M0 自验报告 | DONE | 2026-07-27 | docs/milestones/M0/self_acceptance_report.md |
 
 ## M1 安全底座与可信 finding 验证
 

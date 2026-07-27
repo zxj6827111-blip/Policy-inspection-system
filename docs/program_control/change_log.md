@@ -43,3 +43,20 @@
 - 未 push、未合并 main、未重启生产服务
 - 自验 PASS
 
+### M0 完成
+
+- HEAD：`e9c2fb24fb46fb79f814b253e6b1482fc0a58b48`
+- 产物：`docs/milestones/M0/development_report.md`、`docs/milestones/M0/self_acceptance_report.md`、`tmp/program_control/M0_self_acceptance.json`、`tmp/program_control/M0_commands.txt`、`tmp/program_control/M0_test_output.txt`
+- status.json 更新：M0=DONE，M1=IN_PROGRESS
+- 自动进入 M1
+
+---
+
+## 2026-07-27 M1 启动
+
+### M1-1 基线记录
+
+- 分支：`feat/full-policy-inspection-upgrade`
+- 开始 HEAD：`e9c2fb24fb46fb79f814b253e6b1482fc0a58b48`
+- 生产数据库 SHA256：`13e6a8a412f69c13d149674a31076854c966f5b151e670fc9e22d0f53ab77af3`（未变）
+
