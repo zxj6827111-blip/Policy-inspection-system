@@ -280,7 +280,128 @@ app/
 ### M6-1 基线记录
 
 - 分支：`feat/full-policy-inspection-upgrade`
-- 开始 HEAD：M5 完成后提交点
-- 生产数据库 SHA256：未变
-- 范围：最终 UI / 口径 / 性能 / OCR 队列 / 数据库锁治理 / 日志监控 / 备份恢复回滚 / 生产副本演练
+- 开始 HEAD：`a089b81866e281b62d5749d41d59c2987f170c82`（M5 完成后）
+- 工作区数据库 SHA256：`5F35DE29396143B2F1EA5BE328505D37180A2AC2686898357D4BC309E76398F8`
+- 生产数据库 SHA256：未变（生产边界保持）
+- 范围：21 项最终 UI / API/UI/Excel 口径 / 性能 / OCR 队列 / 数据库锁治理 / 日志和监控 / 备份恢复回滚 / 生产副本全流程演练
+
+### M6-2 数据库迁移（app/migrations/m6.py）
+
+- 19 条关键索引补强热查询路径（含修复 M4 删除 UNIQUE 后 `policy_documents.url` 无索引的全表扫描）
+- 新增表：`ocr_queue`（status/priority/attempts/max_attempts/worker_id/ocr_confidence/pages_processed/total）
+- 新增表：`system_settings`（key/value/category/description/updated_at/updated_by）
+- 新增表：`db_health_snapshots`（snapshot_at/db_size/wal_size/page_count/freelist/journal_mode/table_counts_json/index_list_json）
+- 通过 `schema_migrations` 表记录 m6 版本，幂等
+
+### M6-3 db.py PRAGMA 调优
+
+- `connect()` 显式设置：`foreign_keys=ON` / `busy_timeout=30000` / `synchronous=NORMAL` / `cache_size=-65536`
+- 与 connect timeout=30s 等效，WAL 模式下取性能与安全平衡
+
+### M6-4 可观测性模块（app/observability/）
+
+- `configure_logging()`：幂等结构化日志，读取 `system_settings.log_level`
+- `get_request_logger(request)`：附加 request_id
+- `get_metrics(db)`：表计数 + 队列深度 + 系统设置 + 数据库健康
+- `deep_health_check(db)`：integrity_check + quick_check + foreign_key_check + WAL
+- `record_db_health_snapshot(db)`：写入 db_health_snapshots
+- `RequestContextMiddleware`：request_id + 请求日志 + X-Request-ID 响应头
+- `format_metrics_prometheus(data)`：Prometheus 文本格式
+
+### M6-5 OCR 队列模块（app/ocr_queue/）
+
+- `enqueue()`：幂等入队，已存在 pending/running 项返回现有 ID
+- `next_pending(worker_id)`：`UPDATE ... RETURNING *` 原子认领（最高优先级 + 最早请求）
+- `complete(item_id, ocr_status, ...)`：根据 ocr_status 决定终态（ok/skipped/not_needed → ok；failed → 重试或失败终止）
+- `cancel(item_id, reason)` / `list_queue(status, limit)` / `get_stats()`
+- 默认优先级与 max_attempts 由 `system_settings.ocr_default_priority/max_attempts` 控制
+
+### M6-6 备份/恢复模块（app/backup/）
+
+- `backup_database(db, dest_dir, label)`：SQLite 在线 backup API + 源库 WAL checkpoint TRUNCATE + 备份库 WAL checkpoint + SHA256 旁路文件 + 健康快照
+- `restore_database(backup_path, dest_db_path, dry_run)`：dry_run 仅校验；恢复前清理 -wal/-shm 残留
+- `validate_backup(path)`：integrity_check + quick_check + foreign_key_check + 关键表计数
+- `list_backups(backup_dir)` / `get_backup_info(path)`
+
+### M6-7 主程序端点（app/main.py）
+
+新增 M6 端点（受 system_settings 开关与角色保护）：
+- `GET /metrics`（登录；Accept: text/plain 返回 Prometheus 文本）
+- `GET /health/deep`（公开；readiness/liveness 探针；unhealthy 返回 503）
+- `GET /api/ocr-queue`（登录；status 过滤）
+- `POST /api/ocr-queue/enqueue`（jobs:write）
+- `POST /api/ocr-queue/{item_id}/complete`（jobs:write）
+- `POST /api/ocr-queue/{item_id}/cancel`（jobs:write）
+- `GET /api/system-settings`（登录）
+- `PUT /api/system-settings/{key}`（admin）
+- `GET /api/backups`（登录）
+- `POST /api/backups`（jobs:write；触发新备份）
+- `POST /api/backups/{filename}/restore`（admin；dry_run 可选）
+- `GET /api/overview`（登录；全局聚合：最近任务 + 队列 + 配置 + 健康）
+- `GET /api/nav-items`（登录；21 项导航按角色过滤）
+
+启动时集成 `RequestContextMiddleware` + `configure_logging()`（均 try/except 不阻断启动）。
+
+### M6-8 21 项导航 UI（app/templates/index.html + static）
+
+- 侧栏 21 项分组（按角色过滤）：主页 2 / 问题与线索 4 / 已排除 2 / 数据质量 3 / 文档与解读 3 / 整改 2 / 系统 5
+- 旧的手动 mode/baseline_job_id 表单移除
+- 17 站点改为通过 /api/scan-sites 动态加载
+- 静态兜底首屏：登录后由 /api/nav-items 替换
+
+### M6-9 Excel 导出口径补齐（app/exporter.py）
+
+- 新增 8 个 sheet（插入在"元数据问题"与"扫描运行记录"之间）：
+  1. PDF 与附件问题（rule_findings category IN pdf_integrity/pdf_compare/attachment）
+  2. 异常归档问题（archive_findings JOIN policy_documents）
+  3. 重复数据问题（duplicate_pairs JOIN 两份 policy_documents）
+  4. 双渠道对账差异（reconciliation_matches JOIN 市级/区级 policy_documents）
+  5. 阅办联动问题（reading_linkage_checks WHERE rule_code != ''）
+  6. 媒体资源问题（media_checks WHERE rule_code != ''）
+  7. 政策解读问题（interpretation_checks JOIN policy_interpretations JOIN policy_documents）
+  8. 整改任务跟踪（rectification_tasks JOIN policy_documents）
+- 所有新 sheet 使用 `enrich_finding_row` + `is_customer_formal_problem` 统一客户正式口径
+- M4/M5 表缺失时 `try/except sqlite3.OperationalError` 优雅降级为空 sheet
+- 同步更新 `tests/test_database_export.py` 的 sheetnames 断言
+
+### M6-10 测试修复（tests/test_api_review.py）
+
+- `test_index_exposes_district_and_sixteen_municipal_sites` 旧断言检查 `data-nav="site" == 17`
+- M6-1 UI 重写后改为动态 /api/scan-sites，HTML 中已无 data-nav="site"
+- 更新断言为：检查 nav-sidebar/nav-items/page-overview/page-site/batch-start/task-center-btn/site-scan-btn/site-scan-section/ov-grid 骨架 + /api/scan-sites 返回 17 站点
+
+### M6-11 生产副本全流程演练（scripts/rehearsal_backup_restore.py）
+
+扩展演练脚本至 10 步骤：
+1. 拷贝源库到 pre_rehearsal.db（仅读取源库）
+2. 对 pre_rehearsal 执行备份
+3. 校验备份（integrity/quick_check/fk_check/表计数）
+4. 从备份恢复到 post_restore.db（不触碰源库）
+5. 校验 post_restore
+6. 比对 pre_rehearsal 与 post_restore 表行数（49 表全一致）
+7. M3-M5 规则目录完整性（74 规则，14 前缀全在）
+8. M3-M5 规则表查询演练（8 张表）
+9. Excel 导出演练（37904 bytes）
+10. M6 端点冒烟（/metrics /health/deep /api/ocr-queue /api/system-settings /api/backups 全 200）
+
+overall: PASS（10/10）
+
+### M6-12 全量回归
+
+- 347 passed, 0 failed（5 分 15 秒）
+- 测试基线对比：M5 完成时 347 passed，M6 完成时仍 347 passed，无回归
+- 演练步骤：10/10 PASS
+
+### M6 完成
+
+- HEAD（M6 完成）：`358595432dfa8ac45313ba986feba72653c29232`
+- 16 files changed, 3403 insertions(+), 108 deletions(-)
+- 产物：
+  - `docs/milestones/M6/development_report.md`
+  - `docs/milestones/M6/self_acceptance_report.md`
+  - `tmp/program_control/M6_self_acceptance.json`
+  - `tmp/program_control/M6_commands.txt`
+  - `tmp/program_control/M6_test_output.txt`
+- status.json 更新：M6=DONE，M7=IN_PROGRESS
+- 自动进入 M7
 

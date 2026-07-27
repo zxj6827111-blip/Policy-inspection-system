@@ -1,7 +1,7 @@
 {
   "project": "Policy-inspection-system",
   "plan_version": "V3.0",
-  "current_milestone": "M6",
+  "current_milestone": "M7",
   "overall_status": "IN_PROGRESS",
   "milestones": {
     "M0": "DONE",
@@ -10,8 +10,8 @@
     "M3": "DONE",
     "M4": "DONE",
     "M5": "DONE",
-    "M6": "IN_PROGRESS",
-    "M7": "PENDING"
+    "M6": "DONE",
+    "M7": "IN_PROGRESS"
   },
   "baseline": {
     "production_branch": "codex/fix-snapshot-result-collision",
@@ -68,9 +68,21 @@
     "M5": {
       "branch": "feat/full-policy-inspection-upgrade",
       "head_before": "35d51f4",
+      "head_after": "a089b81",
       "self_acceptance": "PASS",
       "tests_passed": 47,
       "full_regression_passed": 347,
+      "completed_date": "2026-07-27"
+    },
+    "M6": {
+      "branch": "feat/full-policy-inspection-upgrade",
+      "head_before": "a089b81866e281b62d5749d41d59c2987f170c82",
+      "head_after": "358595432dfa8ac45313ba986feba72653c29232",
+      "workspace_db_sha256": "5F35DE29396143B2F1EA5BE328505D37180A2AC2686898357D4BC309E76398F8",
+      "self_acceptance": "PASS",
+      "tests_passed": 347,
+      "full_regression_passed": 347,
+      "rehearsal_steps_passed": 10,
       "completed_date": "2026-07-27"
     }
   },
@@ -85,5 +97,5 @@
   "final_independent_acceptance": "PENDING",
   "last_updated": "2026-07-27",
   "last_updated_by": "primary_dev_ai",
-  "m5_notes": "M5 PASS: reading linkage (READ-001~005), media (MEDIA-001~006), interpretation (INTERP-001~008), rectification (RECT-001~007); 26 rules with version 1.0.0; 47 M5 tests + 347 full regression passed; production boundary held."
+  "m6_notes": "M6 PASS: 21-item nav UI + role filter; Excel 8 new sheets (PDF/attachments, archive, duplicates, reconciliation, reading linkage, media, interpretation, rectification); 19 critical indexes; OCR queue (enqueue/next_pending/complete/cancel with retry + priority); PRAGMA tuning (busy_timeout=30s, synchronous=NORMAL, cache_size=64MB); observability (structured logging, metrics, deep health, request middleware, health snapshots); backup/restore (SQLite online backup API + SHA256 + dry_run + validate); 10-step production-replica full-flow rehearsal ALL PASS. 347 tests + 10 rehearsal steps PASS. Production boundary held."
 }
