@@ -34,38 +34,38 @@
 
 | 编号 | 任务 | 状态 | 完成日期 | 产物 |
 |---:|---|---|---|---|
-| M2-1 | 批量复核 API/UI | PENDING |  |  |
-| M2-2 | 双人复核与仲裁 | PENDING |  |  |
-| M2-3 | 结构化排除原因 | PENDING |  |  |
-| M2-4 | 规则效果中心 | PENDING |  |  |
-| M2-5 | 1,000 条样本抽取与评测 | PENDING |  |  |
-| M2-6 | 未达标规则降级 | PENDING |  |  |
-| M2-7 | M2 自验报告 | PENDING |  | docs/milestones/M2/self_acceptance_report.md |
+| M2-1 | 批量复核 API/UI | DONE | 2026-07-27 | app/review_batch.py + /api/review/batch |
+| M2-2 | 双人复核与仲裁 | DONE | 2026-07-27 | app/review_dual.py + 仲裁 API |
+| M2-3 | 结构化排除原因 | DONE | 2026-07-27 | reason_code 字段 |
+| M2-4 | 规则效果中心 | DONE | 2026-07-27 | app/rule_effect.py + /api/rule-effect |
+| M2-5 | 1,000 条样本抽取与评测 | DONE | 2026-07-27 | scripts/generate_m2_samples.py |
+| M2-6 | 未达标规则降级 | DONE | 2026-07-27 | app/rule_degradation.py |
+| M2-7 | M2 自验报告 | DONE | 2026-07-27 | docs/milestones/M2/self_acceptance_report.md |
 
 ## M3 PDF/OCR 与三方比对
 
 | 编号 | 任务 | 状态 | 完成日期 | 产物 |
 |---:|---|---|---|---|
-| M3-1 | PDF 文本层提取 | PENDING |  |  |
-| M3-2 | OCR 兜底 | PENDING |  |  |
-| M3-3 | 损坏/加密/空白识别 | PENDING |  |  |
-| M3-4 | 标题/文号/机构/日期提取 | PENDING |  |  |
-| M3-5 | 页面/正文/PDF 三方比对 | PENDING |  |  |
-| M3-6 | 页码与坐标证据 | PENDING |  |  |
-| M3-7 | 文号与日期语义治理 | PENDING |  |  |
-| M3-8 | M3 自验报告 | PENDING |  | docs/milestones/M3/self_acceptance_report.md |
+| M3-1 | PDF 文本层提取 | DONE | 2026-07-27 | app/pdf/__init__.py |
+| M3-2 | OCR 兜底 | DONE | 2026-07-27 | app/ocr/__init__.py |
+| M3-3 | 损坏/加密/空白识别 | DONE | 2026-07-27 | detect_pdf_integrity |
+| M3-4 | 标题/文号/机构/日期提取 | DONE | 2026-07-27 | app/pdf/semantics.py |
+| M3-5 | 页面/正文/PDF 三方比对 | DONE | 2026-07-27 | app/pdf/compare.py |
+| M3-6 | 页码与坐标证据 | DONE | 2026-07-27 | bbox_json in pdf_extractions |
+| M3-7 | 文号与日期语义治理 | DONE | 2026-07-27 | app/pdf/date_semantics.py |
+| M3-8 | M3 自验报告 | DONE | 2026-07-27 | docs/milestones/M3/self_acceptance_report.md |
 
 ## M4 异常归档、重复与双渠道对账
 
 | 编号 | 任务 | 状态 | 完成日期 | 产物 |
 |---:|---|---|---|---|
-| M4-1 | 异常归档数据模型与判定流程 | PENDING |  |  |
-| M4-2 | 连续两轮确认逻辑 | PENDING |  |  |
-| M4-3 | 栏目迁移识别 | PENDING |  |  |
-| M4-4 | 重复数据指纹与分类 | PENDING |  |  |
-| M4-5 | 文档身份指纹 | PENDING |  |  |
-| M4-6 | 市级/区级双渠道匹配与差异对账 | PENDING |  |  |
-| M4-7 | M4 自验报告 | PENDING |  | docs/milestones/M4/self_acceptance_report.md |
+| M4-1 | 异常归档数据模型与判定流程 | DONE | 2026-07-27 | app/archive/__init__.py |
+| M4-2 | 连续两轮确认逻辑 | DONE | 2026-07-27 | ARCH-001 with consecutive_missing>=2 |
+| M4-3 | 栏目迁移识别 | DONE | 2026-07-27 | ARCH-006 + migration_target_url |
+| M4-4 | 重复数据指纹与分类 | DONE | 2026-07-27 | app/duplicates/__init__.py |
+| M4-5 | 文档身份指纹 | DONE | 2026-07-27 | document_fingerprints 表 |
+| M4-6 | 市级/区级双渠道匹配与差异对账 | DONE | 2026-07-27 | app/reconciliation/__init__.py |
+| M4-7 | M4 自验报告 | DONE | 2026-07-27 | docs/milestones/M4/self_acceptance_report.md |
 
 ## M5 阅办联动、政策解读与整改闭环
 

@@ -149,6 +149,62 @@ app/
 ### M4-1 基线记录
 
 - 分支：`feat/full-policy-inspection-upgrade`
-- 开始 HEAD：（待 M3 提交后记录）
+- 开始 HEAD：`79df3af614cf71db4db0800e4a6ed3205cccf891`（M3 完成后）
+- 生产数据库 SHA256：`13e6a8a412f69c13d149674a31076854c966f5b151e670fc9e22d0f53ab77af3`（未变）
+
+### M4-2 数据库迁移
+
+- 新增 5 张表：`archive_observations`、`archive_findings`、`document_fingerprints`、`duplicate_pairs`、`reconciliation_matches`
+- `policy_documents` 新增 8 列：`archive_status`、`is_archived`、`normal_archive`、`archive_reason`、`migration_target_url`、`cross_channel_document_id`、`fingerprint_hash`、`channel_level`
+- 种子 M4 规则版本：ARCH-001~006、DUP-001~008、RECON-001~010 (v1.0.0)
+- **关键：去除 `policy_documents.url` 的 UNIQUE 约束**。SQLite auto-index 不能用 `DROP INDEX` 删除，采用 SQLite 官方推荐的表重建方案：检测 UNIQUE → 捕获手动索引定义 → 创建新表 → 拷贝数据 → drop 旧表 → rename → 重建索引。幂等。
+
+### M4-3 模块结构
+
+```
+app/
+├── migrations/m4.py
+├── archive/__init__.py
+├── duplicates/__init__.py
+└── reconciliation/__init__.py
+```
+
+### M4-4 API 端点
+
+12 个 M4 端点加入 `app/main.py`（全部带 auth/CSRF/audit）：
+- archive/observations、archive/evaluate、archive/findings（含 exclude）
+- fingerprints（compute / get）
+- duplicates/detect、duplicates（含 exclude）
+- reconciliation/reconcile、reconcile-all、matches
+
+### M4-5 测试
+
+- `tests/test_m4_archive_duplicates_recon.py` 45 用例
+- 修复 DUP-001 / 排除测试中 UNIQUE 约束冲突（表重建方案）
+- 全部通过
+
+### M4 完成
+
+- M4 专项：45 passed
+- 全量回归：300 passed（M3 完成时 255，M4 新增 45）
+- HEAD（M4 完成）：`ece71332aa9ef09c8a22260fbd7165683d199a57`
+- 产物：
+  - `docs/milestones/M4/development_report.md`
+  - `docs/milestones/M4/self_acceptance_report.md`
+  - `tmp/program_control/M4_self_acceptance.json`
+  - `tmp/program_control/M4_commands.txt`
+  - `tmp/program_control/M4_test_output.txt`
+- status.json 更新：M4=DONE，M5=IN_PROGRESS
+- 自动进入 M5
+
+---
+
+## 2026-07-27 M5 启动
+
+### M5-1 基线记录
+
+- 分支：`feat/full-policy-inspection-upgrade`
+- 开始 HEAD：`ece71332aa9ef09c8a22260fbd7165683d199a57`（M4 完成后）
 - 生产数据库 SHA256：未变
+- 范围：阅办联动深度检查 / 多类型政策解读 / 整改、复查、销号 / 超期和复发
 

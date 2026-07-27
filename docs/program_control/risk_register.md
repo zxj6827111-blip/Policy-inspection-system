@@ -47,14 +47,21 @@
 - 影响：M3 开发受阻
 - 可能性：中
 - 缓解：使用纯 Python PDF 库（pdfminer.six / pypdf）+ 可选 OCR（rapidocr-onnxruntime / paddleocr）；测试用 fixture；不在 M3 启动时强制安装重型依赖
-- 当前状态：OPEN（M3 进入时再评估）
+- 当前状态：MITIGATED（M3 已完成，Tesseract v5.5.0 已安装；测试用临时 PDF fixture 覆盖）
 
 ## R-007 1,000 / 1,500 条样本缺乏真实标注
 
 - 影响：M2/M7 规则效果中心无法生成真实 precision
 - 可能性：高
 - 缓解：使用历史 findings + 模拟标注（基于规则版本与人工状态推断）作为代理样本；在样本集中明确标注「代理标注」与「真实人工标注」比例；M7 最终验收时若仍无真实标注，需升级到用户决策
-- 当前状态：OPEN（M2 进入时再评估）
+- 当前状态：MITIGATED（M2 已使用脚本生成 1,000 条代理样本；M7 最终评测时需用户提供真实标注子集以校准）
+
+## R-011 SQLite UNIQUE 约束在 M4 无法直接去除
+
+- 影响：M4 DUP-001 要求允许同 URL 多次入库，但 `policy_documents.url` 原始 schema 含 `UNIQUE` 约束，SQLite auto-index 不能用 `DROP INDEX` 删除
+- 可能性：已发生
+- 缓解：采用 SQLite 官方推荐的表重建方案：检测 UNIQUE → 捕获手动索引 → 重建新表（去 UNIQUE）→ 拷贝数据 → drop 旧表 → rename → 重建索引。幂等。
+- 当前状态：MITIGATED（M4 已完成；表重建方案在 `app/migrations/m4.py` `_drop_url_unique_constraint` 中实现并通过 45 项测试）
 
 ## R-008 浏览器多角色验证在无浏览器环境无法执行
 
