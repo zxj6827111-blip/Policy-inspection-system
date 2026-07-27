@@ -37,6 +37,15 @@ from app.snapshot_scan import (
 
 
 class JobManager:
+    def _knowledge_for_district(self, district: str):
+        try:
+            from app.knowledge.organizations import load_knowledge
+            with self.db.connect() as conn:
+                rows = load_knowledge(conn, district)
+                return rows or load_knowledge(conn)
+        except Exception:
+            return []
+
     def __init__(self, db: Database):
         self.db = db
         self.repo = Repository(db)
@@ -1184,7 +1193,7 @@ class JobManager:
         record.header_detected = inspection.header_detected
         record.missing_metadata_fields = self._all_missing_fields(inspection)
         agency_rows = self.db.agency_rules(target.district)
-        findings = evaluate_record(record, agency_rows, calendar)
+        findings = evaluate_record(record, agency_rows, calendar, knowledge=self._knowledge_for_district(target.district))
         document_id = self.repo.save_record(job_id, record, findings)
         detail_status = "checked_incomplete" if record.missing_metadata_fields else "checked_complete"
         reason = (
@@ -1361,7 +1370,7 @@ class JobManager:
             record.header_detected = inspection.header_detected
             record.missing_metadata_fields = self._all_missing_fields(inspection)
             agency_rows = self.db.agency_rules(target.district)
-            findings = evaluate_record(record, agency_rows, calendar)
+            findings = evaluate_record(record, agency_rows, calendar, knowledge=self._knowledge_for_district(target.district))
             document_id = self.repo.save_record(job_id, record, findings)
             detail_status = "checked_incomplete" if record.missing_metadata_fields else "checked_complete"
             reason = (
@@ -1432,7 +1441,7 @@ class JobManager:
                 record.source_site = record.source_site or target.label
                 record.header_detected = inspection.header_detected
                 record.missing_metadata_fields = self._all_missing_fields(inspection)
-                findings = evaluate_record(record, self.db.agency_rules(target.district), calendar)
+                findings = evaluate_record(record, self.db.agency_rules(target.district), calendar, knowledge=self._knowledge_for_district(target.district))
                 document_id = self.repo.save_record(job_id, record, findings)
                 self.repo.record_job_document(
                     job_id, document_id, target.label, int(exception["page_number"]),

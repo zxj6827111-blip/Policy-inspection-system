@@ -49,13 +49,227 @@ class Repository:
                 "INSERT OR REPLACE INTO document_snapshots(job_id,document_id,captured_at,raw_json) VALUES(?,?,?,?)",
                 (job_id, document_id, now, json.dumps(raw, ensure_ascii=False)),
             )
-            conn.execute("DELETE FROM rule_findings WHERE job_id=? AND document_id=?", (job_id, document_id))
-            conn.executemany(
-                """INSERT INTO rule_findings(job_id,document_id,rule_code,category,severity,review_status,detail,
-                page_value,body_value,evidence,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
-                [(job_id, document_id, f.rule_code, f.category, f.severity, f.status, f.detail,
-                  f.page_value, f.body_value, f.evidence, now) for f in findings],
-            )
+            # Lineage-preserving rescan: never delete finding_reviews / review_decisions.
+            # Old current findings are marked superseded; human conclusions inherit by stable_key.
+            import json as _json
+            from app.findings_model import legacy_review_status, map_legacy_status_to_machine
+            from app.finding_counts import compute_counts_from_rows
+
+            prior_rows = [
+                dict(row)
+                for row in conn.execute(
+                    """SELECT * FROM rule_findings
+                    WHERE job_id=? AND document_id=? AND COALESCE(is_current, 1)=1""",
+                    (job_id, document_id),
+                ).fetchall()
+            ]
+            prior_by_rule = {row["rule_code"]: row for row in prior_rows}
+            # Also inherit from any historical current-or-not human decisions on same stable key
+            inherited_human: dict[str, dict] = {}
+            for row in conn.execute(
+                """SELECT rule_code, human_status, review_status, rule_version, id
+                FROM rule_findings
+                WHERE job_id=? AND document_id=? AND human_status IS NOT NULL
+                  AND human_status != '' AND human_status != 'unreviewed'
+                ORDER BY id DESC""",
+                (job_id, document_id),
+            ).fetchall():
+                code = row["rule_code"]
+                if code not in inherited_human:
+                    inherited_human[code] = dict(row)
+
+            new_ids_by_rule: dict[str, int] = {}
+            for f in findings:
+                machine = getattr(f, "machine_status", None) or f.status
+                if machine in {"pending", "confirmed", "dismissed"}:
+                    machine = map_legacy_status_to_machine(machine, f.rule_code)
+                human = getattr(f, "human_status", None) or "unreviewed"
+                if f.rule_code in inherited_human:
+                    prev = inherited_human[f.rule_code]
+                    if prev.get("human_status") and prev["human_status"] != "unreviewed":
+                        human = prev["human_status"]
+                    elif prev.get("review_status") in {"confirmed", "dismissed"}:
+                        human = (
+                            "human_confirmed"
+                            if prev["review_status"] == "confirmed"
+                            else "human_dismissed"
+                        )
+                elif f.rule_code in prior_by_rule:
+                    prev = prior_by_rule[f.rule_code]
+                    if prev.get("human_status") and prev["human_status"] != "unreviewed":
+                        human = prev["human_status"]
+                    elif prev.get("review_status") in {"confirmed", "dismissed"}:
+                        human = (
+                            "human_confirmed"
+                            if prev["review_status"] == "confirmed"
+                            else "human_dismissed"
+                        )
+                allow = 1 if getattr(f, "allow_customer_output", False) else 0
+                if f.rule_code.startswith("AGENCY-") or f.rule_code.startswith("ORG-"):
+                    allow = 0
+                elif f.rule_code in {"META-001", "DOC-001", "DOC-002", "DATE-001", "DATE-002"}:
+                    allow = 1
+                    if machine in {"pending", "confirmed"} or machine == "confirmed_by_rule":
+                        machine = (
+                            "confirmed_by_rule"
+                            if f.status in {"confirmed", "confirmed_by_rule"}
+                            or machine == "confirmed_by_rule"
+                            else machine
+                        )
+                version = getattr(f, "rule_version", None) or "1.0.0"
+                confidence = float(getattr(f, "confidence", 0) or 0)
+                if human == "unreviewed" and f.status in {"pending", "confirmed", "dismissed"}:
+                    review_status = f.status
+                else:
+                    review_status = legacy_review_status(machine, human)
+                stable_key = f"{document_id}:{f.rule_code}"
+                lineage_key = stable_key
+                cur = conn.execute(
+                    """INSERT INTO rule_findings(
+                        job_id,document_id,rule_code,category,severity,review_status,detail,
+                        page_value,body_value,evidence,created_at,
+                        machine_status,human_status,rule_version,confidence,allow_customer_output,evidence_json,
+                        is_current,superseded_by,lineage_key,stable_key,superseded_at
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,?,?,NULL)""",
+                    (
+                        job_id,
+                        document_id,
+                        f.rule_code,
+                        f.category,
+                        f.severity,
+                        review_status,
+                        f.detail,
+                        f.page_value,
+                        f.body_value,
+                        f.evidence,
+                        now,
+                        machine,
+                        human,
+                        version,
+                        confidence,
+                        allow,
+                        _json.dumps(getattr(f, "evidence_fields", None) or [], ensure_ascii=False),
+                        1,
+                        lineage_key,
+                        stable_key,
+                    ),
+                )
+                finding_id = int(cur.lastrowid)
+                new_ids_by_rule[f.rule_code] = finding_id
+                fields = list(getattr(f, "evidence_fields", None) or [])
+                if not fields:
+                    for field_name, raw, source in (
+                        ("page_value", f.page_value, "page"),
+                        ("body_value", f.body_value, "body"),
+                        ("evidence", f.evidence, "mixed"),
+                        ("detail", f.detail, "system"),
+                    ):
+                        if raw:
+                            fields.append(
+                                {
+                                    "field_name": field_name,
+                                    "raw_value": raw,
+                                    "source_type": source,
+                                    "excerpt": str(raw)[:500],
+                                }
+                            )
+                for item in fields:
+                    conn.execute(
+                        """INSERT INTO finding_evidence(
+                            finding_id, evidence_type, source_type, source_url, field_name,
+                            raw_value, normalized_value, excerpt, confidence, created_at
+                        ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                        (
+                            finding_id,
+                            item.get("evidence_type", "field"),
+                            item.get("source_type", "page"),
+                            item.get("source_url", record.url),
+                            item.get("field_name", ""),
+                            item.get("raw_value", ""),
+                            item.get("normalized_value", item.get("raw_value", "")),
+                            item.get("excerpt", str(item.get("raw_value", ""))[:500]),
+                            float(item.get("confidence", confidence) or confidence),
+                            now,
+                        ),
+                    )
+
+            # Supersede previous current findings for this job/document (do not delete reviews).
+            for old in prior_rows:
+                new_id = new_ids_by_rule.get(old["rule_code"])
+                conn.execute(
+                    """UPDATE rule_findings
+                    SET is_current=0, superseded_by=?, superseded_at=?
+                    WHERE id=?""",
+                    (new_id, now, old["id"]),
+                )
+
+            # Point review_decisions / keep finding_reviews on old ids (immutable).
+            # Optionally mirror latest decision onto new finding for API convenience without deleting history.
+            for rule_code, new_id in new_ids_by_rule.items():
+                old = prior_by_rule.get(rule_code) or inherited_human.get(rule_code)
+                if not old:
+                    continue
+                old_id = old.get("id")
+                if not old_id:
+                    continue
+                decision = conn.execute(
+                    "SELECT * FROM review_decisions WHERE finding_id=?",
+                    (old_id,),
+                ).fetchone()
+                if decision:
+                    conn.execute(
+                        """INSERT INTO review_decisions(finding_id, decision, note, reviewed_at)
+                        VALUES(?,?,?,?)
+                        ON CONFLICT(finding_id) DO UPDATE SET
+                          decision=excluded.decision,
+                          note=excluded.note,
+                          reviewed_at=excluded.reviewed_at""",
+                        (new_id, decision["decision"], decision["note"], decision["reviewed_at"]),
+                    )
+                # Do NOT copy finding_reviews rows; they remain attached to original finding_id.
+                # Link via lineage: consumers join by stable_key / superseded_by chain.
+
+            # Refresh denormalized job counters for this job (current findings only).
+            current_rows = conn.execute(
+                "SELECT * FROM rule_findings WHERE job_id=? AND COALESCE(is_current,1)=1",
+                (job_id,),
+            ).fetchall()
+            counts = compute_counts_from_rows([dict(r) for r in current_rows])
+            # Only update count columns if they exist (closeout migration).
+            cols = {r["name"] for r in conn.execute("PRAGMA table_info(scan_jobs)")}
+            if "formal_finding_count" in cols:
+                conn.execute(
+                    """UPDATE scan_jobs SET
+                        finding_count=?,
+                        finding_total_count=?,
+                        formal_finding_count=?,
+                        suspected_count=?,
+                        hint_count=?,
+                        insufficient_data_count=?,
+                        collection_error_count=?,
+                        auto_excluded_count=?,
+                        human_dismissed_count=?,
+                        human_confirmed_count=?
+                    WHERE id=?""",
+                    (
+                        counts["finding_count"],
+                        counts["finding_total_count"],
+                        counts["formal_finding_count"],
+                        counts["suspected_count"],
+                        counts["hint_count"],
+                        counts["insufficient_data_count"],
+                        counts["collection_error_count"],
+                        counts["auto_excluded_count"],
+                        counts["human_dismissed_count"],
+                        counts["human_confirmed_count"],
+                        job_id,
+                    ),
+                )
+            else:
+                conn.execute(
+                    "UPDATE scan_jobs SET finding_count=? WHERE id=?",
+                    (counts["finding_count"], job_id),
+                )
             return document_id
 
     def record_scan_item(
@@ -232,29 +446,40 @@ class Repository:
     def copy_baseline_findings(self, baseline_job_id: int, job_id: int, document_id: int) -> list[Finding]:
         with self.db.connect() as conn:
             rows = conn.execute(
-                """SELECT rule_code,category,severity,review_status,detail,page_value,body_value,evidence
-                FROM rule_findings WHERE job_id=? AND document_id=?""",
+                """SELECT * FROM rule_findings WHERE job_id=? AND document_id=?""",
                 (baseline_job_id, document_id),
             ).fetchall()
             now = utc_now()
-            conn.executemany(
-                """INSERT INTO rule_findings(job_id,document_id,rule_code,category,severity,review_status,detail,
-                page_value,body_value,evidence,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
-                [
+            findings: list[Finding] = []
+            for row in rows:
+                keys = set(row.keys())
+                machine = row["machine_status"] if "machine_status" in keys and row["machine_status"] else row["review_status"]
+                human = row["human_status"] if "human_status" in keys and row["human_status"] else "unreviewed"
+                version = row["rule_version"] if "rule_version" in keys and row["rule_version"] else "1.0.0"
+                confidence = float(row["confidence"]) if "confidence" in keys and row["confidence"] is not None else 0.0
+                allow = int(row["allow_customer_output"]) if "allow_customer_output" in keys else 0
+                evidence_json = row["evidence_json"] if "evidence_json" in keys and row["evidence_json"] else "[]"
+                conn.execute(
+                    """INSERT INTO rule_findings(
+                        job_id,document_id,rule_code,category,severity,review_status,detail,
+                        page_value,body_value,evidence,created_at,
+                        machine_status,human_status,rule_version,confidence,allow_customer_output,evidence_json
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (
                         job_id, document_id, row["rule_code"], row["category"], row["severity"],
                         row["review_status"], row["detail"], row["page_value"], row["body_value"],
-                        row["evidence"], now,
+                        row["evidence"], now, machine, human, version, confidence, allow, evidence_json,
+                    ),
+                )
+                findings.append(
+                    Finding(
+                        row["rule_code"], row["category"], row["severity"], row["review_status"], row["detail"],
+                        row["page_value"], row["body_value"], row["evidence"],
+                        machine_status=machine, human_status=human, rule_version=version,
+                        confidence=confidence, allow_customer_output=bool(allow),
                     )
-                    for row in rows
-                ],
-            )
-        return [
-            Finding(
-                row["rule_code"], row["category"], row["severity"], row["review_status"], row["detail"],
-                row["page_value"], row["body_value"], row["evidence"],
-            ) for row in rows
-        ]
+                )
+            return findings
 
     def copy_baseline_link_checks(self, baseline_job_id: int, job_id: int, document_id: int) -> None:
         """沿用未变化文件的外链检查结论，保证增量导出仍能呈现既有外链问题。"""
