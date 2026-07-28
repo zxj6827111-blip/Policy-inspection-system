@@ -223,6 +223,19 @@ def _add_columns(conn: sqlite3.Connection, table: str, columns: dict[str, str]) 
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
 
 
+def _policy_documents_url_has_unique(conn: sqlite3.Connection) -> bool:
+    """Return True if policy_documents.url still has a UNIQUE constraint."""
+    try:
+        create_sql_row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='policy_documents'"
+        ).fetchone()
+        if create_sql_row and create_sql_row["sql"]:
+            return "url TEXT NOT NULL UNIQUE" in create_sql_row["sql"]
+    except sqlite3.Error:
+        pass
+    return False
+
+
 def _drop_url_unique_constraint(conn: sqlite3.Connection) -> None:
     """Drop the UNIQUE constraint on policy_documents.url.
 
@@ -235,51 +248,31 @@ def _drop_url_unique_constraint(conn: sqlite3.Connection) -> None:
     via `DROP INDEX`; the only way to remove the UNIQUE constraint is to
     recreate the table without it.
 
-    This function performs a safe table rebuild:
-    1. Detect whether the UNIQUE constraint on `url` is still present.
-    2. If present: create `policy_documents_new` without UNIQUE, copy data,
-       drop the old table, rename the new one, and re-create indexes.
-
-    Idempotent: if the constraint is already gone, this is a no-op.
+    Important: many tables FK-reference policy_documents(id). With
+    PRAGMA foreign_keys=ON, DROP TABLE policy_documents fails and the UNIQUE
+    constraint remains. A previous bug swallowed that error and still marked
+    m4 applied, so every startup re-ran a multi-minute full-table copy.
+    We temporarily disable foreign_keys for the rebuild only.
     """
-    # Detect UNIQUE auto-index on `url` by inspecting the table's CREATE SQL
-    # and the sqlite_master entries. Auto-indexes have sql IS NULL and origin
-    # 'u' (unique-constraint) in pragma index_list.
-    has_unique = False
-    try:
-        create_sql_row = conn.execute(
-            "SELECT sql FROM sqlite_master WHERE type='table' AND name='policy_documents'"
-        ).fetchone()
-        if create_sql_row and create_sql_row["sql"]:
-            # Naive but reliable for our schema: look for `url TEXT NOT NULL UNIQUE`.
-            if "url TEXT NOT NULL UNIQUE" in create_sql_row["sql"]:
-                has_unique = True
-    except sqlite3.Error:
-        pass
+    if not _policy_documents_url_has_unique(conn):
+        return
 
-    if not has_unique:
-        return  # Already migrated.
-
-    # Snapshot all columns currently on the table (base + M3 + phase1 + ...).
     cols = [r["name"] for r in conn.execute("PRAGMA table_info(policy_documents)")]
     if not cols:
         return
 
-    # Build the new table definition WITHOUT the UNIQUE constraint on `url`.
-    # Use the column definitions from the existing table by reading each
-    # column's type and constraints from PRAGMA table_info + the original SQL.
-    # SQLite's recommended approach for removing a UNIQUE constraint is to
-    # rebuild the table. We rebuild using the columns/types we know about.
     col_defs: list[str] = []
     for col in conn.execute("PRAGMA table_info(policy_documents)").fetchall():
         name = col["name"]
         typ = col["type"] or ""
-        # Determine column constraints heuristically from the original SQL.
-        # For `url`, replace `UNIQUE` with nothing; keep NOT NULL.
-        notnull = " NOT NULL" if col["notnull"] else ""
+        notnull = " NOT NULL" if col["notnull"] and not col["pk"] else ""
         dflt = f" DEFAULT {col['dflt_value']}" if col["dflt_value"] is not None else ""
         pk = " PRIMARY KEY" if col["pk"] else ""
-        col_defs.append(f'"{name}" {typ}{pk}{notnull}{dflt}')
+        # Keep AUTOINCREMENT on integer primary key when present historically.
+        if col["pk"] and (typ or "").upper() == "INTEGER":
+            col_defs.append(f'"{name}" INTEGER PRIMARY KEY')
+        else:
+            col_defs.append(f'"{name}" {typ}{pk}{notnull}{dflt}')
 
     new_sql = (
         "CREATE TABLE policy_documents_new (\n  "
@@ -287,10 +280,6 @@ def _drop_url_unique_constraint(conn: sqlite3.Connection) -> None:
         + "\n)"
     )
 
-    # Capture manually-defined indexes BEFORE dropping the old table.
-    # Auto-indexes (sqlite_autoindex_*) are skipped intentionally — they
-    # enforce the UNIQUE constraint we are removing and won't be recreated
-    # because the new table has no UNIQUE on url.
     indexes_to_recreate: list[dict[str, Any]] = []
     try:
         idx_rows = conn.execute("PRAGMA index_list('policy_documents')").fetchall()
@@ -307,35 +296,35 @@ def _drop_url_unique_constraint(conn: sqlite3.Connection) -> None:
     except sqlite3.Error:
         pass
 
-    # Drop any prior leftover rebuild table (defensive).
-    conn.execute("DROP TABLE IF EXISTS policy_documents_new")
-
-    # Create the new table without UNIQUE on url.
-    conn.execute(new_sql)
-
-    # Copy all data.
-    col_list = ", ".join(f'"{c}"' for c in cols)
-    conn.execute(
-        f"INSERT INTO policy_documents_new({col_list}) SELECT {col_list} FROM policy_documents"
-    )
-
-    # Drop old table and rename.
-    conn.execute("DROP TABLE policy_documents")
-    conn.execute("ALTER TABLE policy_documents_new RENAME TO policy_documents")
-
-    # Re-create indexes that existed on the original table (other than the
-    # auto-index for UNIQUE on url, which we are intentionally dropping).
-    for idx in indexes_to_recreate:
-        try:
-            conn.execute(idx["sql"])
-        except sqlite3.Error:
-            # Best-effort: if an index can't be recreated (e.g., name collision),
-            # drop and retry once.
+    # FK must be off or DROP TABLE policy_documents fails while child tables exist.
+    conn.execute("PRAGMA foreign_keys=OFF")
+    try:
+        conn.execute("DROP TABLE IF EXISTS policy_documents_new")
+        conn.execute(new_sql)
+        col_list = ", ".join(f'"{c}"' for c in cols)
+        conn.execute(
+            f"INSERT INTO policy_documents_new({col_list}) "
+            f"SELECT {col_list} FROM policy_documents"
+        )
+        conn.execute("DROP TABLE policy_documents")
+        conn.execute("ALTER TABLE policy_documents_new RENAME TO policy_documents")
+        for idx in indexes_to_recreate:
             try:
-                conn.execute(f"DROP INDEX IF EXISTS {idx['name']}")
                 conn.execute(idx["sql"])
             except sqlite3.Error:
-                pass
+                try:
+                    conn.execute(f"DROP INDEX IF EXISTS {idx['name']}")
+                    conn.execute(idx["sql"])
+                except sqlite3.Error:
+                    pass
+    finally:
+        conn.execute("PRAGMA foreign_keys=ON")
+
+    if _policy_documents_url_has_unique(conn):
+        raise RuntimeError(
+            "m4: failed to drop UNIQUE on policy_documents.url "
+            "(table rebuild did not remove the constraint)"
+        )
 
 
 def _migration_applied(conn: sqlite3.Connection, migration_id: str = M4_MIGRATION_ID) -> bool:
@@ -368,10 +357,9 @@ def apply_m4_schema(conn: sqlite3.Connection) -> dict[str, Any]:
     # Drop UNIQUE constraint on url BEFORE adding M4 columns so the table
     # recreation preserves the original base columns only. M4 columns are
     # added afterwards via ALTER TABLE (idempotent).
-    try:
-        _drop_url_unique_constraint(conn)
-    except sqlite3.Error:
-        pass
+    # Must succeed; do not swallow — a failed drop left UNIQUE in place while
+    # schema_migrations still marked m4 applied (infinite multi-minute startups).
+    _drop_url_unique_constraint(conn)
     try:
         _add_columns(conn, "policy_documents", POLICY_DOCUMENT_COLUMN_ADDITIONS)
     except sqlite3.Error:
@@ -397,8 +385,29 @@ def mark_m4_migration(conn: sqlite3.Connection, notes: str = "") -> None:
 
 def run_m4_migration(conn: sqlite3.Connection) -> dict[str, Any]:
     already = _migration_applied(conn)
+    url_unique = _policy_documents_url_has_unique(conn)
+    # Fast path: fully done previously (marked + UNIQUE already removed).
+    if already and not url_unique:
+        return {
+            "migration_id": M4_MIGRATION_ID,
+            "already_applied": True,
+            "url_unique_removed": True,
+            "skipped": True,
+            "schema": {},
+            "table_counts": {},
+        }
     schema_info = apply_m4_schema(conn)
-    mark_m4_migration(conn, notes=json.dumps({"already": already}, ensure_ascii=False))
+    if _policy_documents_url_has_unique(conn):
+        raise RuntimeError(
+            "m4 migration incomplete: policy_documents.url still UNIQUE"
+        )
+    mark_m4_migration(
+        conn,
+        notes=json.dumps(
+            {"already": already, "url_unique_was_present": url_unique},
+            ensure_ascii=False,
+        ),
+    )
     counts: dict[str, int | None] = {}
     for table in (
         "archive_observations", "archive_findings",
@@ -412,6 +421,7 @@ def run_m4_migration(conn: sqlite3.Connection) -> dict[str, Any]:
     return {
         "migration_id": M4_MIGRATION_ID,
         "already_applied": already,
+        "url_unique_removed": True,
         "schema": schema_info,
         "table_counts": counts,
     }
