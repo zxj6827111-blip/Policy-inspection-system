@@ -107,6 +107,12 @@ class Finding:
     page_value: str = ""
     body_value: str = ""
     evidence: str = ""
+    machine_status: str = ""
+    human_status: str = "unreviewed"
+    rule_version: str = "1.0.0"
+    confidence: float = 0.0
+    allow_customer_output: bool = False
+    evidence_fields: list[dict] = field(default_factory=list)
 
 
 class SafetyPause(RuntimeError):

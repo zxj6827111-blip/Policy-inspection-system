@@ -15,4 +15,18 @@ data/*.log
 data/*.err.log
 data/*.out.log
 data/exports/*.xlsx
+data/backups/
 output/
+
+# Phase1 formalization / local artifacts
+tmp/
+*.db
+*.db-wal
+*.db-shm
+
+# Local planning docs (not part of accepted product tree)
+
+
+# Local planning markdown at repo root (not product deliverables)
+*实施方案*.md
+*实施方*.md

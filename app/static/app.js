@@ -40,8 +40,13 @@ function toast(message) {
   const box = $('#toast'); box.textContent = message; box.style.display = 'block';
   clearTimeout(box._timer); box._timer = setTimeout(() => { box.style.display = 'none'; }, 4500);
 }
+let csrfToken = '';
 async function api(url, options = {}) {
-  const response = await fetch(url, {headers: {'Content-Type': 'application/json'}, ...options});
+  const headers = {'Content-Type': 'application/json', ...(options.headers || {})};
+  if (csrfToken && options.method && !['GET','HEAD'].includes(String(options.method).toUpperCase())) {
+    headers['X-CSRF-Token'] = csrfToken;
+  }
+  const response = await fetch(url, {...options, headers, credentials: 'same-origin'});
   if (!response.ok) { const data = await response.json().catch(() => ({})); throw new Error(data.detail || `请求失败 ${response.status}`); }
   return response.json();
 }
@@ -65,6 +70,24 @@ function resumeLabel(job) {
   return '继续下一批';
 }
 
+// ---------- 21 项导航元数据 ----------
+const NAV_GROUPS = [
+  {key: 'main', label: '主页'},
+  {key: 'findings', label: '问题与线索'},
+  {key: 'excluded', label: '已排除'},
+  {key: 'quality', label: '数据质量'},
+  {key: 'documents', label: '文档与解读'},
+  {key: 'closure', label: '整改销号'},
+  {key: 'governance', label: '治理'},
+  {key: 'system', label: '系统'},
+];
+const ICON_EMOJI = {
+  home: '🏠', job: '📋', issue: '⚠️', review: '🔍', data: '📊', alert: '❗',
+  auto: '🤖', human: '👤', archive: '🗄️', duplicate: '⧉', recon: '🔄',
+  pdf: '📄', interp: '📖', read: '📑', rect: '🔧', signoff: '✅',
+  rule: '📐', kb: '📚', user: '👥', audit: '📝', settings: '⚙️',
+};
+
 // ---------- 全局状态 ----------
 let sites = [];
 let jobs = [];
@@ -78,9 +101,12 @@ let actionBusy = false;
 let batchMode = false;
 const batchSelected = new Set();
 let firstLoadDone = false;
+let navItems = [];
+let currentNav = null;          // 当前选中的导航 key
+let genericRowsCache = [];      // 通用视图当前数据，用于行详情展开
 
 const siteByKey = () => Object.fromEntries(sites.map(site => [site.key, site]));
-const signature = labels => (labels || []).slice().sort().join('');
+const signature = labels => (labels || []).slice().sort().join('');
 function jobLabels(job) { try { return JSON.parse(job.districts_json); } catch { return []; } }
 function jobsForSite(site) {
   const sig = signature(site.target_labels);
@@ -107,35 +133,283 @@ function siteState(site) {
   return {code:'fresh', dot:'s-none', pill:['pill-neutral','○ 尚未扫描'], sub:'未建基准 · 待首次全量'};
 }
 
-// ---------- 侧栏 ----------
-function renderSidebar() {
-  let alerts = {district: 0, municipal: 0};
-  for (const site of sites) {
-    const state = siteState(site);
-    const dot = $(`#side-dot-${site.key}`);
-    const sub = $(`#side-sub-${site.key}`);
-    if (dot) dot.className = `s-dot ${state.dot}`;
-    if (sub) sub.textContent = state.sub;
-    if (state.code === 'attention' || state.code === 'invalid') {
-      alerts[site.source_level === '区级' ? 'district' : 'municipal'] += 1;
+// ---------- 侧栏（21 项导航） ----------
+function renderNav(items) {
+  navItems = Array.isArray(items) ? items : [];
+  const container = $('#nav-items');
+  if (!container) return;
+  if (!navItems.length) {
+    container.innerHTML = '<p class="nav-empty muted-note">未登录或当前角色暂无可见导航项</p>';
+    return;
+  }
+  const grouped = {};
+  for (const item of navItems) {
+    (grouped[item.group] = grouped[item.group] || []).push(item);
+  }
+  let html = '';
+  for (const g of NAV_GROUPS) {
+    const list = grouped[g.key];
+    if (!list || !list.length) continue;
+    const isOpen = g.key === 'main' || list.some(item => item.key === currentNav);
+    html += `<details class="side-group" data-group="${escapeHtml(g.key)}"${isOpen ? ' open' : ''}>` +
+      `<summary>${escapeHtml(g.label)} <span class="g-count">${list.length}</span></summary>`;
+    for (const item of list) {
+      const icon = ICON_EMOJI[item.icon] || '•';
+      html += `<button type="button" class="side-item" data-nav="${escapeHtml(item.key)}" data-api="${escapeHtml(item.api)}">` +
+        `<span class="nav-icon">${icon}</span>` +
+        `<span class="s-main"><strong>${escapeHtml(item.label)}</strong><small>${escapeHtml(item.description || '')}</small></span>` +
+        `</button>`;
     }
+    html += '</details>';
   }
-  for (const group of ['district', 'municipal']) {
-    const badge = $(`#alert-${group}`);
-    if (!badge) continue;
-    badge.hidden = alerts[group] === 0;
-    badge.textContent = `⚠ ${alerts[group]}`;
-  }
-  document.querySelectorAll('.side-item').forEach(item => {
-    const active = view === 'site' ? item.dataset.site === currentSiteKey : item.dataset.nav === 'overview';
-    item.classList.toggle('active', active);
-  });
-  const activeItem = document.querySelector('.side-item.active');
-  const group = activeItem && activeItem.closest('details.side-group');
-  if (group) group.open = true;
+  container.innerHTML = html;
+  renderSidebar();
 }
 
-// ---------- 总览 ----------
+function renderSidebar() {
+  const activeNav = (view === 'site') ? 'overview' : currentNav;
+  document.querySelectorAll('#nav-items .side-item').forEach(item => {
+    item.classList.toggle('active', item.dataset.nav === activeNav);
+  });
+  const activeItem = document.querySelector('#nav-items .side-item.active');
+  const group = activeItem && activeItem.closest('details.side-group');
+  if (group) group.open = true;
+
+  // 站点扫描入口的告警徽标（在 overview 的 site-scan-section 上）
+  let alerts = 0;
+  for (const site of sites) {
+    const state = siteState(site);
+    if (state.code === 'attention' || state.code === 'invalid') alerts += 1;
+  }
+  const alertEl = $('#site-scan-alert');
+  if (alertEl) {
+    alertEl.hidden = alerts === 0;
+    alertEl.textContent = `⚠ ${alerts}`;
+  }
+}
+
+// ---------- 导航路由 ----------
+async function navigate(key, apiPath) {
+  currentNav = key;
+  const item = navItems.find(i => i.key === key);
+  const label = item ? item.label : key;
+  const description = item ? (item.description || '') : '';
+  if (key === 'overview') {
+    showView('overview');
+    renderOverviewDashboard().catch(error => toast(error.message));
+    return;
+  }
+  if (key === 'scan-jobs') {
+    showView('generic');
+    await renderGenericView(label, '/api/jobs', description || '全部扫描任务列表与状态');
+    return;
+  }
+  // 其他 19 项：通用表格视图
+  showView('generic');
+  await renderGenericView(label, apiPath, description);
+}
+
+// ---------- 首页总览仪表盘（/api/overview） ----------
+async function renderOverviewDashboard() {
+  const stats = $('#ov-stats');
+  const recent = $('#ov-recent-jobs');
+  if (!stats) return;
+  stats.innerHTML = '<p class="muted-note panel-pad">加载仪表盘…</p>';
+  if (recent) recent.innerHTML = '';
+  let data;
+  try {
+    data = await api('/api/overview');
+  } catch (error) {
+    stats.innerHTML = `<div class="card"><div class="panel-pad"><p class="muted-note">仪表盘加载失败：${escapeHtml(error.message)}（未登录或权限不足）</p></div></div>`;
+    return;
+  }
+  const buckets = data.finding_buckets || {};
+  const cards = [
+    {label: '活跃任务', value: data.jobs_active || 0, hint: `共 ${(data.jobs || []).length} 个近期任务`},
+    {label: '站点总数', value: data.sites_total || 0, hint: '区级 + 市级'},
+    {label: '客户正式问题', value: buckets.customer_formal || 0, hint: `确认 ${buckets.confirmed_problem || 0}`},
+    {label: '待复核线索', value: buckets.suspected || 0, hint: `数据不足 ${buckets.insufficient_data || 0}`},
+    {label: '已自动排除', value: buckets.auto_excluded || 0, hint: `人工排除 ${buckets.human_excluded || 0}`},
+    {label: '逾期整改', value: data.rectification_overdue || 0, hint: '需关注'},
+    {label: '异常归档', value: data.archive_findings || 0, hint: 'ARCH 问题'},
+    {label: '重复对', value: data.duplicate_pairs || 0, hint: 'DUP'},
+    {label: '对账匹配', value: data.recon_matches || 0, hint: '双渠道'},
+  ];
+  stats.innerHTML = `<div class="g-stat-grid">${cards.map(c =>
+    `<div class="g-stat card"><span class="label">${escapeHtml(c.label)}</span><div class="value num">${fmtNum(c.value)}</div><div class="hint">${escapeHtml(c.hint)}</div></div>`
+  ).join('')}</div>`;
+
+  const recentJobs = (data.jobs || []).slice(0, 10);
+  if (!recent || !recentJobs.length) {
+    if (recent) recent.innerHTML = '<div class="card"><div class="panel-pad"><p class="muted-note">暂无最近任务</p></div></div>';
+    return;
+  }
+  recent.innerHTML = `<div class="card" style="overflow:hidden">
+    <div class="panel-head"><h3>最近任务</h3><span class="muted-note">${recentJobs.length} 条</span></div>
+    <div class="table-wrap"><table class="mini">
+      <thead><tr><th>任务</th><th>模式</th><th>状态</th><th>进度</th><th title="客户正式问题数 formal_finding_count">正式问题</th><th title="线索合计 finding_total_count / finding_count">线索</th><th>创建时间</th><th>结果</th></tr></thead>
+      <tbody>${recentJobs.map(job => `<tr>
+        <td class="num"><b>#${job.id}</b></td>
+        <td>${job.mode === 'full' ? '全量' : '增量'}</td>
+        <td><span class="pill ${job.status === 'completed' ? 'pill-ok' : 'pill-neutral'}">${escapeHtml(statusNames[job.status] || job.status)}</span></td>
+        <td class="num">${fmtNum(job.examined_count)}/${job.estimated_total ? fmtNum(job.estimated_total) : '?'}</td>
+        <td class="num" title="客户正式问题 formal_finding_count">${fmtNum(job.formal_finding_count != null ? job.formal_finding_count : 0)}</td>
+        <td class="num" title="线索合计 finding_total_count">${fmtNum(job.finding_total_count != null ? job.finding_total_count : job.finding_count)}</td>
+        <td class="num">${fmtTime(job.created_at)}</td>
+        <td><a class="btn btn-sm" href="/api/jobs/${job.id}/export">Excel</a></td>
+      </tr>`).join('')}</tbody>
+    </table></div></div>`;
+}
+
+// ---------- 通用视图（19 项 + scan-jobs） ----------
+async function renderGenericView(label, apiPath, description) {
+  $('#generic-title').textContent = label;
+  $('#generic-sub').textContent = description || '加载中…';
+  $('#generic-body').innerHTML = '<div class="card"><div class="panel-pad"><p class="muted-note">加载中…</p></div></div>';
+  const refreshBtn = $('#generic-refresh');
+  if (refreshBtn) {
+    refreshBtn.dataset.api = apiPath || '';
+    refreshBtn.dataset.label = label || '';
+    refreshBtn.dataset.description = description || '';
+  }
+  try {
+    const data = await api(apiPath);
+    renderGenericData(label, data);
+  } catch (error) {
+    $('#generic-sub').textContent = description || '';
+    $('#generic-body').innerHTML = `<div class="card"><div class="panel-pad"><p class="muted-note">加载失败：${escapeHtml(error.message)}</p></div></div>`;
+  }
+}
+
+function formatCellValue(value) {
+  if (value == null) return '<span class="muted-note">-</span>';
+  if (typeof value === 'boolean') return value ? '是' : '否';
+  if (typeof value === 'number') return `<span class="num">${fmtNum(value)}</span>`;
+  if (typeof value === 'string') {
+    if (/^https?:\/\//i.test(value)) {
+      const display = value.length > 60 ? value.slice(0, 57) + '…' : value;
+      return `<a href="${safeUrl(value)}" target="_blank" rel="noopener noreferrer">${escapeHtml(display)}</a>`;
+    }
+    if (/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(value)) return escapeHtml(fmtTime(value));
+    return escapeHtml(value.length > 200 ? value.slice(0, 197) + '…' : value);
+  }
+  return escapeHtml(JSON.stringify(value));
+}
+
+function renderGenericData(label, data) {
+  const body = $('#generic-body');
+  genericRowsCache = [];
+  window.__genericLastData = data;  // 供嵌套表格行详情读取
+  if (Array.isArray(data)) {
+    renderGenericTable(label, data, body);
+    return;
+  }
+  if (data && typeof data === 'object') {
+    const entries = Object.entries(data);
+    const isCounts = entries.length && entries.every(([_, v]) => typeof v === 'number' || v == null || typeof v === 'boolean');
+    if (isCounts) {
+      body.innerHTML = `<div class="g-stat-grid">${entries.map(([k, v]) =>
+        `<div class="g-stat card"><span class="label">${escapeHtml(k)}</span><div class="value num">${fmtNum(Number(v) || 0)}</div></div>`
+      ).join('')}</div>`;
+      return;
+    }
+    // 混合对象：数组子项渲染为子表，标量为 kv
+    let html = '';
+    for (const [k, v] of entries) {
+      if (Array.isArray(v) && v.length && typeof v[0] === 'object') {
+        html += renderGenericTableCard(k, v);
+      } else if (Array.isArray(v)) {
+        html += `<div class="card"><div class="panel-head"><h3>${escapeHtml(k)}</h3><span class="muted-note">${v.length} 条</span></div><div class="panel-pad"><ul class="generic-list">${v.map(item => `<li>${escapeHtml(String(item))}</li>`).join('')}</ul></div></div>`;
+      } else if (typeof v === 'object' && v !== null) {
+        html += `<div class="card"><div class="panel-head"><h3>${escapeHtml(k)}</h3></div><div class="panel-pad"><dl class="kv">${Object.entries(v).map(([sk, sv]) => `<dt>${escapeHtml(sk)}</dt><dd>${escapeHtml(String(sv))}</dd>`).join('')}</dl></div></div>`;
+      } else {
+        html += `<div class="card"><div class="panel-pad"><dl class="kv"><dt>${escapeHtml(k)}</dt><dd>${escapeHtml(String(v))}</dd></dl></div></div>`;
+      }
+    }
+    body.innerHTML = html || '<div class="card"><div class="panel-pad"><p class="muted-note">暂无数据</p></div></div>';
+    bindGenericRowButtons(body);
+    return;
+  }
+  body.innerHTML = `<div class="card"><div class="panel-pad"><p class="muted-note">${escapeHtml(String(data))}</p></div></div>`;
+}
+
+function renderGenericTable(label, rows, container) {
+  if (!rows.length) {
+    container.innerHTML = `<div class="card"><div class="panel-pad"><p class="muted-note">暂无数据</p></div></div>`;
+    return;
+  }
+  const keys = Object.keys(rows[0]).filter(k => {
+    const v = rows[0][k];
+    return v == null || typeof v !== 'object';
+  });
+  container.innerHTML = `<div class="card" style="overflow:hidden">
+    <div class="panel-head"><h3>${escapeHtml(label)} <span class="muted-note">共 ${rows.length} 条</span></h3></div>
+    <div class="table-wrap"><table class="mini generic-table">
+      <thead><tr>${keys.map(k => `<th>${escapeHtml(k)}</th>`).join('')}<th>操作</th></tr></thead>
+      <tbody>${rows.map((row, idx) => `<tr>${keys.map(k => `<td>${formatCellValue(row[k])}</td>`).join('')}<td><button type="button" class="btn btn-sm generic-row-view" data-idx="${idx}">查看</button></td></tr>`).join('')}</tbody>
+    </table></div></div>`;
+  genericRowsCache = rows;
+  bindGenericRowButtons(container);
+}
+
+function renderGenericTableCard(label, rows) {
+  if (!rows.length) return '';
+  const keys = Object.keys(rows[0]).filter(k => {
+    const v = rows[0][k];
+    return v == null || typeof v !== 'object';
+  });
+  return `<div class="card" style="overflow:hidden">
+    <div class="panel-head"><h3>${escapeHtml(label)}</h3><span class="muted-note">${rows.length} 条</span></div>
+    <div class="table-wrap"><table class="mini generic-table">
+      <thead><tr>${keys.map(k => `<th>${escapeHtml(k)}</th>`).join('')}<th>操作</th></tr></thead>
+      <tbody>${rows.map((row, idx) => `<tr>${keys.map(k => `<td>${formatCellValue(row[k])}</td>`).join('')}<td><button type="button" class="btn btn-sm generic-row-view" data-key="${escapeHtml(label)}" data-idx="${idx}">查看</button></td></tr>`).join('')}</tbody>
+    </table></div></div>`;
+}
+
+function bindGenericRowButtons(scope) {
+  scope.querySelectorAll('.generic-row-view').forEach(btn => {
+    btn.addEventListener('click', () => openGenericRow(btn));
+  });
+}
+
+function openGenericRow(btn) {
+  const idx = Number(btn.dataset.idx);
+  const key = btn.dataset.key || '';
+  let row = null;
+  if (key) {
+    // 嵌套表格：从 generic-body 当前 DOM 重新读取（renderGenericData 写入）
+    const data = window.__genericLastData;
+    row = data && Array.isArray(data[key]) ? data[key][idx] : null;
+  } else if (genericRowsCache.length) {
+    row = genericRowsCache[idx];
+  }
+  if (!row) return;
+  // 形似 finding（id + rule_code）：优先打开证据定位对话框
+  if (row.id != null && row.rule_code && (row.district || row.title || row.url)) {
+    openEvidence(Number(row.id)).catch(error => toast(error.message));
+    return;
+  }
+  // 否则在表格下方展开详情抽屉
+  showGenericDetail(row);
+}
+
+function showGenericDetail(row) {
+  let panel = $('#generic-detail');
+  if (!panel) {
+    panel = document.createElement('div');
+    panel.id = 'generic-detail';
+    panel.className = 'card generic-detail';
+    $('#generic-body').appendChild(panel);
+  }
+  panel.innerHTML = `<div class="panel-head"><h3>详情</h3><button type="button" class="btn btn-sm" id="generic-detail-close">关闭</button></div>
+    <div class="panel-pad"><dl class="kv">${Object.entries(row).map(([k, v]) =>
+      `<dt>${escapeHtml(k)}</dt><dd>${v == null ? '<span class="muted-note">-</span>' : escapeHtml(typeof v === 'object' ? JSON.stringify(v) : String(v))}</dd>`
+    ).join('')}</dl></div>`;
+  panel.scrollIntoView({behavior: 'smooth', block: 'nearest'});
+  $('#generic-detail-close').addEventListener('click', () => panel.remove());
+}
+
+// ---------- 总览（站点卡片 + 批量） ----------
 function renderOverview() {
   const counts = {attention: 0, active: 0, ready: 0, fresh: 0};
   const cards = [];
@@ -177,7 +451,7 @@ function renderLegacyJobs() {
       <td>${job.mode === 'full' ? '全量' : '增量'}</td>
       <td><span class="pill ${job.status === 'completed' ? 'pill-ok' : 'pill-neutral'}">${statusNames[job.status] || job.status}</span></td>
       <td class="num">${fmtNum(job.examined_count)}/${job.estimated_total ? fmtNum(job.estimated_total) : '?'}</td>
-      <td class="num">${fmtNum(job.finding_count)}</td>
+      <td class="num" title="客户正式问题 formal_finding_count">${fmtNum(job.formal_finding_count != null ? job.formal_finding_count : 0)}</td><td class="num" title="线索合计 finding_total_count">${fmtNum(job.finding_total_count != null ? job.finding_total_count : job.finding_count)}</td>
       <td class="num">${fmtTime(job.created_at)}</td>
       <td><a class="btn btn-sm" href="/api/jobs/${job.id}/export">Excel</a></td>
     </tr>`).join('');
@@ -339,7 +613,7 @@ function renderStats(site, job) {
     <div class="stat"><span class="label">新增</span><div class="value num">${fmtNum(added)}</div></div>
     <div class="stat"><span class="label">基线复用</span><div class="value num">${fmtNum(reused)}</div><div class="hint">未开详情直接复用</div></div>
     <div class="stat"><span class="label">表头完整</span><div class="value num" id="stat-header">${cached ? fmtNum(cached.complete_header) : '…'}</div><div class="hint" id="stat-header-hint">${cached ? `缺字段 ${fmtNum(cached.incomplete_header)} · 无表头 PASS ${fmtNum(cached.no_header_pass)}` : '读取中'}</div></div>
-    <div class="stat"><span class="label">发现问题</span><div class="value num link" id="stat-findings">${fmtNum(job.finding_count)}</div><div class="hint">点击查看复核 ↓</div></div>`;
+    <div class="stat"><span class="label">客户正式问题</span><div class="value num link" id="stat-findings">${fmtNum(job.formal_finding_count != null ? job.formal_finding_count : 0)}</div><div class="hint">线索合计 ${fmtNum(job.finding_total_count != null ? job.finding_total_count : job.finding_count)} · 点击复核 ↓</div></div>`;
   const findingsTile = $('#stat-findings');
   if (findingsTile) findingsTile.addEventListener('click', () => {
     const panel = $('#findings-panel');
@@ -396,8 +670,8 @@ function renderRail(site, state, job) {
     }
   }
   $('#rail-notes-card').hidden = !(state.code === 'fresh' || state.code === 'invalid');
-  $('#rail-findings-card').hidden = !job || !Number(job.finding_count);
-  if (job) $('#rail-findings-num').textContent = fmtNum(job.finding_count);
+  $('#rail-findings-card').hidden = !job || !Number(job.formal_finding_count != null ? job.formal_finding_count : 0);
+  if (job) $('#rail-findings-num').textContent = fmtNum(job.formal_finding_count != null ? job.formal_finding_count : 0);
 }
 
 function renderSiteHistory(site) {
@@ -418,7 +692,7 @@ function renderSiteHistory(site) {
       <td>${job.mode === 'full' ? '全量' : `增量<small> · 基线 #${job.baseline_job_id ?? '-'}</small>`}</td>
       <td><span class="pill ${pillClass}">${statusNames[job.status] || job.status}${isBaseline ? ' · 现行基准' : ''}</span>${incomplete ? ' <em class="history-warning">记录不完整</em>' : ''}</td>
       <td><span class="mini-progress"><span style="width:${percent}%"></span></span><span class="num">${fmtNum(examined)}/${total ? fmtNum(total) : '?'}</span></td>
-      <td class="num">${fmtNum(job.finding_count)}</td>
+      <td class="num" title="客户正式问题 formal_finding_count">${fmtNum(job.formal_finding_count != null ? job.formal_finding_count : 0)}</td><td class="num" title="线索合计 finding_total_count">${fmtNum(job.finding_total_count != null ? job.finding_total_count : job.finding_count)}</td>
       <td class="num">${fmtTime(job.created_at)}</td>
       <td><a class="btn btn-sm" href="/api/jobs/${job.id}/export">Excel</a></td>
     </tr>`;
@@ -466,6 +740,16 @@ async function renderFindings(jobId) {
   const totalCount = Object.values(queue.counts).reduce((sum, value) => sum + value, 0);
   panel.hidden = totalCount === 0;
   if (panel.hidden) return;
+  const buckets = queue.bucket_counts || {};
+  const setText = (id, val) => { const el = $(id); if (el) el.textContent = fmtNum(val || 0); };
+  setText('#rc-pending', queue.counts.pending);
+  setText('#rc-suspected', buckets.suspected);
+  setText('#rc-confirmed-problem', buckets.confirmed_problem);
+  setText('#rc-insufficient', buckets.insufficient_data);
+  setText('#rc-collection', buckets.collection_error);
+  setText('#rc-auto', buckets.auto_excluded);
+  setText('#rc-human', buckets.human_excluded);
+  setText('#rc-customer-formal', buckets.customer_formal);
   $('#rc-pending').textContent = fmtNum(queue.counts.pending);
   $('#rc-confirmed').textContent = fmtNum(queue.counts.confirmed);
   $('#rc-dismissed').textContent = fmtNum(queue.counts.dismissed);
@@ -520,11 +804,28 @@ async function renderScanExceptions(jobId) {
 async function openEvidence(findingId) {
   const finding = await api(`/api/findings/${findingId}/evidence`);
   $('#evidence-subtitle').textContent = `${finding.district} · ${finding.title} · ${finding.rule_code}`;
-  $('#evidence-source').href = validatedUrl(finding.url);
-  $('#evidence-page-value').textContent = finding.page_value || '-';
-  $('#evidence-body-value').textContent = finding.body_value || '-';
-  $('#evidence-rule-text').textContent = finding.evidence || finding.detail || '-';
-  $('#evidence-body').innerHTML = highlightEvidence(finding.body_text, [finding.page_value, finding.body_value]);
+  const source = $('#evidence-source');
+  if (source) source.href = validatedUrl(finding.url);
+  const fieldsBox = $('#evidence-fields');
+  const fields = finding.evidence_fields || [];
+  if (fieldsBox) {
+    if (fields.length) {
+      fieldsBox.innerHTML = fields.map(item => `<div class="evidence-field"><span class="finding-label">${escapeHtml(item.field_name || item.source_type || '字段')}</span><p>${escapeHtml(item.raw_value || item.excerpt || '-')}</p></div>`).join('');
+    } else {
+      fieldsBox.innerHTML = `<div class="evidence-field"><span class="finding-label">机器状态</span><p>${escapeHtml(finding.machine_status || '-')}</p></div>
+        <div class="evidence-field"><span class="finding-label">人工状态</span><p>${escapeHtml(finding.human_status || '-')}</p></div>
+        <div class="evidence-field"><span class="finding-label">规则版本</span><p>${escapeHtml(finding.rule_version || '-')}</p></div>
+        <div class="evidence-field"><span class="finding-label">详情</span><p>${escapeHtml(finding.detail || '-')}</p></div>`;
+    }
+  }
+  const pageVal = $('#evidence-page-value');
+  const bodyVal = $('#evidence-body-value');
+  if (pageVal) pageVal.textContent = finding.page_value || '-';
+  if (bodyVal) bodyVal.textContent = finding.body_value || '-';
+  const ruleText = $('#evidence-rule-text');
+  if (ruleText) ruleText.textContent = finding.evidence || finding.detail || '-';
+  const body = $('#evidence-body');
+  if (body) body.innerHTML = highlightEvidence(finding.body_text, [finding.page_value, finding.body_value, ...(fields.map(f => f.raw_value || ''))]);
   $('#evidence-dialog').showModal();
 }
 
@@ -639,6 +940,7 @@ function showView(nextView, siteKey) {
   }
   $('#page-overview').hidden = view !== 'overview';
   $('#page-site').hidden = view !== 'site';
+  $('#page-generic').hidden = view !== 'generic';
   refreshUi();
   window.scrollTo({top: 0});
 }
@@ -646,7 +948,8 @@ function showView(nextView, siteKey) {
 function refreshUi() {
   renderSidebar();
   if (view === 'overview') renderOverview();
-  else renderSitePage();
+  else if (view === 'site') renderSitePage();
+  // generic 视图由 navigate/renderGenericView 自行渲染，不参与 poll
 }
 
 async function poll() {
@@ -672,11 +975,10 @@ async function poll() {
 }
 
 // ---------- 事件绑定 ----------
-document.querySelector('.sidebar').addEventListener('click', event => {
+$('#nav-sidebar').addEventListener('click', event => {
   const item = event.target.closest('.side-item');
-  if (!item) return;
-  if (item.dataset.nav === 'overview') showView('overview');
-  else if (item.dataset.site) showView('site', item.dataset.site);
+  if (!item || !item.dataset.nav) return;
+  navigate(item.dataset.nav, item.dataset.api).catch(error => toast(error.message));
 });
 
 $('#ov-grid').addEventListener('click', event => {
@@ -742,6 +1044,24 @@ $('#rail-task-center').addEventListener('click', () => { openTaskCenter(); });
 $('#task-center-close').addEventListener('click', () => $('#task-center-dialog').close());
 $('#evidence-close').addEventListener('click', () => $('#evidence-dialog').close());
 
+// 站点扫描入口按钮：切到首页总览并展开站点扫描区
+$('#site-scan-btn').addEventListener('click', () => {
+  navigate('overview', '/api/overview').catch(() => {});
+  const section = $('#site-scan-section');
+  if (section) { section.open = true; section.scrollIntoView({behavior: 'smooth', block: 'start'}); }
+});
+
+// 仪表盘刷新按钮
+$('#overview-refresh').addEventListener('click', () => renderOverviewDashboard().catch(error => toast(error.message)));
+// 通用视图刷新按钮
+$('#generic-refresh').addEventListener('click', () => {
+  const btn = $('#generic-refresh');
+  const apiPath = btn.dataset.api;
+  const label = btn.dataset.label;
+  const description = btn.dataset.description;
+  if (apiPath) renderGenericView(label, apiPath, description).catch(error => toast(error.message));
+});
+
 // ---------- 启动 ----------
 api('/health').then(() => {
   $('#health').textContent = '服务正常';
@@ -750,5 +1070,71 @@ api('/health').then(() => {
   $('#health').textContent = '服务异常';
   $('#health-dot').className = 'dot dot-bad';
 });
-poll().catch(error => toast(error.message));
-setInterval(() => poll().catch(() => {}), 3000);
+poll().catch(() => {
+  // 未登录或服务异常时静默；登录后 refreshAuth 会触发导航渲染
+});
+setInterval(() => { poll().catch(() => {}); }, 3000);
+
+
+// ----- phase1 auth -----
+async function refreshAuth() {
+  try {
+    const me = await api('/api/auth/me');
+    const label = $('#auth-user');
+    const loginBtn = $('#login-btn');
+    const logoutBtn = $('#logout-btn');
+    if (me.authenticated) {
+      if (label) label.textContent = `${me.username}（${(me.roles || []).join(',') || 'user'}）`;
+      if (loginBtn) loginBtn.hidden = true;
+      if (logoutBtn) logoutBtn.hidden = false;
+      // 角色感知：拉取 21 项导航并重新渲染侧栏
+      try {
+        const items = await api('/api/nav-items');
+        renderNav(items);
+      } catch (_) { /* 保留静态兜底 */ }
+    } else {
+      if (label) label.textContent = '未登录';
+      if (loginBtn) loginBtn.hidden = false;
+      if (logoutBtn) logoutBtn.hidden = true;
+      // 未登录：保留 HTML 静态兜底，不主动清空（首屏可见结构）
+      navItems = [];
+    }
+  } catch (_) {}
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  const loginBtn = $('#login-btn');
+  const logoutBtn = $('#logout-btn');
+  const dialog = $('#login-dialog');
+  const form = $('#login-form');
+  if (loginBtn && dialog) loginBtn.addEventListener('click', () => dialog.showModal());
+  const cancel = $('#login-cancel');
+  if (cancel && dialog) cancel.addEventListener('click', () => dialog.close());
+  if (form) form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const username = $('#login-username').value.trim();
+    const password = $('#login-password').value;
+    const err = $('#login-error');
+    try {
+      const result = await api('/api/auth/login', {method: 'POST', body: JSON.stringify({username, password})});
+      csrfToken = result.csrf_token || '';
+      if (err) err.hidden = true;
+      dialog.close();
+      await refreshAuth();
+      toast('登录成功');
+      // 登录后自动加载仪表盘
+      navigate('overview', '/api/overview').catch(() => {});
+    } catch (ex) {
+      if (err) { err.hidden = false; err.textContent = ex.message || '登录失败'; }
+    }
+  });
+  if (logoutBtn) logoutBtn.addEventListener('click', async () => {
+    try {
+      await api('/api/auth/logout-simple', {method: 'POST', body: '{}'});
+    } catch (_) {}
+    csrfToken = '';
+    await refreshAuth();
+    showView('overview');
+  });
+  refreshAuth();
+});

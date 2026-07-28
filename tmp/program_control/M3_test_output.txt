@@ -1,0 +1,61 @@
+============================= test session starts =============================
+platform win32 -- Python 3.12.13, pytest-8.4.1, pluggy-1.6.0
+rootdir: E:\Software Development\Policy inspection system
+configfile: pyproject.toml
+plugins: anyio-4.14.1, asyncio-1.1.0
+asyncio: mode=Mode.AUTO
+collecting ... collected 44 items
+
+tests/test_m3_pdf_ocr_compare.py::TestPdfIntegrity::test_detect_ok_pdf PASSED
+tests/test_m3_pdf_ocr_compare.py::TestPdfIntegrity::test_detect_corrupted_pdf PASSED
+tests/test_m3_pdf_ocr_compare.py::TestPdfIntegrity::test_detect_encrypted_pdf PASSED
+tests/test_m3_pdf_ocr_compare.py::TestPdfIntegrity::test_detect_blank_pdf PASSED
+tests/test_m3_pdf_ocr_compare.py::TestPdfIntegrity::test_not_pdf PASSED
+tests/test_m3_pdf_ocr_compare.py::TestPdfTextExtraction::test_extract_text_returns_pages PASSED
+tests/test_m3_pdf_ocr_compare.py::TestPdfTextExtraction::test_extract_metadata_returns_dict PASSED
+tests/test_m3_pdf_ocr_compare.py::TestPdfTextExtraction::test_corrupted_returns_failed_status PASSED
+tests/test_m3_pdf_ocr_compare.py::TestPdfTextExtraction::test_encrypted_returns_encrypted_status PASSED
+tests/test_m3_pdf_ocr_compare.py::TestPdfTextExtraction::test_blank_returns_blank_status PASSED
+tests/test_m3_pdf_ocr_compare.py::TestOcr::test_tesseract_available_or_skips_gracefully PASSED
+tests/test_m3_pdf_ocr_compare.py::TestOcr::test_ocr_failure_does_not_auto_flag PASSED
+tests/test_m3_pdf_ocr_compare.py::TestThreeWayCompare::test_compare_matching_fields_produces_no_findings PASSED
+tests/test_m3_pdf_ocr_compare.py::TestThreeWayCompare::test_compare_mismatched_document_number PASSED
+tests/test_m3_pdf_ocr_compare.py::TestThreeWayCompare::test_compare_mismatched_title PASSED
+tests/test_m3_pdf_ocr_compare.py::TestThreeWayCompare::test_compare_mismatched_date PASSED
+tests/test_m3_pdf_ocr_compare.py::TestDocNumberSemantics::test_classify_main_file PASSED
+tests/test_m3_pdf_ocr_compare.py::TestDocNumberSemantics::test_classify_forwarded PASSED
+tests/test_m3_pdf_ocr_compare.py::TestDocNumberSemantics::test_classify_referenced PASSED
+tests/test_m3_pdf_ocr_compare.py::TestDocNumberSemantics::test_classify_attachment PASSED
+tests/test_m3_pdf_ocr_compare.py::TestDocNumberSemantics::test_classify_joint PASSED
+tests/test_m3_pdf_ocr_compare.py::TestDocNumberSemantics::test_classify_announcement PASSED
+tests/test_m3_pdf_ocr_compare.py::TestDocNumberSemantics::test_classify_order PASSED
+tests/test_m3_pdf_ocr_compare.py::TestDocNumberSemantics::test_classify_all_doc_numbers_with_context PASSED
+tests/test_m3_pdf_ocr_compare.py::TestDateSemantics::test_classify_authored PASSED
+tests/test_m3_pdf_ocr_compare.py::TestDateSemantics::test_classify_effective PASSED
+tests/test_m3_pdf_ocr_compare.py::TestDateSemantics::test_classify_valid_until PASSED
+tests/test_m3_pdf_ocr_compare.py::TestDateSemantics::test_classify_repealed PASSED
+tests/test_m3_pdf_ocr_compare.py::TestDateSemantics::test_classify_attachment_date PASSED
+tests/test_m3_pdf_ocr_compare.py::TestDateSemantics::test_classify_modified PASSED
+tests/test_m3_pdf_ocr_compare.py::TestDateSemantics::test_auto_confirm_authored_high_confidence PASSED
+tests/test_m3_pdf_ocr_compare.py::TestDateSemantics::test_auto_confirm_rejected_for_unknown PASSED
+tests/test_m3_pdf_ocr_compare.py::TestAttachments::test_classify_ok_pdf PASSED
+tests/test_m3_pdf_ocr_compare.py::TestAttachments::test_classify_missing_when_no_payload PASSED
+tests/test_m3_pdf_ocr_compare.py::TestAttachments::test_classify_mismatch_extension_vs_content PASSED
+tests/test_m3_pdf_ocr_compare.py::TestAttachments::test_classify_broken_unknown_bytes PASSED
+tests/test_m3_pdf_ocr_compare.py::TestPdfServiceIntegration::test_process_document_pdf_ok PASSED
+tests/test_m3_pdf_ocr_compare.py::TestPdfServiceIntegration::test_process_corrupted_emits_pdf_001 PASSED
+tests/test_m3_pdf_ocr_compare.py::TestPdfServiceIntegration::test_process_encrypted_emits_pdf_002 PASSED
+tests/test_m3_pdf_ocr_compare.py::TestPdfServiceIntegration::test_process_blank_emits_pdf_003 PASSED
+tests/test_m3_pdf_ocr_compare.py::TestPdfServiceIntegration::test_pdf_finding_has_page_evidence PASSED
+tests/test_m3_pdf_ocr_compare.py::TestPdfServiceIntegration::test_process_attachment_persists_record PASSED
+tests/test_m3_pdf_ocr_compare.py::TestPdfServiceIntegration::test_process_attachment_missing_emits_att_001 PASSED
+tests/test_m3_pdf_ocr_compare.py::TestM3Migration::test_migration_is_idempotent PASSED
+
+============================= 44 passed in 2.67s =============================
+
+=========================== 全量回归 ===========================
+........................................................................ [ 28%]
+........................................................................ [ 56%]
+........................................................................ [ 84%]
+.......................................                                  [100%]
+255 passed in 336.92s (0:05:36)

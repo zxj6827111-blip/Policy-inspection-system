@@ -4,47 +4,148 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>上海区级政策文件安全巡检系统</title>
-  <link rel="stylesheet" href="/static/app.css?v=20260726-sitecentric">
+  <link rel="stylesheet" href="/static/app.css?v=20260727-m61nav">
 </head>
 <body>
   <header class="topbar">
+    <div id="auth-bar" class="auth-bar">
+      <span id="auth-user">未登录</span>
+      <button type="button" class="btn-ghost-dark" id="login-btn">登录</button>
+      <button type="button" class="btn-ghost-dark" id="logout-btn" hidden>退出</button>
+    </div>
+
     <div>
       <h1>政策文件安全巡检系统</h1>
-      <p class="sub">受控采集 · 同域串行 · 风控信号自动暂停</p>
+      <p class="sub">21 项导航 · 站点扫描 · 风控信号自动暂停</p>
     </div>
     <div class="topbar-side">
+      <button type="button" class="btn-ghost-dark" id="site-scan-btn">站点扫描入口</button>
       <button type="button" class="btn-ghost-dark" id="task-center-btn">任务中心</button>
       <span class="service-chip"><span class="dot" id="health-dot"></span><span id="health">正在检查服务</span></span>
     </div>
   </header>
 
   <div class="shell">
-    <!-- ============ 左侧：站点导航 ============ -->
-    <aside class="sidebar">
-      <button type="button" class="side-item" data-nav="overview">
-        <span class="s-dot s-grid"></span>
-        <span class="s-main"><strong>全部站点总览</strong><small>{{ district_sites|length + municipal_sites|length }} 个站点运行概况</small></span>
-      </button>
+    <!-- ============ 左侧：21 项分组导航 ============ -->
+    <aside class="sidebar" id="nav-sidebar">
+      <div id="nav-items">
+        <!-- 静态首屏兜底（登录后由 /api/nav-items 动态渲染替换） -->
+        <details class="side-group" open data-group="main">
+          <summary>主页 <span class="g-count">2</span></summary>
+          <button type="button" class="side-item" data-nav="overview" data-api="/api/overview">
+            <span class="nav-icon">🏠</span>
+            <span class="s-main"><strong>首页总览</strong><small>全局仪表盘与最近任务</small></span>
+          </button>
+          <button type="button" class="side-item" data-nav="scan-jobs" data-api="/api/jobs">
+            <span class="nav-icon">📋</span>
+            <span class="s-main"><strong>扫描任务</strong><small>扫描任务列表与状态</small></span>
+          </button>
+        </details>
 
-      <details class="side-group" open id="group-district">
-        <summary>区级网站 <span class="g-alert" id="alert-district" hidden></span><span class="g-count">{{ district_sites|length }}</span></summary>
-        {% for site in district_sites %}
-        <button type="button" class="side-item" data-nav="site" data-site="{{ site.key }}">
-          <span class="s-dot s-none" id="side-dot-{{ site.key }}"></span>
-          <span class="s-main"><strong>{{ site.district }}</strong><small id="side-sub-{{ site.key }}">读取中…</small></span>
-        </button>
-        {% endfor %}
-      </details>
+        <details class="side-group" data-group="findings">
+          <summary>问题与线索 <span class="g-count">4</span></summary>
+          <button type="button" class="side-item" data-nav="confirmed-problems" data-api="/api/findings/pdf?bucket=confirmed_problem">
+            <span class="nav-icon">⚠️</span>
+            <span class="s-main"><strong>确认问题</strong><small>客户正式问题</small></span>
+          </button>
+          <button type="button" class="side-item" data-nav="review-queue" data-api="/api/jobs/0/review-queue">
+            <span class="nav-icon">🔍</span>
+            <span class="s-main"><strong>待复核线索</strong><small>待人工复核的疑似线索</small></span>
+          </button>
+          <button type="button" class="side-item" data-nav="insufficient-data" data-api="/api/findings/pdf?bucket=insufficient_data">
+            <span class="nav-icon">📊</span>
+            <span class="s-main"><strong>数据不足</strong><small>证据不足以判定</small></span>
+          </button>
+          <button type="button" class="side-item" data-nav="collection-errors" data-api="/api/jobs/0/scan-exceptions">
+            <span class="nav-icon">❗</span>
+            <span class="s-main"><strong>采集异常</strong><small>采集阶段异常</small></span>
+          </button>
+        </details>
 
-      <details class="side-group" id="group-municipal">
-        <summary>市级平台 <span class="g-alert" id="alert-municipal" hidden></span><span class="g-count">{{ municipal_sites|length }}</span></summary>
-        {% for site in municipal_sites %}
-        <button type="button" class="side-item" data-nav="site" data-site="{{ site.key }}">
-          <span class="s-dot s-none" id="side-dot-{{ site.key }}"></span>
-          <span class="s-main"><strong>{{ site.district }}</strong><small id="side-sub-{{ site.key }}">读取中…</small></span>
-        </button>
-        {% endfor %}
-      </details>
+        <details class="side-group" data-group="excluded">
+          <summary>已排除 <span class="g-count">2</span></summary>
+          <button type="button" class="side-item" data-nav="auto-excluded" data-api="/api/findings/pdf?bucket=auto_excluded">
+            <span class="nav-icon">🤖</span>
+            <span class="s-main"><strong>已自动排除</strong><small>规则自动排除</small></span>
+          </button>
+          <button type="button" class="side-item" data-nav="human-excluded" data-api="/api/findings/pdf?bucket=human_excluded">
+            <span class="nav-icon">👤</span>
+            <span class="s-main"><strong>已人工排除</strong><small>人工排除</small></span>
+          </button>
+        </details>
+
+        <details class="side-group" data-group="quality">
+          <summary>数据质量 <span class="g-count">3</span></summary>
+          <button type="button" class="side-item" data-nav="archive" data-api="/api/archive/findings">
+            <span class="nav-icon">🗄️</span>
+            <span class="s-main"><strong>异常归档</strong><small>ARCH-001~006 归档问题</small></span>
+          </button>
+          <button type="button" class="side-item" data-nav="duplicates" data-api="/api/duplicates">
+            <span class="nav-icon">⧉</span>
+            <span class="s-main"><strong>重复数据</strong><small>DUP-001~008 重复对</small></span>
+          </button>
+          <button type="button" class="side-item" data-nav="reconciliation" data-api="/api/reconciliation/matches">
+            <span class="nav-icon">🔄</span>
+            <span class="s-main"><strong>双渠道对账</strong><small>市区双渠道匹配与差异</small></span>
+          </button>
+        </details>
+
+        <details class="side-group" data-group="documents">
+          <summary>文档与解读 <span class="g-count">3</span></summary>
+          <button type="button" class="side-item" data-nav="pdf-attachments" data-api="/api/findings/pdf">
+            <span class="nav-icon">📄</span>
+            <span class="s-main"><strong>PDF 与附件</strong><small>PDF 与附件检查结果</small></span>
+          </button>
+          <button type="button" class="side-item" data-nav="interpretations" data-api="/api/interpretations">
+            <span class="nav-icon">📖</span>
+            <span class="s-main"><strong>政策解读</strong><small>INTERP-001~008 解读检查</small></span>
+          </button>
+          <button type="button" class="side-item" data-nav="reading-linkage" data-api="/api/reading-checks">
+            <span class="nav-icon">📑</span>
+            <span class="s-main"><strong>阅办联动</strong><small>READ-001~005 阅办检查</small></span>
+          </button>
+        </details>
+
+        <details class="side-group" data-group="closure">
+          <summary>整改销号 <span class="g-count">2</span></summary>
+          <button type="button" class="side-item" data-nav="rectification" data-api="/api/rectification/tasks">
+            <span class="nav-icon">🔧</span>
+            <span class="s-main"><strong>整改任务</strong><small>整改任务列表</small></span>
+          </button>
+          <button type="button" class="side-item" data-nav="signoff" data-api="/api/rectification/tasks?status=signoff">
+            <span class="nav-icon">✅</span>
+            <span class="s-main"><strong>复查销号</strong><small>已销号任务</small></span>
+          </button>
+        </details>
+
+        <details class="side-group" data-group="governance">
+          <summary>治理 <span class="g-count">2</span></summary>
+          <button type="button" class="side-item" data-nav="rule-effect" data-api="/api/rule-effect">
+            <span class="nav-icon">📐</span>
+            <span class="s-main"><strong>规则效果</strong><small>规则精度与降级</small></span>
+          </button>
+          <button type="button" class="side-item" data-nav="knowledge" data-api="/api/organizations">
+            <span class="nav-icon">📚</span>
+            <span class="s-main"><strong>机构知识库</strong><small>机构与机关代字</small></span>
+          </button>
+        </details>
+
+        <details class="side-group" data-group="system">
+          <summary>系统 <span class="g-count">3</span></summary>
+          <button type="button" class="side-item" data-nav="users" data-api="/api/users">
+            <span class="nav-icon">👥</span>
+            <span class="s-main"><strong>用户与权限</strong><small>用户管理</small></span>
+          </button>
+          <button type="button" class="side-item" data-nav="audits" data-api="/api/audits">
+            <span class="nav-icon">📝</span>
+            <span class="s-main"><strong>操作审计</strong><small>审计日志</small></span>
+          </button>
+          <button type="button" class="side-item" data-nav="settings" data-api="/api/system-settings">
+            <span class="nav-icon">⚙️</span>
+            <span class="s-main"><strong>系统设置</strong><small>系统配置</small></span>
+          </button>
+        </details>
+      </div>
 
       <div class="side-safety">
         <div class="side-safety-title">固定安全节奏</div>
@@ -63,37 +164,49 @@
       </div>
     </aside>
 
-    <!-- ============ 右侧内容 ============ -->
-    <main class="content">
+    <!-- ============ 右侧：视图容器 ============ -->
+    <main class="content" id="view-container">
 
-      <!-- ===== 全部站点总览 ===== -->
+      <!-- ===== 首页总览 ===== -->
       <section class="page" id="page-overview" hidden>
-        <div class="site-head"><h2>全部站点总览</h2>
+        <div class="site-head"><h2>首页总览</h2>
           <span class="head-actions">
-            <button type="button" class="btn btn-sm" id="batch-toggle">批量扫描</button>
+            <button type="button" class="btn btn-sm" id="overview-refresh">刷新仪表盘</button>
           </span>
         </div>
-        <p class="site-sub">点击站点卡片进入该站点操作；批量扫描可一次启动多个站点</p>
-        <div class="ov-chips" id="ov-chips"></div>
-        <div class="ov-grid" id="ov-grid"></div>
-        <div class="batch-bar" id="batch-bar" hidden>
-          <span class="summary" id="batch-summary">未选择站点</span>
-          <span class="grow"></span>
-          <label class="max-docs">本次最多文件数 <input type="number" id="batch-max-docs" value="0" min="0" step="1"> <span>0 = 全部</span></label>
-          <button type="button" class="btn btn-primary" id="batch-start" disabled>启动所选站点</button>
-          <button type="button" class="btn" id="batch-cancel">退出批量</button>
-        </div>
+        <p class="site-sub">全局仪表盘 · 最近任务 · 站点扫描入口</p>
+        <div id="ov-stats" class="ov-stats"><p class="muted-note panel-pad">登录后加载仪表盘…</p></div>
+        <div id="ov-recent-jobs"></div>
 
-        <div class="card" id="legacy-card" hidden style="overflow:hidden; margin-top:16px">
-          <div class="panel-head"><h3>其他历史任务</h3><span class="muted-note">与当前站点配置不完全对应的早期任务</span></div>
-          <div class="table-wrap"><table class="mini" id="legacy-table">
-            <thead><tr><th>任务</th><th>来源</th><th>模式</th><th>状态</th><th>进度</th><th>问题</th><th>创建时间</th><th>结果</th></tr></thead>
-            <tbody id="legacy-body"></tbody>
-          </table></div>
-        </div>
+        <details class="site-scan-section" id="site-scan-section" open>
+          <summary>站点扫描（区级 / 市级平台）<span class="g-alert" id="site-scan-alert" hidden></span><span class="g-count">{{ district_sites|length + municipal_sites|length }}</span></summary>
+          <div class="site-head" style="margin-top:14px"><h2>全部站点总览</h2>
+            <span class="head-actions">
+              <button type="button" class="btn btn-sm" id="batch-toggle">批量扫描</button>
+            </span>
+          </div>
+          <p class="site-sub">点击站点卡片进入该站点操作；批量扫描可一次启动多个站点</p>
+          <div class="ov-chips" id="ov-chips"></div>
+          <div class="ov-grid" id="ov-grid"></div>
+          <div class="batch-bar" id="batch-bar" hidden>
+            <span class="summary" id="batch-summary">未选择站点</span>
+            <span class="grow"></span>
+            <label class="max-docs">本次最多文件数 <input type="number" id="batch-max-docs" value="0" min="0" step="1"> <span>0 = 全部</span></label>
+            <button type="button" class="btn btn-primary" id="batch-start" disabled>启动所选站点</button>
+            <button type="button" class="btn" id="batch-cancel">退出批量</button>
+          </div>
+
+          <div class="card" id="legacy-card" hidden style="overflow:hidden; margin-top:16px">
+            <div class="panel-head"><h3>其他历史任务</h3><span class="muted-note">与当前站点配置不完全对应的早期任务</span></div>
+            <div class="table-wrap"><table class="mini" id="legacy-table">
+              <thead><tr><th>任务</th><th>来源</th><th>模式</th><th>状态</th><th>进度</th><th title="客户正式问题数 formal_finding_count">正式问题</th><th title="线索合计 finding_total_count / finding_count">线索</th><th>创建时间</th><th>结果</th></tr></thead>
+              <tbody id="legacy-body"></tbody>
+            </table></div>
+          </div>
+        </details>
       </section>
 
-      <!-- ===== 站点详情（唯一骨架，JS 填充当前站点） ===== -->
+      <!-- ===== 站点详情（保留站点扫描功能） ===== -->
       <section class="page" id="page-site" hidden>
         <div class="site-head">
           <h2 id="site-title">-</h2>
@@ -160,9 +273,19 @@
 
             <!-- 问题复核 -->
             <div class="card" id="findings-panel" hidden>
+          <div class="bucket-chips" id="finding-buckets">
+            <span>确认问题 <b id="rc-confirmed-problem">0</b></span>
+            <span>待复核线索 <b id="rc-suspected">0</b></span>
+            <span>数据不足 <b id="rc-insufficient">0</b></span>
+            <span>采集异常 <b id="rc-collection">0</b></span>
+            <span>自动排除 <b id="rc-auto">0</b></span>
+            <span>人工排除 <b id="rc-human">0</b></span>
+            <span>客户正式 <b id="rc-customer-formal">0</b></span>
+          </div>
+
               <div class="panel-head"><h3>问题复核</h3><span class="muted-note">当前任务的复核队列</span></div>
               <div class="review-filters">
-                <button type="button" class="chip-filter review-filter" data-status="pending">待复核 <b id="rc-pending">0</b></button>
+                <button type="button" class="chip-filter review-filter" data-status="suspected">待复核线索 <b id="rc-pending">0</b></button>
                 <button type="button" class="chip-filter review-filter" data-status="confirmed">确认异常 <b id="rc-confirmed">0</b></button>
                 <button type="button" class="chip-filter review-filter" data-status="dismissed">已排除 <b id="rc-dismissed">0</b></button>
                 <button type="button" class="chip-filter review-filter" data-status="all">全部</button>
@@ -184,7 +307,7 @@
             <div class="card" style="overflow:hidden">
               <div class="panel-head"><h3>本站点历史任务</h3></div>
               <div class="table-wrap"><table class="mini">
-                <thead><tr><th>任务</th><th>模式</th><th>状态</th><th>进度</th><th>问题</th><th>创建时间</th><th>结果</th></tr></thead>
+                <thead><tr><th>任务</th><th>模式</th><th>状态</th><th>进度</th><th title="客户正式问题数 formal_finding_count">正式问题</th><th title="线索合计 finding_total_count / finding_count">线索</th><th>创建时间</th><th>结果</th></tr></thead>
                 <tbody id="site-history-body"></tbody>
               </table></div>
               <p class="muted-note panel-pad" id="site-history-empty" hidden>暂无记录。完成首次全量后，这里会显示每次扫描的结果与 Excel 下载。</p>
@@ -202,7 +325,7 @@
               <div class="rail-pad"><dl class="kv" id="rail-info"></dl></div>
             </div>
             <div class="card" id="rail-findings-card" hidden>
-              <div class="rail-head"><h4>待复核问题</h4></div>
+              <div class="rail-head"><h4>客户正式问题</h4><p class="muted-note" style="margin:4px 0 0;font-size:12px">非线索总数</p></div>
               <div class="rail-pad"><div class="rail-big num" id="rail-findings-num">0</div></div>
             </div>
             <div class="card" id="rail-notes-card" hidden>
@@ -216,6 +339,18 @@
             </div>
           </aside>
         </div>
+      </section>
+
+      <!-- ===== 通用视图（scan-jobs + 其他 19 项） ===== -->
+      <section class="page" id="page-generic" hidden>
+        <div class="site-head">
+          <h2 id="generic-title">-</h2>
+          <span class="head-actions">
+            <button type="button" class="btn btn-sm" id="generic-refresh">刷新</button>
+          </span>
+        </div>
+        <p class="site-sub" id="generic-sub">-</p>
+        <div id="generic-body"></div>
       </section>
     </main>
   </div>
@@ -251,6 +386,8 @@
 
   <!-- ===== 证据定位 ===== -->
   <dialog id="evidence-dialog" class="evidence-dialog" aria-labelledby="evidence-title">
+  <div id="evidence-fields" class="evidence-fields"></div>
+
     <div class="dlg-head">
       <div><h3 id="evidence-title">问题证据定位</h3><p id="evidence-subtitle"></p></div>
       <button type="button" class="dlg-close" id="evidence-close">✕</button>
@@ -258,8 +395,8 @@
     <div class="dlg-body">
       <div class="evidence-actions"><a id="evidence-source" class="btn btn-sm" target="_blank" rel="noopener noreferrer">打开原政策页面</a></div>
       <dl class="kv evidence-fields">
-        <dt>页面值</dt><dd id="evidence-page-value">-</dd>
-        <dt>正文值</dt><dd id="evidence-body-value">-</dd>
+        <dt>页面值</dt><dd id="evidence-page-value" hidden>-</dd>
+        <dt>正文值</dt><dd id="evidence-body-value" hidden>-</dd>
         <dt>规则证据</dt><dd id="evidence-rule-text">-</dd>
       </dl>
       <p class="muted-note">红框表示规则命中的已采集文本；未在正文中出现的页面字段会保留在上方证据区。</p>
@@ -267,7 +404,21 @@
     </div>
   </dialog>
 
+  <!-- ===== 登录 ===== -->
+  <dialog id="login-dialog">
+    <form method="dialog" id="login-form" class="login-form">
+      <h3>登录</h3>
+      <label>用户名 <input id="login-username" name="username" required></label>
+      <label>密码 <input id="login-password" name="password" type="password" required></label>
+      <p id="login-error" class="error" hidden></p>
+      <menu>
+        <button type="submit" class="btn btn-primary" id="login-submit">登录</button>
+        <button type="button" class="btn" id="login-cancel" value="cancel">取消</button>
+      </menu>
+    </form>
+  </dialog>
+
   <div id="toast" role="status"></div>
-  <script src="/static/app.js?v=20260726-sitecentric2"></script>
+  <script src="/static/app.js?v=20260727-m61nav"></script>
 </body>
 </html>

@@ -299,6 +299,160 @@ async def test_duplicate_identity_not_double_counted(snapshot_runtime):
     assert int(job["examined_count"]) <= 1 or int(job["processed_count"]) >= 1
 
 
+def test_snapshot_record_scan_item_keeps_conflicting_stable_rows(tmp_path):
+    db = Database(tmp_path / "stable-conflict.db")
+    db.initialize()
+    repo = Repository(db)
+    job_id = db.create_job(putuo_labels(), "full", {"query_contract": PUTUO_QUERY_CONTRACT}, 0)
+    first = _item("putuo_government", "same-pos-a", "Same Pos A", 1, 0)
+    second = _item("putuo_government", "same-pos-b", "Same Pos B", 1, 0)
+
+    first_doc = repo.save_record(
+        job_id,
+        PolicyRecord(first.district, first.title, first.url, published_date=first.published_date),
+        [],
+    )
+    second_doc = repo.save_record(
+        job_id,
+        PolicyRecord(second.district, second.title, second.url, published_date=second.published_date),
+        [],
+    )
+    repo.record_scan_item(job_id, first, detail_status="checked_complete", document_id=first_doc)
+    repo.record_scan_item(job_id, second, detail_status="checked_complete", document_id=second_doc)
+
+    with db.connect() as conn:
+        rows = conn.execute(
+            """SELECT url,document_id,page_number,item_index FROM scan_item_results
+            WHERE job_id=? ORDER BY item_index""",
+            (job_id,),
+        ).fetchall()
+
+    assert len(rows) == 2
+    assert {row["url"] for row in rows} == {first.url, second.url}
+    assert {row["document_id"] for row in rows} == {first_doc, second_doc}
+    assert {row["item_index"] for row in rows} == {-1, 0}
+    assert {row["page_number"] for row in rows} == {1}
+
+
+def test_snapshot_record_scan_item_replay_of_same_stable_is_idempotent(tmp_path):
+    db = Database(tmp_path / "stable-replay.db")
+    db.initialize()
+    repo = Repository(db)
+    job_id = db.create_job(putuo_labels(), "full", {"query_contract": PUTUO_QUERY_CONTRACT}, 0)
+    first = _item("putuo_government", "replay-pos-a", "Replay Pos A", 1, 0)
+    second = _item("putuo_government", "replay-pos-b", "Replay Pos B", 1, 0)
+
+    repo.record_scan_item(job_id, first, detail_status="checked_complete")
+    repo.record_scan_item(job_id, second, detail_status="checked_complete")
+    with db.connect() as conn:
+        before = conn.execute(
+            "SELECT id,item_index FROM scan_item_results WHERE job_id=? AND url=?",
+            (job_id, second.url),
+        ).fetchone()
+
+    repo.record_scan_item(job_id, second, detail_status="checked_complete")
+
+    with db.connect() as conn:
+        rows = conn.execute(
+            "SELECT id,url,item_index FROM scan_item_results WHERE job_id=? ORDER BY id",
+            (job_id,),
+        ).fetchall()
+        replay_rows = [row for row in rows if row["url"] == second.url]
+
+    assert len(rows) == 2
+    assert len(replay_rows) == 1
+    assert replay_rows[0]["id"] == before["id"]
+    assert replay_rows[0]["item_index"] == before["item_index"] == -1
+
+
+def test_snapshot_record_scan_item_reassigns_negative_position_after_page_drift(tmp_path):
+    db = Database(tmp_path / "stable-page-drift.db")
+    db.initialize()
+    repo = Repository(db)
+    job_id = db.create_job(putuo_labels(), "full", {"query_contract": PUTUO_QUERY_CONTRACT}, 0)
+    first_page = _item("putuo_government", "first-page", "First Page", 1, 0)
+    moving = _item("putuo_government", "moving", "Moving", 1, 0)
+    second_page = _item("putuo_government", "second-page", "Second Page", 2, 0)
+    second_page_negative = _item("putuo_government", "second-page-negative", "Second Page Negative", 2, -1)
+
+    repo.record_scan_item(job_id, first_page, detail_status="checked_complete")
+    repo.record_scan_item(job_id, moving, detail_status="checked_complete")
+    repo.record_scan_item(job_id, second_page, detail_status="checked_complete")
+    repo.record_scan_item(job_id, second_page_negative, detail_status="checked_complete")
+
+    moving_on_second_page = _item("putuo_government", "moving", "Moving", 2, 0)
+    repo.record_scan_item(job_id, moving_on_second_page, detail_status="checked_complete")
+    with db.connect() as conn:
+        before_replay = conn.execute(
+            "SELECT id,page_number,item_index FROM scan_item_results WHERE job_id=? AND url=?",
+            (job_id, moving.url),
+        ).fetchone()
+
+    repo.record_scan_item(job_id, moving_on_second_page, detail_status="checked_complete")
+
+    with db.connect() as conn:
+        rows = conn.execute(
+            "SELECT id,url,page_number,item_index FROM scan_item_results WHERE job_id=? ORDER BY id",
+            (job_id,),
+        ).fetchall()
+        moving_rows = [row for row in rows if row["url"] == moving.url]
+
+    assert len(rows) == 4
+    assert len(moving_rows) == 1
+    assert moving_rows[0]["id"] == before_replay["id"]
+    assert moving_rows[0]["page_number"] == before_replay["page_number"] == 2
+    assert moving_rows[0]["item_index"] == before_replay["item_index"] == -2
+    assert {(row["page_number"], row["item_index"]) for row in rows} == {
+        (1, 0), (2, 0), (2, -1), (2, -2),
+    }
+
+
+def _seed_snapshot_validation_case(tmp_path, result_count: int):
+    db = Database(tmp_path / f"snapshot-coverage-{result_count}.db")
+    db.initialize()
+    manager = JobManager(db)
+    repo = Repository(db)
+    job_id = db.create_job(putuo_labels(), "full", {"query_contract": PUTUO_QUERY_CONTRACT}, 0)
+    generation_id = repo.create_generation(
+        job_id,
+        target_key=SCAN_TARGETS["putuo_government"].key,
+        generation_kind="full",
+        query_contract=PUTUO_QUERY_CONTRACT,
+    )
+    db.update_job(job_id, status="running", generation_id=generation_id)
+    items = [
+        _item("putuo_government", "coverage-a", "Coverage A", 1, 0),
+        _item("putuo_government", "coverage-b", "Coverage B", 1, 1),
+    ]
+    for item in items:
+        item_id, _created = repo.upsert_generation_item(generation_id, job_id, item)
+        repo.complete_generation_item(
+            item_id, status="completed", detail_status="checked_complete",
+        )
+    repo.update_generation(generation_id, observed_total=len(items))
+    for item in items[:result_count]:
+        repo.record_scan_item(job_id, item, detail_status="checked_complete")
+    return manager, job_id
+
+
+def test_snapshot_complete_coverage_requires_result_count_match(tmp_path):
+    manager, job_id = _seed_snapshot_validation_case(tmp_path, result_count=1)
+
+    with pytest.raises(SafetyPause) as exc_info:
+        manager._validate_complete_coverage(job_id)
+
+    message = str(exc_info.value)
+    assert "terminal=2" in message
+    assert "scan_item_results=1" in message
+    assert "missing_count=1" in message
+
+
+def test_snapshot_complete_coverage_passes_when_result_count_matches(tmp_path):
+    manager, job_id = _seed_snapshot_validation_case(tmp_path, result_count=2)
+
+    manager._validate_complete_coverage(job_id)
+
+
 @pytest.mark.asyncio
 async def test_cooldown_resume_continues(snapshot_runtime, monkeypatch):
     manager, db = snapshot_runtime

@@ -1,0 +1,16 @@
+# M3 命令记录
+
+## 依赖安装
+.venv\Scripts\python.exe -m pip install "pypdf>=4.3,<5" "pdfplumber>=0.11,<1" "pdfminer.six>=20240706" "Pillow>=10.4,<12" "pytesseract>=0.3.10,<0.4"
+
+## Tesseract 版本
+tesseract v5.5.0.20241111
+
+## 测试命令
+.venv\Scripts\python.exe -m pytest tests/test_m3_pdf_ocr_compare.py -v --tb=short -p no:cacheprovider
+
+## 全量回归
+.venv\Scripts\python.exe -m pytest tests/ -q --tb=short -p no:cacheprovider
+
+## 迁移（自动）
+Database.initialize() -> _migrate_m3 -> run_m3_migration

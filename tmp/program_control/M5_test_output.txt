@@ -1,0 +1,77 @@
+============================== M5 测试输出 ==============================
+
+## M5 专项测试 (tests/test_m5_reading_interp_rectification.py)
+
+============================= test session starts =============================
+platform win32 -- Python 3.12.13, pytest-8.4.1, pluggy-1.6.0 -- E:\Software Development\Policy inspection system\.venv\Scripts\python.exe
+cachedir: .pytest_cache
+rootdir: E:\Software Development\Policy inspection system
+configfile: pyproject.toml
+plugins: anyio-4.14.1, asyncio-1.1.0
+
+collected 47 items
+
+tests/test_m5_reading_interp_rectification.py::TestM5Migration::test_m5_tables_created PASSED [  2%]
+tests/test_m5_reading_interp_rectification.py::TestM5Migration::test_m5_policy_documents_columns PASSED [  4%]
+tests/test_m5_reading_interp_rectification.py::TestM5Migration::test_m5_rule_versions_seeded PASSED [  6%]
+tests/test_m5_reading_interp_rectification.py::TestM5Migration::test_migration_is_idempotent PASSED [  8%]
+tests/test_m5_reading_interp_rectification.py::TestReadingLinkage::test_read_001_button_missing PASSED [ 10%]
+tests/test_m5_reading_interp_rectification.py::TestReadingLinkage::test_read_002_button_present_but_not_clickable PASSED [ 12%]
+tests/test_m5_reading_interp_rectification.py::TestReadingLinkage::test_read_003_jump_failed_http_error PASSED [ 14%]
+tests/test_m5_reading_interp_rectification.py::TestReadingLinkage::test_read_003_page_not_found PASSED [ 17%]
+tests/test_m5_reading_interp_rectification.py::TestReadingLinkage::test_read_004_blank_page_after_jump PASSED [ 19%]
+tests/test_m5_reading_interp_rectification.py::TestReadingLinkage::test_read_005_no_data_placeholder PASSED [ 21%]
+tests/test_m5_reading_interp_rectification.py::TestReadingLinkage::test_redirect_is_not_misflagged PASSED [ 23%]
+tests/test_m5_reading_interp_rectification.py::TestReadingLinkage::test_403_does_not_enter_confirmed_problem PASSED [ 25%]
+tests/test_m5_reading_interp_rectification.py::TestReadingLinkage::test_429_does_not_enter_confirmed_problem PASSED [ 27%]
+tests/test_m5_reading_interp_rectification.py::TestReadingLinkage::test_ok_no_finding PASSED [ 29%]
+tests/test_m5_reading_interp_rectification.py::TestReadingLinkage::test_list_reading_checks_filter PASSED [ 31%]
+tests/test_m5_reading_interp_rectification.py::TestMediaChecks::test_media_001_image_missing PASSED [ 34%]
+tests/test_m5_reading_interp_rectification.py::TestMediaChecks::test_media_002_image_broken PASSED [ 36%]
+tests/test_m5_reading_interp_rectification.py::TestMediaChecks::test_media_003_video_missing PASSED [ 38%]
+tests/test_m5_reading_interp_rectification.py::TestMediaChecks::test_media_004_video_playback_failed PASSED [ 40%]
+tests/test_m5_reading_interp_rectification.py::TestMediaChecks::test_media_005_empty_page PASSED [ 42%]
+tests/test_m5_reading_interp_rectification.py::TestMediaChecks::test_media_006_blocked_not_confirmed PASSED [ 44%]
+tests/test_m5_reading_interp_rectification.py::TestMediaChecks::test_media_ok_no_finding PASSED [ 46%]
+tests/test_m5_reading_interp_rectification.py::TestInterpretation::test_create_interpretation_with_explicit_match PASSED [ 48%]
+tests/test_m5_reading_interp_rectification.py::TestInterpretation::test_interpretation_doc_number_match PASSED [ 51%]
+tests/test_m5_reading_interp_rectification.py::TestInterpretation::test_interpretation_doc_number_mismatch PASSED [ 53%]
+tests/test_m5_reading_interp_rectification.py::TestInterpretation::test_interp_001_link_invalid PASSED [ 55%]
+tests/test_m5_reading_interp_rectification.py::TestInterpretation::test_interp_003_published_at_missing PASSED [ 57%]
+tests/test_m5_reading_interp_rectification.py::TestInterpretation::test_interp_005_image_broken PASSED [ 59%]
+tests/test_m5_reading_interp_rectification.py::TestInterpretation::test_interp_006_video_failed PASSED [ 61%]
+tests/test_m5_reading_interp_rectification.py::TestInterpretation::test_interp_007_blank_page PASSED [ 63%]
+tests/test_m5_reading_interp_rectification.py::TestInterpretation::test_interp_ok_no_finding PASSED [ 65%]
+tests/test_m5_reading_interp_rectification.py::TestRectification::test_rect_001_no_responsible_unit PASSED [ 68%]
+tests/test_m5_reading_interp_rectification.py::TestRectification::test_rect_007_no_deadline PASSED [ 70%]
+tests/test_m5_reading_interp_rectification.py::TestRectification::test_create_task_no_issues PASSED [ 72%]
+tests/test_m5_reading_interp_rectification.py::TestRectification::test_status_transition_happy_path PASSED [ 74%]
+tests/test_m5_reading_interp_rectification.py::TestRectification::test_rect_003_after_evidence_missing PASSED [ 76%]
+tests/test_m5_reading_interp_rectification.py::TestRectification::test_rect_004_failed_without_rework PASSED [ 78%]
+tests/test_m5_reading_interp_rectification.py::TestRectification::test_rect_005_recurrence_after_signoff PASSED [ 80%]
+tests/test_m5_reading_interp_rectification.py::TestRectification::test_rect_002_overdue_detection PASSED [ 82%]
+tests/test_m5_reading_interp_rectification.py::TestRectification::test_rect_006_status_history_missing PASSED [ 85%]
+tests/test_m5_reading_interp_rectification.py::TestRectification::test_invalid_transition_rejected PASSED [ 87%]
+tests/test_m5_reading_interp_rectification.py::TestRectification::test_get_task_with_history PASSED [ 89%]
+tests/test_m5_reading_interp_rectification.py::TestM5API::test_reading_check_endpoint_requires_auth PASSED [ 91%]
+tests/test_m5_reading_interp_rectification.py::TestM5API::test_media_check_endpoint_endpoint_requires_auth PASSED [ 93%]
+tests/test_m5_reading_interp_rectification.py::TestM5API::test_interpretation_endpoint_requires_auth PASSED [ 95%]
+tests/test_m5_reading_interp_rectification.py::TestM5API::test_rectification_endpoint_requires_auth PASSED [ 97%]
+tests/test_m5_reading_interp_rectification.py::TestM5API::test_rectification_overdue_requires_login PASSED [100%]
+
+======================= 47 passed, 1 warning in 24.23s ========================
+
+
+## 全量回归测试
+
+============================== warnings summary ===============================
+.venv\Lib\site-packages\_pytest\cacheprovider.py:475
+  PytestCacheWarning: could not create cache path ... [WinError 5] 拒绝访问
+
+============================== 347 passed, 1 warning in 535.22s (0:08:55) ==============================
+
+## 结论
+- M5 专项测试: 47 passed / 0 failed
+- 全量回归测试: 347 passed / 0 failed (M4=300 + M5=47)
+- 无回归
+- 无失败

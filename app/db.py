@@ -342,7 +342,13 @@ class Database:
     def connect(self) -> Iterator[sqlite3.Connection]:
         conn = sqlite3.connect(self.path, timeout=30, check_same_thread=False)
         conn.row_factory = sqlite3.Row
+        # M6 锁治理：显式设置 PRAGMA（connect timeout=30 等效，但连接后显式声明更稳健）
         conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute("PRAGMA busy_timeout=30000")  # 30s，与 connect timeout 一致
+        # WAL 模式下 synchronous=NORMAL 在写性能与数据安全间取平衡（崩溃不损坏，仅断电风险）
+        conn.execute("PRAGMA synchronous=NORMAL")
+        # cache_size 正数=页数，负数=KB。设 -65536 = 64MB，提升读吞吐
+        conn.execute("PRAGMA cache_size=-65536")
         try:
             yield conn
             conn.commit()
@@ -355,6 +361,12 @@ class Database:
             conn.executescript(SCHEMA)
             self._migrate(conn)
             self._seed_agencies(conn)
+            self._migrate_phase1(conn)
+            self._migrate_m2(conn)
+            self._migrate_m3(conn)
+            self._migrate_m4(conn)
+            self._migrate_m5(conn)
+            self._migrate_m6(conn)
 
     @staticmethod
     def _migrate(conn: sqlite3.Connection) -> None:
@@ -502,6 +514,46 @@ class Database:
             [(d, a, json.dumps(x, ensure_ascii=False), json.dumps(p, ensure_ascii=False)) for d, a, x, p in rows],
         )
 
+
+    @staticmethod
+    def _migrate_phase1(conn: sqlite3.Connection) -> None:
+        from app.migrations.phase1 import run_phase1_migration
+        from app.migrations.closeout import run_closeout_migration
+        from app.knowledge.organizations import seed_organizations
+        run_phase1_migration(conn)
+        run_closeout_migration(conn)
+        seed_organizations(conn)
+
+    @staticmethod
+    def _migrate_m2(conn: sqlite3.Connection) -> None:
+        from app.migrations.m2 import run_m2_migration
+
+        run_m2_migration(conn)
+
+    @staticmethod
+    def _migrate_m3(conn: sqlite3.Connection) -> None:
+        from app.migrations.m3 import run_m3_migration
+
+        run_m3_migration(conn)
+
+    @staticmethod
+    def _migrate_m4(conn: sqlite3.Connection) -> None:
+        from app.migrations.m4 import run_m4_migration
+
+        run_m4_migration(conn)
+
+    @staticmethod
+    def _migrate_m5(conn: sqlite3.Connection) -> None:
+        from app.migrations.m5 import run_m5_migration
+
+        run_m5_migration(conn)
+
+    @staticmethod
+    def _migrate_m6(conn: sqlite3.Connection) -> None:
+        from app.migrations.m6 import run_m6_migration
+
+        run_m6_migration(conn)
+
     def create_job(
         self, districts: list[str], mode: str, safety: dict[str, Any], max_documents: int = 0,
         baseline_job_id: int | None = None,
@@ -548,6 +600,9 @@ class Database:
             return dict(row) if row else None
 
     def list_jobs(self, limit: int = 30) -> list[dict[str, Any]]:
+        """List jobs with live finding count semantics (formal vs total)."""
+        from app.finding_counts import compute_counts_from_rows
+
         with self.connect() as conn:
             rows = conn.execute(
                 """SELECT j.*,
@@ -555,7 +610,17 @@ class Database:
                 FROM scan_jobs j ORDER BY j.id DESC LIMIT ?""",
                 (limit,),
             ).fetchall()
-            return [dict(row) for row in rows]
+            result: list[dict[str, Any]] = []
+            for row in rows:
+                item = dict(row)
+                findings = conn.execute(
+                    "SELECT * FROM rule_findings WHERE job_id=? AND COALESCE(is_current,1)=1",
+                    (item["id"],),
+                ).fetchall()
+                live = compute_counts_from_rows([dict(r) for r in findings])
+                item.update(live)
+                result.append(item)
+            return result
 
     def active_job(self) -> dict[str, Any] | None:
         with self.connect() as conn:

@@ -37,6 +37,15 @@ from app.snapshot_scan import (
 
 
 class JobManager:
+    def _knowledge_for_district(self, district: str):
+        try:
+            from app.knowledge.organizations import load_knowledge
+            with self.db.connect() as conn:
+                rows = load_knowledge(conn, district)
+                return rows or load_knowledge(conn)
+        except Exception:
+            return []
+
     def __init__(self, db: Database):
         self.db = db
         self.repo = Repository(db)
@@ -685,8 +694,13 @@ class JobManager:
                     mismatches.append(f"仍有未终态条目 pending/checking/retry={open_total}")
                 if unique_total <= 0:
                     mismatches.append("generation 中没有稳定身份条目")
-                if terminal_total > 0 and self.repo.scan_item_count(job_id) == 0:
-                    mismatches.append("终态条目已完成但没有任何详情结果")
+                item_count = self.repo.scan_item_count(job_id)
+                if terminal_total != item_count:
+                    mismatches.append(
+                        "snapshot 结果行数量不一致："
+                        f"terminal={terminal_total}, scan_item_results={item_count}, "
+                        f"missing_count={terminal_total - item_count}"
+                    )
                 if mismatches:
                     raise SafetyPause("扫描覆盖校验失败，任务未标记完成：" + "；".join(mismatches))
                 return
@@ -1179,7 +1193,7 @@ class JobManager:
         record.header_detected = inspection.header_detected
         record.missing_metadata_fields = self._all_missing_fields(inspection)
         agency_rows = self.db.agency_rules(target.district)
-        findings = evaluate_record(record, agency_rows, calendar)
+        findings = evaluate_record(record, agency_rows, calendar, knowledge=self._knowledge_for_district(target.district))
         document_id = self.repo.save_record(job_id, record, findings)
         detail_status = "checked_incomplete" if record.missing_metadata_fields else "checked_complete"
         reason = (
@@ -1356,7 +1370,7 @@ class JobManager:
             record.header_detected = inspection.header_detected
             record.missing_metadata_fields = self._all_missing_fields(inspection)
             agency_rows = self.db.agency_rules(target.district)
-            findings = evaluate_record(record, agency_rows, calendar)
+            findings = evaluate_record(record, agency_rows, calendar, knowledge=self._knowledge_for_district(target.district))
             document_id = self.repo.save_record(job_id, record, findings)
             detail_status = "checked_incomplete" if record.missing_metadata_fields else "checked_complete"
             reason = (
@@ -1427,7 +1441,7 @@ class JobManager:
                 record.source_site = record.source_site or target.label
                 record.header_detected = inspection.header_detected
                 record.missing_metadata_fields = self._all_missing_fields(inspection)
-                findings = evaluate_record(record, self.db.agency_rules(target.district), calendar)
+                findings = evaluate_record(record, self.db.agency_rules(target.district), calendar, knowledge=self._knowledge_for_district(target.district))
                 document_id = self.repo.save_record(job_id, record, findings)
                 self.repo.record_job_document(
                     job_id, document_id, target.label, int(exception["page_number"]),
