@@ -1,0 +1,80 @@
+{
+  "generated_at": "2026-07-29T14:37:40.828787+00:00",
+  "database": "E:\\Software Development\\Policy inspection system\\data\\policy_inspector.db",
+  "database_sha256": "9A67CA363F9C02BE0EFAA8F68E6F4D71FC5AF53E2B66D0EB4FEFE5526D0ADEB5",
+  "read_only": true,
+  "job_ids": [
+    9,
+    10
+  ],
+  "totals": {
+    "documents_evaluated": 25525,
+    "old_total": 2611,
+    "new_total": 7730,
+    "old_customer_candidates": 694,
+    "new_customer_candidates": 655,
+    "kept": 638,
+    "added": 7092,
+    "removed": 1973,
+    "changed": 626
+  },
+  "jobs": {
+    "9": {
+      "documents_evaluated": 25149,
+      "old_total": 2585,
+      "new_total": 7704,
+      "old_customer_candidates": 680,
+      "new_customer_candidates": 641,
+      "kept": 612,
+      "added": 7092,
+      "removed": 1973,
+      "changed": 612,
+      "old_by_rule": {
+        "AGENCY-001": 1817,
+        "AGENCY-002": 84,
+        "DATE-001": 526,
+        "DATE-002": 3,
+        "DOC-001": 68,
+        "DOC-002": 83,
+        "DOC-003": 4
+      },
+      "new_by_rule": {
+        "DATE-001": 526,
+        "DATE-002": 3,
+        "DOC-001": 29,
+        "DOC-002": 83,
+        "DOC-003": 4,
+        "ORG-001": 474,
+        "ORG-002": 5034,
+        "ORG-003": 949,
+        "ORG-004": 168,
+        "ORG-005": 434
+      }
+    },
+    "10": {
+      "documents_evaluated": 376,
+      "old_total": 26,
+      "new_total": 26,
+      "old_customer_candidates": 14,
+      "new_customer_candidates": 14,
+      "kept": 26,
+      "added": 0,
+      "removed": 0,
+      "changed": 14,
+      "old_by_rule": {
+        "AGENCY-001": 8,
+        "AGENCY-003": 4,
+        "DATE-001": 12,
+        "DATE-002": 1,
+        "DOC-002": 1
+      },
+      "new_by_rule": {
+        "AGENCY-001": 8,
+        "AGENCY-003": 4,
+        "DATE-001": 12,
+        "DATE-002": 1,
+        "DOC-002": 1
+      }
+    }
+  }
+}

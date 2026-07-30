@@ -37,8 +37,27 @@ def test_findings_can_be_reviewed_from_api(tmp_path, monkeypatch):
         )
         assert saved.status_code == 200
         reviewed = client.get(f"/api/jobs/{job_id}/findings").json()[0]
-        assert reviewed["review_status"] == "confirmed"
-        assert reviewed["review_note"] == "人工核对正文后确认"
+    assert reviewed["review_status"] == "confirmed"
+    assert reviewed["review_note"] == "人工核对正文后确认"
+
+
+def test_export_endpoint_returns_xlsx_attachment(tmp_path, monkeypatch):
+    db = Database(tmp_path / "export-api.db")
+    monkeypatch.setattr(main_module, "db", db)
+    monkeypatch.setattr(main_module, "manager", JobManager(db))
+    monkeypatch.setattr("app.exporter.EXPORT_DIR", tmp_path)
+
+    with TestClient(main_module.app) as client:
+        job_id = db.create_job(["普陀区"], "full", {}, 1)
+        db.update_job(job_id, status="completed", coverage_status="complete")
+        response = client.get(f"/api/jobs/{job_id}/export")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith(
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+    assert "attachment" in response.headers["content-disposition"]
+    assert response.content.startswith(b"PK")
 
 
 def test_review_note_length_is_bounded(tmp_path, monkeypatch):
@@ -73,6 +92,52 @@ def test_finding_evidence_returns_saved_policy_text(tmp_path, monkeypatch):
     assert "普府〔2026〕1号" in payload["body_text"]
 
 
+def test_finding_evidence_cleans_legacy_putuo_page_chrome(tmp_path, monkeypatch):
+    db = Database(tmp_path / "evidence-polluted.db")
+    monkeypatch.setattr(main_module, "db", db)
+    monkeypatch.setattr(main_module, "manager", JobManager(db))
+    title = "普陀区历史政策"
+    polluted = f"""无障碍操作说明 跳转到网站导航区 跳转到主要内容区域
+首页 一网通办 新闻 政务
+{title}
+索引号：
+SY310107202600001
+主题分类：
+其他
+公开属性：
+主动公开
+成文日期：
+2026年01月01日
+发文字号：
+普府〔2026〕1号
+发布日期：
+2026年01月02日
+公开主体：
+上海市普陀区人民政府
+
+这是政策正文第一段。
+
+这是政策正文第二段。
+
+分享：
+关闭窗口
+相关推荐
+上海市普陀区人民政府主办"""
+    with TestClient(main_module.app) as client:
+        job_id = db.create_job(["普陀区"], "full", {}, 1)
+        Repository(db).save_record(
+            job_id,
+            PolicyRecord("普陀区", title, "https://www.shpt.gov.cn/example", body_text=polluted),
+            [Finding("AGENCY-001", "机构问题", "medium", "pending", "测试")],
+        )
+        finding = client.get(f"/api/jobs/{job_id}/findings").json()[0]
+        payload = client.get(f"/api/findings/{finding['id']}/evidence").json()
+
+    assert payload["body_text"] == "这是政策正文第一段。\n\n这是政策正文第二段。"
+    assert "跳转到网站导航区" not in payload["body_text"]
+    assert "分享：" not in payload["body_text"]
+
+
 def test_review_queue_filters_and_pages_findings(tmp_path, monkeypatch):
     db = Database(tmp_path / "queue.db")
     monkeypatch.setattr(main_module, "db", db)
@@ -92,6 +157,31 @@ def test_review_queue_filters_and_pages_findings(tmp_path, monkeypatch):
     assert pending.json()["counts"] == {"pending": 2, "confirmed": 1, "dismissed": 0}
     assert all_items.status_code == 200
     assert len(all_items.json()["items"]) == 3
+
+
+def test_global_review_queue_aggregates_jobs_and_job_zero_is_compatible(tmp_path, monkeypatch):
+    db = Database(tmp_path / "global-queue.db")
+    monkeypatch.setattr(main_module, "db", db)
+    monkeypatch.setattr(main_module, "manager", JobManager(db))
+    with TestClient(main_module.app) as client:
+        for index in range(2):
+            job_id = db.create_job([f"测试区{index}"], "full", {}, 1)
+            Repository(db).save_record(
+                job_id,
+                PolicyRecord(f"测试区{index}", f"跨任务文件{index}", f"https://example.test/global/{index}"),
+                [Finding(f"GLOBAL-{index}", "机构问题", "medium", "pending", "待复核")],
+            )
+        direct = client.get("/api/review-queue?review_status=pending&page=1&page_size=10")
+        compatible = client.get("/api/jobs/0/review-queue?review_status=pending&page=1&page_size=10")
+        overview = client.get("/api/overview")
+
+    assert direct.status_code == 200
+    assert direct.json()["total"] == 2
+    assert {item["title"] for item in direct.json()["items"]} == {"跨任务文件0", "跨任务文件1"}
+    assert compatible.status_code == 200
+    assert compatible.json() == direct.json()
+    assert overview.status_code == 200
+    assert overview.json()["finding_buckets"]["total"] == 2
 
 
 def test_scan_exceptions_api_only_returns_retest_failures(tmp_path, monkeypatch):
@@ -114,6 +204,41 @@ def test_scan_exceptions_api_only_returns_retest_failures(tmp_path, monkeypatch)
     assert payload["counts"] == {"pending": 0, "resolved": 1, "review_required": 1}
     assert len(payload["items"]) == 1
     assert payload["items"][0]["title"] == "待复测政策"
+
+
+def test_global_scan_exceptions_returns_all_statuses_and_job_zero_is_compatible(tmp_path, monkeypatch):
+    db = Database(tmp_path / "global-exceptions.db")
+    monkeypatch.setattr(main_module, "db", db)
+    monkeypatch.setattr(main_module, "manager", JobManager(db))
+    with TestClient(main_module.app) as client:
+        first_job = db.create_job(["普陀区"], "full", {}, 1)
+        second_job = db.create_job(["长宁区"], "full", {}, 1)
+        repository = Repository(db)
+        repository.record_scan_exception(
+            first_job, PolicyListItem("普陀区", 1, 0, "待处理", "https://example.test/pending"),
+            "detail_metadata", "首次失败",
+        )
+        repository.record_scan_exception(
+            first_job, PolicyListItem("普陀区", 1, 1, "已恢复", "https://example.test/resolved"),
+            "detail_metadata", "首次失败",
+        )
+        repository.record_scan_exception(
+            second_job, PolicyListItem("长宁区", 2, 0, "需人工", "https://example.test/review"),
+            "detail_metadata", "首次失败",
+        )
+        first_pending = repository.pending_scan_exceptions(first_job, "普陀区")
+        repository.resolve_scan_exception(next(item["id"] for item in first_pending if item["title"] == "已恢复"))
+        second_pending = repository.pending_scan_exceptions(second_job, "长宁区")
+        repository.fail_scan_exception_retest(second_pending[0]["id"], "复测仍失败")
+
+        direct = client.get("/api/scan-exceptions")
+        compatible = client.get("/api/jobs/0/scan-exceptions")
+
+    assert direct.status_code == 200
+    assert direct.json()["counts"] == {"pending": 1, "resolved": 1, "review_required": 1}
+    assert {item["status"] for item in direct.json()["items"]} == {"pending", "resolved", "review_required"}
+    assert compatible.status_code == 200
+    assert compatible.json() == direct.json()
 
 
 def test_baseline_and_item_stats_apis_expose_completed_full_runs_only(tmp_path, monkeypatch):
@@ -191,6 +316,61 @@ def test_index_exposes_district_and_sixteen_municipal_sites(tmp_path, monkeypatc
     assert "municipal_chongming" in keys
     assert "municipal_huangpu" in keys
     assert "municipal_pudong" in keys
+
+
+def test_scan_sites_reuses_one_prefetched_job_snapshot(tmp_path, monkeypatch):
+    db = Database(tmp_path / "scan-sites-prefetch.db")
+    manager = JobManager(db)
+    monkeypatch.setattr(main_module, "db", db)
+    monkeypatch.setattr(main_module, "manager", manager)
+    calls = 0
+    original = db.list_jobs
+
+    def counted_list_jobs(limit=30):
+        nonlocal calls
+        calls += 1
+        return original(limit)
+
+    monkeypatch.setattr(db, "list_jobs", counted_list_jobs)
+    with TestClient(main_module.app) as client:
+        response = client.get("/api/scan-sites")
+
+    assert response.status_code == 200
+    assert len(response.json()) == 17
+    assert calls == 1
+
+
+def test_delete_job_hides_terminal_task_and_rejects_active_task(tmp_path, monkeypatch):
+    db = Database(tmp_path / "delete-job.db")
+    monkeypatch.setattr(main_module, "db", db)
+    monkeypatch.setattr(main_module, "manager", JobManager(db))
+    with TestClient(main_module.app) as client:
+        terminal_job_id = db.create_job(["普陀区"], "full", {}, 1)
+        db.update_job(terminal_job_id, status="completed", coverage_status="complete")
+        deleted = client.delete(f"/api/jobs/{terminal_job_id}")
+
+        assert deleted.status_code == 200
+        assert client.get(f"/api/jobs/{terminal_job_id}").status_code == 404
+        assert client.get(f"/api/jobs/{terminal_job_id}/findings").status_code == 404
+        assert client.get(f"/api/jobs/{terminal_job_id}/export").status_code == 404
+        assert all(job["id"] != terminal_job_id for job in client.get("/api/jobs").json())
+        assert all(job["id"] != terminal_job_id for job in client.get("/api/overview").json()["jobs"])
+
+        active_job_id = db.create_job(["长宁区"], "full", {}, 1)
+        rejected = client.delete(f"/api/jobs/{active_job_id}")
+
+    assert rejected.status_code == 409
+    assert rejected.json()["detail"] == "执行中的任务不能删除，请先停止任务"
+    with db.connect() as conn:
+        deleted_row = conn.execute(
+            "SELECT deleted_at,deleted_by FROM scan_jobs WHERE id=?", (terminal_job_id,)
+        ).fetchone()
+        audit_row = conn.execute(
+            "SELECT action,resource_id FROM operation_audits WHERE action='jobs.delete' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    assert deleted_row["deleted_at"]
+    assert deleted_row["deleted_by"] == "auth-disabled"
+    assert dict(audit_row) == {"action": "jobs.delete", "resource_id": str(terminal_job_id)}
 
 
 

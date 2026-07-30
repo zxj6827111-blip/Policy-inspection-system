@@ -19,7 +19,7 @@ from playwright.async_api import Browser, BrowserContext, Page, TimeoutError as 
 
 from app.config import DISTRICT_SITE_IDS, TARGET_URL
 from app.domain import CooldownPause, ItemReviewRequired, PolicyListItem, PolicyRecord, RelatedLink, SafetyPause
-from app.rules import extract_authored_date, extract_document_numbers
+from app.rules import extract_authored_date, extract_declared_document_numbers
 from app.safety import RISK_TEXT, SafetyController
 
 
@@ -1115,7 +1115,7 @@ class BrowserCollector:
             published_date=published,
             authored_date=extract_authored_date(body_text, agency),
             body_text=body_text,
-            body_document_numbers=extract_document_numbers(body_text),
+            body_document_numbers=extract_declared_document_numbers(body_text),
             related_links=links,
             source_site="市级平台",
         )

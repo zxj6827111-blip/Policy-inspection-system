@@ -30,6 +30,15 @@ def _app_client(tmp_path, monkeypatch):
     return db, TestClient(main_module.app)
 
 
+def test_job_manager_does_not_fall_back_to_another_district_knowledge(tmp_path):
+    db = Database(tmp_path / "knowledge-scope.db")
+    db.initialize()
+    manager = JobManager(db)
+
+    assert manager._knowledge_for_district("普陀区")
+    assert manager._knowledge_for_district("崇明区") == []
+
+
 def test_unauthenticated_write_is_rejected(tmp_path, monkeypatch):
     _db, client = _app_client(tmp_path, monkeypatch)
     with client:
