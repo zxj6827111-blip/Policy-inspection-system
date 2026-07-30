@@ -41,8 +41,7 @@ class JobManager:
         try:
             from app.knowledge.organizations import load_knowledge
             with self.db.connect() as conn:
-                rows = load_knowledge(conn, district)
-                return rows or load_knowledge(conn)
+                return load_knowledge(conn, district)
         except Exception:
             return []
 
@@ -127,9 +126,10 @@ class JobManager:
                 f"不能{action}。请通过“完整全量重建”创建新任务，勿恢复修复前的 paused/partial 任务"
             )
 
-    def _matching_jobs(self, districts: list[str]) -> list[dict]:
+    def _matching_jobs(self, districts: list[str], jobs: list[dict] | None = None) -> list[dict]:
         signature = sorted(districts)
-        return [job for job in self.db.list_jobs(1000) if self._job_sources(job) == signature]
+        source = jobs if jobs is not None else self.db.list_jobs(1000)
+        return [job for job in source if self._job_sources(job) == signature]
 
     def _active_job_for(self, districts: list[str]) -> dict | None:
         return next((
@@ -137,20 +137,33 @@ class JobManager:
             if job["status"] in {JobStatus.PENDING, JobStatus.RUNNING, JobStatus.COOLING}
         ), None)
 
-    def eligible_baseline_for(self, districts: list[str]) -> dict | None:
-        for job in self.db.eligible_baselines():
+    def eligible_baseline_for(self, districts: list[str], jobs: list[dict] | None = None) -> dict | None:
+        candidates = jobs if jobs is not None else self.db.eligible_baselines()
+        for job in candidates:
             if self._job_sources(job) != sorted(districts):
                 continue
-            try:
-                self._validate_incremental_baseline(districts, int(job["id"]))
-            except ValueError:
-                continue
+            if jobs is not None:
+                item_count = int(job.get("scan_item_count") or 0)
+                if not (
+                    job.get("mode") == "full"
+                    and job.get("status") == JobStatus.COMPLETED
+                    and job.get("coverage_status") == "complete"
+                    and item_count > 0
+                    and item_count == int(job.get("estimated_total") or 0)
+                    and item_count == int(job.get("examined_count") or 0)
+                ):
+                    continue
+            else:
+                try:
+                    self._validate_incremental_baseline(districts, int(job["id"]))
+                except ValueError:
+                    continue
             return job
         return None
 
-    def automatic_plan(self, districts: list[str]) -> dict:
-        baseline = self.eligible_baseline_for(districts)
-        matching = self._matching_jobs(districts)
+    def automatic_plan(self, districts: list[str], jobs: list[dict] | None = None) -> dict:
+        baseline = self.eligible_baseline_for(districts, jobs)
+        matching = self._matching_jobs(districts, jobs)
         latest = matching[0] if matching else None
         resumable = {
             JobStatus.PENDING, JobStatus.RUNNING, JobStatus.COOLING,
@@ -1618,13 +1631,19 @@ class JobManager:
             self._tasks[job_id] = asyncio.create_task(self._run(job_id))
     def continuous_status(self) -> dict:
         """任务中心数据：只读，不创建调度行；未建基准的站点标记为不自动执行。"""
+        from inspect import signature
         from app.config import targets_for_site
         cfg = self.continuous_config
+        jobs = self.db.list_jobs(1000)
+        schedules = {row["site_key"]: row for row in self.repo.list_schedules()}
+        baseline_resolver = self.eligible_baseline_for
+        accepts_snapshot = len(signature(baseline_resolver).parameters) > 1
         sites = []
         for site_key, site in SCAN_SITES.items():
             labels = [t.label for t in targets_for_site(site_key)]
-            baseline = self.eligible_baseline_for(labels)
-            schedule = self.repo.get_schedule(site_key) or {}
+            # Preserve compatibility with single-argument resolver overrides.
+            baseline = baseline_resolver(labels, jobs) if accepts_snapshot else baseline_resolver(labels)
+            schedule = schedules.get(site_key, {})
             sites.append({
                 "site_key": site_key,
                 "site_label": site.label,

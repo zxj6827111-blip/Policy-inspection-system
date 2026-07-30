@@ -40,16 +40,88 @@ function toast(message) {
   const box = $('#toast'); box.textContent = message; box.style.display = 'block';
   clearTimeout(box._timer); box._timer = setTimeout(() => { box.style.display = 'none'; }, 4500);
 }
+function readCookie(name) {
+  const prefix = `${encodeURIComponent(name)}=`;
+  const item = document.cookie.split(';').map(part => part.trim()).find(part => part.startsWith(prefix));
+  if (!item) return '';
+  try {
+    return decodeURIComponent(item.slice(prefix.length));
+  } catch {
+    return '';
+  }
+}
 let csrfToken = '';
 async function api(url, options = {}) {
+  const {suppressAuthHandling = false, ...fetchOptions} = options;
   const headers = {'Content-Type': 'application/json', ...(options.headers || {})};
-  if (csrfToken && options.method && !['GET','HEAD'].includes(String(options.method).toUpperCase())) {
-    headers['X-CSRF-Token'] = csrfToken;
+  const method = String(options.method || 'GET').toUpperCase();
+  if (!['GET', 'HEAD', 'OPTIONS'].includes(method)) {
+    const token = csrfToken || readCookie('pis_csrf');
+    if (token) headers['X-CSRF-Token'] = token;
   }
-  const response = await fetch(url, {...options, headers, credentials: 'same-origin'});
-  if (!response.ok) { const data = await response.json().catch(() => ({})); throw new Error(data.detail || `请求失败 ${response.status}`); }
+  const response = await fetch(url, {...fetchOptions, headers, credentials: 'same-origin'});
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    if (response.status === 401 && !suppressAuthHandling) handleUnauthorized();
+    const error = new Error(data.detail || `请求失败 ${response.status}`);
+    error.status = response.status;
+    throw error;
+  }
   return response.json();
 }
+
+function exportFilename(response, fallback) {
+  const header = response.headers.get('content-disposition') || '';
+  const encoded = header.match(/filename\*=UTF-8''([^;]+)/i);
+  if (encoded) {
+    try { return decodeURIComponent(encoded[1]); } catch (_) { return fallback; }
+  }
+  const plain = header.match(/filename="?([^";]+)"?/i);
+  return plain ? plain[1] : fallback;
+}
+
+async function downloadJobExport(link) {
+  if (link.dataset.exporting === '1') return;
+  const href = link.getAttribute('href');
+  if (!href) return;
+  const originalText = link.textContent;
+  const originalLabel = link.getAttribute('aria-label');
+  const iconOnly = link.classList.contains('icon-action');
+  link.dataset.exporting = '1';
+  link.setAttribute('aria-busy', 'true');
+  link.setAttribute('aria-label', '正在生成 Excel');
+  link.textContent = iconOnly ? '…' : '生成中…';
+  try {
+    const response = await fetch(href, {credentials: 'same-origin'});
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}));
+      if (response.status === 401) handleUnauthorized();
+      throw new Error(payload.detail || `下载失败 ${response.status}`);
+    }
+    const blob = await response.blob();
+    const objectUrl = URL.createObjectURL(blob);
+    const download = document.createElement('a');
+    download.href = objectUrl;
+    download.download = exportFilename(response, '政策巡检结果.xlsx');
+    document.body.appendChild(download);
+    download.click();
+    download.remove();
+    window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1_000);
+  } finally {
+    delete link.dataset.exporting;
+    link.removeAttribute('aria-busy');
+    if (originalLabel) link.setAttribute('aria-label', originalLabel);
+    else link.removeAttribute('aria-label');
+    link.textContent = originalText;
+  }
+}
+
+document.addEventListener('click', event => {
+  const link = event.target.closest('a.job-export');
+  if (!link || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+  event.preventDefault();
+  downloadJobExport(link).catch(error => toast(error.message || 'Excel 下载失败'));
+});
 
 // ---------- 文案 ----------
 const statusNames = {pending:'等待启动', running:'扫描中', paused:'等待处理', partial:'本批完成', cooling:'安全冷却中', completed:'已完成', stopped:'已停止', failed:'扫描失败'};
@@ -104,6 +176,24 @@ let firstLoadDone = false;
 let navItems = [];
 let currentNav = null;          // 当前选中的导航 key
 let genericRowsCache = [];      // 通用视图当前数据，用于行详情展开
+let authState = 'checking';
+let currentUser = null;
+let pollTimer = null;
+let pollPromise = null;
+let unauthorizedHandled = false;
+let genericRequestController = null;
+let genericRequestSerial = 0;
+let scanJobFilter = 'all';
+let pendingDeleteJobId = null;
+let problemPage = 1;
+const POLL_INTERVAL_MS = 15000;
+const PROBLEM_VIEWS = {
+  'confirmed-problems': {filter: 'customer_formal', label: '确认问题', description: '经规则或人工确认、可进入客户结果的问题'},
+  'review-queue': {filter: 'suspected', label: '待复核线索', description: '需要人工核对证据与原文的疑似线索'},
+  'insufficient-data': {filter: 'insufficient_data', label: '数据不足', description: '当前证据不足，暂不能形成明确结论'},
+  'auto-excluded': {filter: 'auto_excluded', label: '已自动排除', description: '已由规则自动识别并排除的记录'},
+  'human-excluded': {filter: 'human_excluded', label: '已人工排除', description: '经人工核对后排除的记录'},
+};
 
 const siteByKey = () => Object.fromEntries(sites.map(site => [site.key, site]));
 const signature = labels => (labels || []).slice().sort().join('');
@@ -152,7 +242,7 @@ function renderNav(items) {
     if (!list || !list.length) continue;
     const isOpen = g.key === 'main' || list.some(item => item.key === currentNav);
     html += `<details class="side-group" data-group="${escapeHtml(g.key)}"${isOpen ? ' open' : ''}>` +
-      `<summary>${escapeHtml(g.label)} <span class="g-count">${list.length}</span></summary>`;
+      `<summary>${escapeHtml(g.label)}</summary>`;
     for (const item of list) {
       const icon = ICON_EMOJI[item.icon] || '•';
       html += `<button type="button" class="side-item" data-nav="${escapeHtml(item.key)}" data-api="${escapeHtml(item.api)}">` +
@@ -190,6 +280,10 @@ function renderSidebar() {
 
 // ---------- 导航路由 ----------
 async function navigate(key, apiPath) {
+  if (authState !== 'authenticated') {
+    openLoginDialog();
+    return;
+  }
   currentNav = key;
   const item = navItems.find(i => i.key === key);
   const label = item ? item.label : key;
@@ -201,7 +295,18 @@ async function navigate(key, apiPath) {
   }
   if (key === 'scan-jobs') {
     showView('generic');
-    await renderGenericView(label, '/api/jobs', description || '全部扫描任务列表与状态');
+    await renderScanJobsView();
+    return;
+  }
+  if (PROBLEM_VIEWS[key]) {
+    problemPage = 1;
+    showView('generic');
+    await renderProblemsView(key);
+    return;
+  }
+  if (key === 'collection-errors') {
+    showView('generic');
+    await renderExceptionView();
     return;
   }
   // 其他 19 项：通用表格视图
@@ -213,6 +318,7 @@ async function navigate(key, apiPath) {
 async function renderOverviewDashboard() {
   const stats = $('#ov-stats');
   const recent = $('#ov-recent-jobs');
+  const recentJobsExpanded = recent?.querySelector('.recent-jobs-panel')?.open ?? false;
   if (!stats) return;
   stats.innerHTML = '<p class="muted-note panel-pad">加载仪表盘…</p>';
   if (recent) recent.innerHTML = '';
@@ -240,13 +346,8 @@ async function renderOverviewDashboard() {
   ).join('')}</div>`;
 
   const recentJobs = (data.jobs || []).slice(0, 10);
-  if (!recent || !recentJobs.length) {
-    if (recent) recent.innerHTML = '<div class="card"><div class="panel-pad"><p class="muted-note">暂无最近任务</p></div></div>';
-    return;
-  }
-  recent.innerHTML = `<div class="card" style="overflow:hidden">
-    <div class="panel-head"><h3>最近任务</h3><span class="muted-note">${recentJobs.length} 条</span></div>
-    <div class="table-wrap"><table class="mini">
+  if (!recent) return;
+  const recentBody = recentJobs.length ? `<div class="table-wrap"><table class="mini">
       <thead><tr><th>任务</th><th>模式</th><th>状态</th><th>进度</th><th title="客户正式问题数 formal_finding_count">正式问题</th><th title="线索合计 finding_total_count / finding_count">线索</th><th>创建时间</th><th>结果</th></tr></thead>
       <tbody>${recentJobs.map(job => `<tr>
         <td class="num"><b>#${job.id}</b></td>
@@ -256,26 +357,33 @@ async function renderOverviewDashboard() {
         <td class="num" title="客户正式问题 formal_finding_count">${fmtNum(job.formal_finding_count != null ? job.formal_finding_count : 0)}</td>
         <td class="num" title="线索合计 finding_total_count">${fmtNum(job.finding_total_count != null ? job.finding_total_count : job.finding_count)}</td>
         <td class="num">${fmtTime(job.created_at)}</td>
-        <td><a class="btn btn-sm" href="/api/jobs/${job.id}/export">Excel</a></td>
+        <td><a class="btn btn-sm job-export" href="/api/jobs/${job.id}/export">Excel</a></td>
       </tr>`).join('')}</tbody>
-    </table></div></div>`;
+    </table></div>` : '<div class="panel-pad"><p class="muted-note">暂无最近任务</p></div>';
+  recent.innerHTML = `<details class="card recent-jobs-panel"${recentJobsExpanded ? ' open' : ''}>
+    <summary class="panel-head recent-jobs-summary"><h3>最近任务</h3><span class="recent-jobs-meta"><span class="muted-note">${recentJobs.length} 条</span></span></summary>
+    ${recentBody}</details>`;
 }
 
 // ---------- 通用视图（19 项 + scan-jobs） ----------
 async function renderGenericView(label, apiPath, description) {
   $('#generic-title').textContent = label;
   $('#generic-sub').textContent = description || '加载中…';
-  $('#generic-body').innerHTML = '<div class="card"><div class="panel-pad"><p class="muted-note">加载中…</p></div></div>';
+  $('#generic-body').innerHTML = '<div class="data-loading"><span class="loading-spinner" aria-hidden="true"></span><span>正在加载数据</span></div>';
   const refreshBtn = $('#generic-refresh');
   if (refreshBtn) {
+    refreshBtn.dataset.mode = 'generic';
     refreshBtn.dataset.api = apiPath || '';
     refreshBtn.dataset.label = label || '';
     refreshBtn.dataset.description = description || '';
   }
+  const request = beginGenericRequest();
   try {
-    const data = await api(apiPath);
+    const data = await api(apiPath, {signal: request.controller.signal});
+    if (request.serial !== genericRequestSerial) return;
     renderGenericData(label, data);
   } catch (error) {
+    if (error.name === 'AbortError') return;
     $('#generic-sub').textContent = description || '';
     $('#generic-body').innerHTML = `<div class="card"><div class="panel-pad"><p class="muted-note">加载失败：${escapeHtml(error.message)}</p></div></div>`;
   }
@@ -319,7 +427,10 @@ function renderGenericData(label, data) {
       if (Array.isArray(v) && v.length && typeof v[0] === 'object') {
         html += renderGenericTableCard(k, v);
       } else if (Array.isArray(v)) {
-        html += `<div class="card"><div class="panel-head"><h3>${escapeHtml(k)}</h3><span class="muted-note">${v.length} 条</span></div><div class="panel-pad"><ul class="generic-list">${v.map(item => `<li>${escapeHtml(String(item))}</li>`).join('')}</ul></div></div>`;
+        const content = v.length
+          ? `<ul class="generic-list">${v.map(item => `<li>${escapeHtml(String(item))}</li>`).join('')}</ul>`
+          : '<p class="muted-note">当前没有可显示的数据</p>';
+        html += `<div class="card"><div class="panel-head"><h3>${escapeHtml(k)}</h3><span class="muted-note">${v.length} 条</span></div><div class="panel-pad">${content}</div></div>`;
       } else if (typeof v === 'object' && v !== null) {
         html += `<div class="card"><div class="panel-head"><h3>${escapeHtml(k)}</h3></div><div class="panel-pad"><dl class="kv">${Object.entries(v).map(([sk, sv]) => `<dt>${escapeHtml(sk)}</dt><dd>${escapeHtml(String(sv))}</dd>`).join('')}</dl></div></div>`;
       } else {
@@ -409,6 +520,228 @@ function showGenericDetail(row) {
   $('#generic-detail-close').addEventListener('click', () => panel.remove());
 }
 
+function beginGenericRequest() {
+  if (genericRequestController) genericRequestController.abort();
+  genericRequestController = new AbortController();
+  genericRequestSerial += 1;
+  return {controller: genericRequestController, serial: genericRequestSerial};
+}
+
+function prepareGenericPage(title, description, mode) {
+  $('#generic-title').textContent = title;
+  $('#generic-sub').textContent = description;
+  $('#generic-body').innerHTML = '<div class="data-loading"><span class="loading-spinner" aria-hidden="true"></span><span>正在加载数据</span></div>';
+  const refresh = $('#generic-refresh');
+  if (refresh) refresh.dataset.mode = mode;
+}
+
+function jobStatusClass(status) {
+  if (status === 'completed') return 'pill-ok';
+  if (['running', 'pending', 'cooling'].includes(status)) return 'pill-run';
+  if (['failed', 'paused', 'partial'].includes(status)) return 'pill-warn';
+  return 'pill-neutral';
+}
+
+function scanJobMatchesFilter(job) {
+  if (scanJobFilter === 'active') return ['running', 'pending', 'cooling'].includes(job.status);
+  if (scanJobFilter === 'completed') return job.status === 'completed';
+  if (scanJobFilter === 'attention') return ['failed', 'paused', 'partial'].includes(job.status);
+  return true;
+}
+
+function renderScanJobRows(rows) {
+  const body = $('#scan-job-rows');
+  if (!body) return;
+  const filtered = rows.filter(scanJobMatchesFilter);
+  if (!filtered.length) {
+    body.innerHTML = '<tr><td colspan="8"><div class="empty-state">当前筛选下没有扫描任务</div></td></tr>';
+    return;
+  }
+  body.innerHTML = filtered.map(job => {
+    const labels = jobLabels(job);
+    const siteName = labels.length ? labels.join('、') : '未标注站点';
+    const examined = Number(job.examined_count || 0);
+    const total = Number(job.estimated_total || 0);
+    const percent = total ? Math.min(100, Math.round(examined / total * 100)) : 0;
+    const deletionBlocked = ['pending', 'running', 'cooling'].includes(job.status);
+    const deleteAction = currentUser?.capabilities?.includes('jobs:write') || currentUser?.roles?.includes('admin')
+      ? `<button type="button" class="icon-action icon-action-danger scan-job-delete" data-id="${job.id}" title="${deletionBlocked ? '执行中的任务不能删除，请先停止任务' : '删除任务'}" aria-label="删除任务" ${deletionBlocked ? 'disabled' : ''}>🗑</button>`
+      : '';
+    return `<tr>
+      <td><button type="button" class="table-link scan-job-open" data-id="${job.id}">#${job.id}</button></td>
+      <td><strong class="cell-title">${escapeHtml(siteName)}</strong><small>${escapeHtml(job.current_district || '')}</small></td>
+      <td><span class="mode-label">${job.mode === 'full' ? '全量扫描' : '增量扫描'}</span></td>
+      <td><span class="pill ${jobStatusClass(job.status)}">${escapeHtml(statusNames[job.status] || job.status)}</span></td>
+      <td><div class="job-progress"><span><i style="width:${percent}%"></i></span><b>${fmtNum(examined)} / ${total ? fmtNum(total) : '?'}</b></div></td>
+      <td><strong class="metric-danger">${fmtNum(job.formal_finding_count || 0)}</strong><small>线索 ${fmtNum(job.finding_total_count ?? job.finding_count)}</small></td>
+      <td><span>${escapeHtml(fmtTime(job.created_at))}</span><small>${job.finished_at ? `完成 ${escapeHtml(fmtTime(job.finished_at))}` : '尚未完成'}</small></td>
+      <td><div class="row-actions"><button type="button" class="icon-action scan-job-open" data-id="${job.id}" title="打开任务" aria-label="打开任务">→</button><a class="icon-action job-export" href="/api/jobs/${job.id}/export" title="下载 Excel" aria-label="下载 Excel">↓</a>${deleteAction}</div></td>
+    </tr>`;
+  }).join('');
+  document.querySelectorAll('.scan-job-open').forEach(button => button.addEventListener('click', () => openScanJob(Number(button.dataset.id))));
+  document.querySelectorAll('.scan-job-delete').forEach(button => button.addEventListener('click', () => openDeleteJobDialog(Number(button.dataset.id))));
+}
+
+function openDeleteJobDialog(jobId) {
+  const job = jobs.find(item => Number(item.id) === Number(jobId));
+  if (!job || ['pending', 'running', 'cooling'].includes(job.status)) return;
+  pendingDeleteJobId = Number(jobId);
+  $('#confirm-delete-job-name').textContent = `扫描任务 #${jobId}`;
+  $('#confirm-delete-job').showModal();
+}
+
+function closeDeleteJobDialog() {
+  pendingDeleteJobId = null;
+  $('#confirm-delete-job').close();
+}
+
+async function deleteSelectedJob() {
+  if (!pendingDeleteJobId) return;
+  const jobId = pendingDeleteJobId;
+  const button = $('#confirm-delete-job-ok');
+  button.disabled = true;
+  try {
+    await api(`/api/jobs/${jobId}`, {method: 'DELETE'});
+    closeDeleteJobDialog();
+    toast(`扫描任务 #${jobId} 已删除`);
+    await renderScanJobsView();
+    sites = await api('/api/scan-sites');
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function openScanJob(jobId) {
+  const job = jobs.find(item => Number(item.id) === Number(jobId));
+  if (!job) return;
+  const jobSignature = signature(jobLabels(job));
+  const site = sites.find(item => signature(item.target_labels) === jobSignature);
+  if (!site) {
+    toast('未找到该任务对应的站点入口');
+    return;
+  }
+  overrideJobId = Number(jobId);
+  currentNav = 'overview';
+  showView('site', site.key);
+}
+
+async function renderScanJobsView() {
+  prepareGenericPage('扫描任务', '查看全部扫描任务的运行状态、覆盖进度和结果', 'scan-jobs');
+  const request = beginGenericRequest();
+  try {
+    const data = await api('/api/jobs?limit=100', {signal: request.controller.signal});
+    if (request.serial !== genericRequestSerial) return;
+    jobs = data;
+    const counts = {
+      all: data.length,
+      active: data.filter(job => ['running', 'pending', 'cooling'].includes(job.status)).length,
+      completed: data.filter(job => job.status === 'completed').length,
+      attention: data.filter(job => ['failed', 'paused', 'partial'].includes(job.status)).length,
+    };
+    $('#generic-body').innerHTML = `<div class="metric-strip">
+      <div><span>全部任务</span><b>${fmtNum(counts.all)}</b></div><div><span>执行中</span><b>${fmtNum(counts.active)}</b></div>
+      <div><span>已完成</span><b>${fmtNum(counts.completed)}</b></div><div><span>需关注</span><b class="metric-danger">${fmtNum(counts.attention)}</b></div>
+    </div>
+    <div class="data-surface"><div class="data-toolbar"><div class="segmented" role="group" aria-label="任务状态筛选">
+      <button type="button" data-filter="all">全部 <b>${counts.all}</b></button><button type="button" data-filter="active">执行中 <b>${counts.active}</b></button>
+      <button type="button" data-filter="completed">已完成 <b>${counts.completed}</b></button><button type="button" data-filter="attention">需关注 <b>${counts.attention}</b></button>
+    </div><span class="toolbar-note">最近 ${data.length} 条任务</span></div>
+    <div class="table-wrap"><table class="mini business-table"><thead><tr><th>任务</th><th>扫描范围</th><th>模式</th><th>状态</th><th>覆盖进度</th><th>问题</th><th>时间</th><th>操作</th></tr></thead><tbody id="scan-job-rows"></tbody></table></div></div>`;
+    document.querySelectorAll('.segmented [data-filter]').forEach(button => {
+      button.classList.toggle('active', button.dataset.filter === scanJobFilter);
+      button.addEventListener('click', () => {
+        scanJobFilter = button.dataset.filter;
+        document.querySelectorAll('.segmented [data-filter]').forEach(item => item.classList.toggle('active', item.dataset.filter === scanJobFilter));
+        renderScanJobRows(data);
+      });
+    });
+    renderScanJobRows(data);
+  } catch (error) {
+    if (error.name === 'AbortError') return;
+    $('#generic-body').innerHTML = `<div class="empty-state error-state">扫描任务加载失败：${escapeHtml(error.message)}</div>`;
+  }
+}
+
+const PROBLEM_TABS = [
+  ['confirmed-problems', 'customer_formal', '确认问题'], ['review-queue', 'suspected', '待复核线索'],
+  ['insufficient-data', 'insufficient_data', '数据不足'], ['auto-excluded', 'auto_excluded', '自动排除'],
+  ['human-excluded', 'human_excluded', '人工排除'],
+];
+
+function renderProblemCard(finding) {
+  const evidence = finding.evidence || finding.page_value || finding.body_value || '暂无证据摘要';
+  return `<article class="issue-row">
+    <div class="issue-main"><div class="issue-heading"><span class="finding-district">${escapeHtml(finding.district || '未知区域')}</span><span class="rule-code">${escapeHtml(finding.rule_code || '-')}</span><a href="${safeUrl(finding.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(finding.title || '未命名文件')}</a></div>
+      <p class="issue-detail">${escapeHtml(finding.detail || finding.category || '未填写问题说明')}</p>
+      <div class="issue-evidence"><span>证据</span><p>${escapeHtml(evidence)}</p></div>
+    </div>
+    <div class="issue-side"><span class="pill ${finding.is_customer_formal ? 'pill-danger' : finding.review_status === 'dismissed' ? 'pill-neutral' : 'pill-warn'}">${finding.is_customer_formal ? '正式问题' : finding.review_status === 'dismissed' ? '已排除' : '待复核'}</span><small>任务 #${finding.job_id ?? '-'}</small><small>${escapeHtml(fmtTime(finding.created_at))}</small><button type="button" class="btn btn-sm evidence-open" data-id="${finding.id}">查看证据</button></div>
+    <div class="issue-review"><label>复核结论<select class="review-decision" data-id="${finding.id}"><option value="pending">待复核</option><option value="confirmed">确认异常</option><option value="dismissed">排除</option></select></label><label class="review-note-label">复核备注<input class="review-note" data-id="${finding.id}" value="${escapeHtml(finding.review_note || '')}" maxlength="500" placeholder="填写复核依据"></label><button type="button" class="btn btn-primary btn-sm review-save" data-id="${finding.id}">保存</button></div>
+  </article>`;
+}
+
+function bindProblemActions(key) {
+  document.querySelectorAll('.evidence-open').forEach(button => button.addEventListener('click', async () => {
+    try { await openEvidence(Number(button.dataset.id)); } catch (error) { toast(error.message); }
+  }));
+  document.querySelectorAll('.review-save').forEach(button => button.addEventListener('click', async () => {
+    const id = button.dataset.id;
+    const decision = document.querySelector(`.review-decision[data-id="${id}"]`).value;
+    const note = document.querySelector(`.review-note[data-id="${id}"]`).value;
+    button.disabled = true;
+    try {
+      await api(`/api/findings/${id}/review`, {method: 'POST', body: JSON.stringify({decision, note})});
+      toast('复核结论已保存');
+      await renderProblemsView(key);
+    } catch (error) { toast(error.message); }
+    finally { button.disabled = false; }
+  }));
+}
+
+async function renderProblemsView(key) {
+  const config = PROBLEM_VIEWS[key];
+  if (!config) return;
+  prepareGenericPage(config.label, config.description, 'problems');
+  const request = beginGenericRequest();
+  try {
+    const queue = await api(`/api/review-queue?review_status=${config.filter}&page=${problemPage}&page_size=20`, {signal: request.controller.signal});
+    if (request.serial !== genericRequestSerial) return;
+    const buckets = queue.bucket_counts || {};
+    const totalPages = Math.max(1, Math.ceil(queue.total / queue.page_size));
+    $('#generic-body').innerHTML = `<div class="metric-strip issue-metrics"><div><span>正式问题</span><b class="metric-danger">${fmtNum(buckets.customer_formal)}</b></div><div><span>待复核线索</span><b>${fmtNum(buckets.suspected)}</b></div><div><span>数据不足</span><b>${fmtNum(buckets.insufficient_data)}</b></div><div><span>已排除</span><b>${fmtNum((buckets.auto_excluded || 0) + (buckets.human_excluded || 0))}</b></div></div>
+      <div class="data-surface"><div class="data-toolbar"><div class="segmented problem-tabs">${PROBLEM_TABS.map(([navKey, filter, label]) => `<button type="button" data-nav="${navKey}" class="${filter === config.filter ? 'active' : ''}">${label} <b>${fmtNum(buckets[filter] || 0)}</b></button>`).join('')}</div><span class="toolbar-note">共 ${fmtNum(queue.total)} 条</span></div>
+      <div class="issue-list">${queue.items.length ? queue.items.map(renderProblemCard).join('') : '<div class="empty-state">当前分类下没有记录</div>'}</div>
+      <div class="data-pagination"><span>第 ${queue.page} / ${totalPages} 页</span><div><button type="button" class="btn btn-sm" id="problem-prev" ${queue.page <= 1 ? 'disabled' : ''}>上一页</button><button type="button" class="btn btn-sm" id="problem-next" ${queue.page >= totalPages ? 'disabled' : ''}>下一页</button></div></div></div>`;
+    document.querySelectorAll('.problem-tabs [data-nav]').forEach(button => button.addEventListener('click', () => navigate(button.dataset.nav).catch(error => toast(error.message))));
+    queue.items.forEach(finding => {
+      const select = document.querySelector(`.review-decision[data-id="${finding.id}"]`);
+      if (select) select.value = finding.review_status;
+    });
+    bindProblemActions(key);
+    $('#problem-prev')?.addEventListener('click', () => { problemPage -= 1; renderProblemsView(key); });
+    $('#problem-next')?.addEventListener('click', () => { problemPage += 1; renderProblemsView(key); });
+  } catch (error) {
+    if (error.name === 'AbortError') return;
+    $('#generic-body').innerHTML = `<div class="empty-state error-state">问题数据加载失败：${escapeHtml(error.message)}</div>`;
+  }
+}
+
+async function renderExceptionView() {
+  prepareGenericPage('采集异常', '查看扫描过程中待复测、已恢复和需要人工处理的异常', 'exceptions');
+  const request = beginGenericRequest();
+  try {
+    const queue = await api('/api/scan-exceptions', {signal: request.controller.signal});
+    if (request.serial !== genericRequestSerial) return;
+    const c = queue.counts || {};
+    $('#generic-body').innerHTML = `<div class="metric-strip"><div><span>待复测</span><b>${fmtNum(c.pending)}</b></div><div><span>已恢复</span><b>${fmtNum(c.resolved)}</b></div><div><span>需人工复核</span><b class="metric-danger">${fmtNum(c.review_required)}</b></div></div><div class="data-surface"><div class="issue-list exception-list">${queue.items.length ? queue.items.map(item => `<article class="issue-row compact"><div class="issue-main"><div class="issue-heading"><span class="finding-district">${escapeHtml(item.district)}</span><a href="${safeUrl(item.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(item.title)}</a></div><p class="issue-detail">${escapeHtml(item.last_error || item.category || '未记录异常原因')}</p><small>第 ${item.page_number} 页 · 第 ${Number(item.item_index || 0) + 1} 条 · 首次发现 ${escapeHtml(fmtTime(item.first_seen_at))}</small></div><div class="issue-side"><span class="pill ${item.status === 'resolved' ? 'pill-ok' : item.status === 'review_required' ? 'pill-warn' : 'pill-run'}">${item.status === 'resolved' ? '已恢复' : item.status === 'review_required' ? '需人工复核' : '待复测'}</span><small>任务 #${item.job_id}</small></div></article>`).join('') : '<div class="empty-state">当前没有采集异常</div>'}</div></div>`;
+  } catch (error) {
+    if (error.name === 'AbortError') return;
+    $('#generic-body').innerHTML = `<div class="empty-state error-state">采集异常加载失败：${escapeHtml(error.message)}</div>`;
+  }
+}
+
 // ---------- 总览（站点卡片 + 批量） ----------
 function renderOverview() {
   const counts = {attention: 0, active: 0, ready: 0, fresh: 0};
@@ -453,7 +786,7 @@ function renderLegacyJobs() {
       <td class="num">${fmtNum(job.examined_count)}/${job.estimated_total ? fmtNum(job.estimated_total) : '?'}</td>
       <td class="num" title="客户正式问题 formal_finding_count">${fmtNum(job.formal_finding_count != null ? job.formal_finding_count : 0)}</td><td class="num" title="线索合计 finding_total_count">${fmtNum(job.finding_total_count != null ? job.finding_total_count : job.finding_count)}</td>
       <td class="num">${fmtTime(job.created_at)}</td>
-      <td><a class="btn btn-sm" href="/api/jobs/${job.id}/export">Excel</a></td>
+      <td><a class="btn btn-sm job-export" href="/api/jobs/${job.id}/export">Excel</a></td>
     </tr>`).join('');
 }
 
@@ -556,7 +889,10 @@ function renderHero(site, state, job) {
   menu.hidden = items.length === 0;
   $('#more-menu-items').innerHTML = items.map(item => {
     if (item.divider) return `<div class="menu-note">${escapeHtml(item.divider)}</div>`;
-    if (item.href) return `<a class="btn btn-sm" style="border:0;justify-content:flex-start;width:100%" href="${safeUrl(item.href)}">${escapeHtml(item.label)}</a>`;
+    if (item.href) {
+      const exportClass = item.href.includes('/export') ? ' job-export' : '';
+      return `<a class="btn btn-sm${exportClass}" style="border:0;justify-content:flex-start;width:100%" href="${safeUrl(item.href)}">${escapeHtml(item.label)}</a>`;
+    }
     return `<button type="button" class="${item.danger ? 'danger' : ''}" data-action="${item.action}">${escapeHtml(item.label)}</button>`;
   }).join('');
   $('#max-docs-adv').hidden = !config.showAdvanced;
@@ -694,7 +1030,7 @@ function renderSiteHistory(site) {
       <td><span class="mini-progress"><span style="width:${percent}%"></span></span><span class="num">${fmtNum(examined)}/${total ? fmtNum(total) : '?'}</span></td>
       <td class="num" title="客户正式问题 formal_finding_count">${fmtNum(job.formal_finding_count != null ? job.formal_finding_count : 0)}</td><td class="num" title="线索合计 finding_total_count">${fmtNum(job.finding_total_count != null ? job.finding_total_count : job.finding_count)}</td>
       <td class="num">${fmtTime(job.created_at)}</td>
-      <td><a class="btn btn-sm" href="/api/jobs/${job.id}/export">Excel</a></td>
+      <td><a class="btn btn-sm job-export" href="/api/jobs/${job.id}/export">Excel</a></td>
     </tr>`;
   }).join('');
 }
@@ -943,6 +1279,7 @@ function showView(nextView, siteKey) {
   $('#page-generic').hidden = view !== 'generic';
   refreshUi();
   window.scrollTo({top: 0});
+  syncPolling();
 }
 
 function refreshUi() {
@@ -952,26 +1289,58 @@ function refreshUi() {
   // generic 视图由 navigate/renderGenericView 自行渲染，不参与 poll
 }
 
-async function poll() {
-  const [jobsData, sitesData, schedulesData] = await Promise.all([
-    api('/api/jobs'),
-    api('/api/scan-sites'),
-    api('/api/continuous-schedules').catch(() => schedules),
-  ]);
-  jobs = jobsData;
-  sites = sitesData;
-  schedules = schedulesData;
-  if (!firstLoadDone) {
-    firstLoadDone = true;
-    const states = sites.map(site => ({site, state: siteState(site)}));
-    const attention = states.find(entry => ['attention','invalid'].includes(entry.state.code));
-    const active = states.find(entry => entry.state.code === 'active');
-    if (attention) showView('site', attention.site.key);
-    else if (active) showView('site', active.site.key);
-    else showView('overview');
-    return;
-  }
-  refreshUi();
+function viewNeedsPolling() {
+  return view === 'overview' || view === 'site';
+}
+
+function stopPolling() {
+  if (pollTimer) clearTimeout(pollTimer);
+  pollTimer = null;
+}
+
+function schedulePolling() {
+  stopPolling();
+  if (authState !== 'authenticated' || document.hidden || !viewNeedsPolling()) return;
+  pollTimer = setTimeout(async () => {
+    try { await poll(); } catch (_) { /* api() 统一处理鉴权错误 */ }
+    schedulePolling();
+  }, POLL_INTERVAL_MS);
+}
+
+function syncPolling() {
+  if (authState === 'authenticated' && !document.hidden && viewNeedsPolling()) schedulePolling();
+  else stopPolling();
+}
+
+function poll() {
+  if (authState !== 'authenticated') return Promise.resolve();
+  if (pollPromise) return pollPromise;
+  pollPromise = (async () => {
+    const [jobsData, sitesData, schedulesData] = await Promise.all([
+      api('/api/jobs'),
+      api('/api/scan-sites'),
+      api('/api/continuous-schedules').catch(error => {
+        if (error.status === 401) throw error;
+        return schedules;
+      }),
+    ]);
+    if (authState !== 'authenticated') return;
+    jobs = jobsData;
+    sites = sitesData;
+    schedules = schedulesData;
+    if (!firstLoadDone) {
+      firstLoadDone = true;
+      const states = sites.map(site => ({site, state: siteState(site)}));
+      const attention = states.find(entry => ['attention','invalid'].includes(entry.state.code));
+      const active = states.find(entry => entry.state.code === 'active');
+      if (attention) showView('site', attention.site.key);
+      else if (active) showView('site', active.site.key);
+      else showView('overview');
+      return;
+    }
+    refreshUi();
+  })().finally(() => { pollPromise = null; });
+  return pollPromise;
 }
 
 // ---------- 事件绑定 ----------
@@ -1043,6 +1412,9 @@ $('#task-center-btn').addEventListener('click', () => { openTaskCenter(); });
 $('#rail-task-center').addEventListener('click', () => { openTaskCenter(); });
 $('#task-center-close').addEventListener('click', () => $('#task-center-dialog').close());
 $('#evidence-close').addEventListener('click', () => $('#evidence-dialog').close());
+$('#confirm-delete-job-close').addEventListener('click', closeDeleteJobDialog);
+$('#confirm-delete-job-cancel').addEventListener('click', closeDeleteJobDialog);
+$('#confirm-delete-job-ok').addEventListener('click', () => deleteSelectedJob());
 
 // 站点扫描入口按钮：切到首页总览并展开站点扫描区
 $('#site-scan-btn').addEventListener('click', () => {
@@ -1056,85 +1428,155 @@ $('#overview-refresh').addEventListener('click', () => renderOverviewDashboard()
 // 通用视图刷新按钮
 $('#generic-refresh').addEventListener('click', () => {
   const btn = $('#generic-refresh');
+  if (btn.dataset.mode === 'scan-jobs') return renderScanJobsView();
+  if (btn.dataset.mode === 'problems' && PROBLEM_VIEWS[currentNav]) return renderProblemsView(currentNav);
+  if (btn.dataset.mode === 'exceptions') return renderExceptionView();
   const apiPath = btn.dataset.api;
   const label = btn.dataset.label;
   const description = btn.dataset.description;
   if (apiPath) renderGenericView(label, apiPath, description).catch(error => toast(error.message));
 });
 
-// ---------- 启动 ----------
-api('/health').then(() => {
+// ---------- 启动与认证 ----------
+function setProtectedControls(enabled) {
+  ['#site-scan-btn', '#task-center-btn', '#rail-task-center'].forEach(selector => {
+    const element = $(selector);
+    if (element) element.disabled = !enabled;
+  });
+}
+
+function openLoginDialog() {
+  const dialog = $('#login-dialog');
+  if (dialog && !dialog.open) dialog.showModal();
+  setTimeout(() => $('#login-username')?.focus(), 0);
+}
+
+function setSignedOutState({expired = false, showDialog = true} = {}) {
+  const wasAuthenticated = authState === 'authenticated';
+  authState = 'anonymous';
+  currentUser = null;
+  csrfToken = '';
+  firstLoadDone = false;
+  jobs = [];
+  sites = [];
+  schedules = null;
+  stopPolling();
+  if (genericRequestController) genericRequestController.abort();
+  if (wasAuthenticated) {
+    window.location.reload();
+    return;
+  }
+  const label = $('#auth-user');
+  if (label) label.textContent = '未登录';
+  if ($('#login-btn')) $('#login-btn').hidden = false;
+  if ($('#logout-btn')) $('#logout-btn').hidden = true;
+  setProtectedControls(false);
+  renderNav([]);
+  showView('overview');
+  if (showDialog) openLoginDialog();
+  if (expired && wasAuthenticated) toast('登录状态已失效，请重新登录');
+}
+
+function handleUnauthorized() {
+  if (unauthorizedHandled || authState === 'anonymous') return;
+  unauthorizedHandled = true;
+  setSignedOutState({expired: true, showDialog: true});
+}
+
+async function refreshAuth() {
+  stopPolling();
+  authState = 'checking';
+  try {
+    const me = await api('/api/auth/me', {suppressAuthHandling: true});
+    if (!me.authenticated) {
+      unauthorizedHandled = false;
+      setSignedOutState({showDialog: true});
+      return false;
+    }
+    authState = 'authenticated';
+    currentUser = me;
+    unauthorizedHandled = false;
+    if ($('#auth-user')) $('#auth-user').textContent = `${me.username}（${(me.roles || []).join(',') || 'user'}）`;
+    if ($('#login-btn')) $('#login-btn').hidden = true;
+    if ($('#logout-btn')) $('#logout-btn').hidden = false;
+    setProtectedControls(true);
+    const items = await api('/api/nav-items');
+    if (authState !== 'authenticated') return false;
+    renderNav(items);
+    await poll();
+    if (authState !== 'authenticated') return false;
+    if (view === 'overview') await renderOverviewDashboard();
+    schedulePolling();
+    return true;
+  } catch (error) {
+    if (error.status !== 401) toast(`认证状态检查失败：${error.message}`);
+    setSignedOutState({showDialog: error.status === 401});
+    return false;
+  }
+}
+
+api('/health', {suppressAuthHandling: true}).then(() => {
   $('#health').textContent = '服务正常';
   $('#health-dot').className = 'dot dot-ok';
 }).catch(() => {
   $('#health').textContent = '服务异常';
   $('#health-dot').className = 'dot dot-bad';
 });
-poll().catch(() => {
-  // 未登录或服务异常时静默；登录后 refreshAuth 会触发导航渲染
-});
-setInterval(() => { poll().catch(() => {}); }, 3000);
-
-
-// ----- phase1 auth -----
-async function refreshAuth() {
-  try {
-    const me = await api('/api/auth/me');
-    const label = $('#auth-user');
-    const loginBtn = $('#login-btn');
-    const logoutBtn = $('#logout-btn');
-    if (me.authenticated) {
-      if (label) label.textContent = `${me.username}（${(me.roles || []).join(',') || 'user'}）`;
-      if (loginBtn) loginBtn.hidden = true;
-      if (logoutBtn) logoutBtn.hidden = false;
-      // 角色感知：拉取 21 项导航并重新渲染侧栏
-      try {
-        const items = await api('/api/nav-items');
-        renderNav(items);
-      } catch (_) { /* 保留静态兜底 */ }
-    } else {
-      if (label) label.textContent = '未登录';
-      if (loginBtn) loginBtn.hidden = false;
-      if (logoutBtn) logoutBtn.hidden = true;
-      // 未登录：保留 HTML 静态兜底，不主动清空（首屏可见结构）
-      navItems = [];
-    }
-  } catch (_) {}
-}
 
 document.addEventListener('DOMContentLoaded', () => {
   const loginBtn = $('#login-btn');
   const logoutBtn = $('#logout-btn');
   const dialog = $('#login-dialog');
   const form = $('#login-form');
-  if (loginBtn && dialog) loginBtn.addEventListener('click', () => dialog.showModal());
+  if (loginBtn && dialog) loginBtn.addEventListener('click', openLoginDialog);
   const cancel = $('#login-cancel');
   if (cancel && dialog) cancel.addEventListener('click', () => dialog.close());
+  const passwordToggle = $('#login-password-toggle');
+  if (passwordToggle) passwordToggle.addEventListener('click', () => {
+    const input = $('#login-password');
+    const visible = input.type === 'text';
+    input.type = visible ? 'password' : 'text';
+    passwordToggle.textContent = visible ? '◉' : '◎';
+    passwordToggle.title = visible ? '显示密码' : '隐藏密码';
+    passwordToggle.setAttribute('aria-label', passwordToggle.title);
+  });
   if (form) form.addEventListener('submit', async (event) => {
     event.preventDefault();
     const username = $('#login-username').value.trim();
     const password = $('#login-password').value;
     const err = $('#login-error');
+    const submit = $('#login-submit');
+    submit.disabled = true;
+    submit.textContent = '登录中…';
     try {
-      const result = await api('/api/auth/login', {method: 'POST', body: JSON.stringify({username, password})});
+      const result = await api('/api/auth/login', {method: 'POST', body: JSON.stringify({username, password}), suppressAuthHandling: true});
       csrfToken = result.csrf_token || '';
       if (err) err.hidden = true;
-      dialog.close();
-      await refreshAuth();
-      toast('登录成功');
-      // 登录后自动加载仪表盘
-      navigate('overview', '/api/overview').catch(() => {});
+      const ready = await refreshAuth();
+      if (ready) {
+        dialog.close();
+        toast('登录成功');
+      }
     } catch (ex) {
       if (err) { err.hidden = false; err.textContent = ex.message || '登录失败'; }
+    } finally {
+      submit.disabled = false;
+      submit.textContent = '登录';
     }
   });
   if (logoutBtn) logoutBtn.addEventListener('click', async () => {
     try {
-      await api('/api/auth/logout-simple', {method: 'POST', body: '{}'});
+      await api('/api/auth/logout-simple', {method: 'POST', body: '{}', suppressAuthHandling: true});
     } catch (_) {}
-    csrfToken = '';
-    await refreshAuth();
-    showView('overview');
+    setSignedOutState({showDialog: true});
   });
   refreshAuth();
+});
+
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) stopPolling();
+  else if (authState === 'authenticated' && viewNeedsPolling()) {
+    poll().catch(() => {});
+    schedulePolling();
+  }
 });

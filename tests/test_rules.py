@@ -5,6 +5,7 @@ from app.rules import (
     WorkdayCalendar,
     evaluate_record,
     extract_authored_date,
+    extract_declared_document_numbers,
     extract_document_numbers,
     normalize_document_number,
 )
@@ -25,6 +26,70 @@ def test_normalize_document_number_variants():
 def test_extract_unique_document_numbers():
     text = "普府〔2026〕5号，另见普府〔2026〕5号及普府办〔2026〕2号。"
     assert extract_document_numbers(text) == ["普府〔2026〕5号", "普府办〔2026〕2号"]
+
+
+def test_extract_declared_document_number_ignores_referenced_documents():
+    body = """上海市财政局：
+《关于开展报告工作的通知》（沪财资〔2026〕4号）已收悉。
+根据普委〔2026〕48号文，现将有关事项通知如下。"""
+
+    assert extract_declared_document_numbers(body) == []
+
+
+def test_extract_declared_document_number_accepts_standalone_header_value():
+    body = """关于开展专项工作的通知
+发文字号：普府〔2026〕5号
+各有关单位：
+现将有关事项通知如下。"""
+
+    assert extract_declared_document_numbers(body) == ["普府〔2026〕5号"]
+
+
+def test_extract_declared_document_number_ignores_late_standalone_reference():
+    body = """关于开展专项工作的通知
+各有关单位：
+现将有关事项通知如下。
+普府〔2025〕12号
+附件：相关文件"""
+
+    assert extract_declared_document_numbers(body) == []
+
+
+def test_extract_declared_document_number_accepts_labeled_value_within_header():
+    body = """关于开展专项工作的通知
+公开主体：上海市普陀区人民政府
+发布日期：2026年7月1日
+主题分类：综合政务
+发文字号：普府〔2026〕5号
+各有关单位："""
+
+    assert extract_declared_document_numbers(body) == ["普府〔2026〕5号"]
+
+
+def test_referenced_document_number_does_not_trigger_doc_mismatch():
+    record = PolicyRecord(
+        district="普陀区",
+        title="关于报送年度报告的函",
+        url="https://example.test/reference",
+        page_document_number="普府〔2026〕47号",
+        body_text="上海市财政局：\n《关于开展报告工作的通知》（沪财资〔2026〕4号）已收悉。",
+    )
+
+    assert not {finding.rule_code for finding in evaluate_record(record, [], WorkdayCalendar())} & {
+        "DOC-001", "DOC-003",
+    }
+
+
+def test_standalone_body_document_number_still_triggers_doc_mismatch():
+    record = PolicyRecord(
+        district="普陀区",
+        title="测试",
+        url="https://example.test/declared",
+        page_document_number="普府〔2026〕47号",
+        body_text="普府〔2026〕46号\n各有关单位：\n正文",
+    )
+
+    assert {finding.rule_code for finding in evaluate_record(record, [], WorkdayCalendar())} == {"DOC-001"}
 
 
 def test_document_number_and_year_findings():

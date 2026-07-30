@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sqlite3
+import threading
+import uuid
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
 
 from openpyxl import Workbook
@@ -19,6 +23,13 @@ from app.findings_model import enrich_finding_row, is_customer_formal_problem
 
 HEAD_FILL = PatternFill("solid", fgColor="1F4E78")
 ALERT_FILL = PatternFill("solid", fgColor="FCE4D6")
+LARGE_SHEET_ROW_THRESHOLD = 5_000
+EXPORT_CACHE_VERSION = 1
+
+_WORKDAY_CALENDAR = WorkdayCalendar(provider=is_workday)
+_FALLBACK_WORKDAY_CALENDAR = WorkdayCalendar()
+_EXPORT_LOCKS: dict[int, threading.Lock] = {}
+_EXPORT_LOCKS_GUARD = threading.Lock()
 
 
 def _excel_date(value):
@@ -43,16 +54,21 @@ def _document_number_parts(value: str) -> tuple[str, int | None, int | None, str
     return match.group(1), int(match.group(2)), int(match.group(3)), normalized
 
 
-def _timeliness(authored, published) -> tuple[int | None, str]:
+@lru_cache(maxsize=32_768)
+def _cached_timeliness(authored, published) -> tuple[int | None, str]:
     if not authored or not published:
         return None, "待复核"
     if published < authored:
         return 0, "日期倒置"
     try:
-        count = WorkdayCalendar(provider=is_workday).count_between(authored, published)
+        count = _WORKDAY_CALENDAR.count_between(authored, published)
     except NotImplementedError:
-        count = WorkdayCalendar().count_between(authored, published)
+        count = _FALLBACK_WORKDAY_CALENDAR.count_between(authored, published)
     return count, "超期" if count > 20 else "合规"
+
+
+def _timeliness(authored, published) -> tuple[int | None, str]:
+    return _cached_timeliness(authored, published)
 
 
 def _finding_export_flags(f: dict) -> tuple:
@@ -64,7 +80,7 @@ def _finding_export_flags(f: dict) -> tuple:
     )
 
 
-def _format_sheet(sheet) -> None:
+def _format_sheet(sheet, *, lightweight: bool = False) -> None:
 
     sheet.freeze_panes = "A2"
     sheet.auto_filter.ref = sheet.dimensions
@@ -76,6 +92,8 @@ def _format_sheet(sheet) -> None:
         values = [str(sheet.cell(row, column).value or "") for row in range(1, min(sheet.max_row, 100) + 1)]
         width = min(max(max((len(v) for v in values), default=8) + 2, 10), 48)
         sheet.column_dimensions[get_column_letter(column)].width = width
+    if lightweight:
+        return
     for row in sheet.iter_rows(min_row=2):
         for cell in row:
             cell.alignment = Alignment(vertical="top", wrap_text=True)
@@ -92,24 +110,129 @@ def _write_sheet(workbook: Workbook, name: str, headers: list[str], rows: list[t
     sheet.append(headers)
     for row in rows:
         sheet.append(row)
-    for row in sheet.iter_rows(min_row=2):
-        for cell in row:
+    lightweight = len(rows) > LARGE_SHEET_ROW_THRESHOLD
+    if lightweight:
+        # 大表逐格套样式会使 2 万余行明细导出卡住数分钟；保留链接、表头、筛选和冻结即可。
+        link_column = len(headers)
+        for row_index in range(2, sheet.max_row + 1):
+            cell = sheet.cell(row_index, link_column)
             if isinstance(cell.value, str) and cell.value.startswith(("http://", "https://")):
                 cell.hyperlink = cell.value
                 cell.style = "Hyperlink"
-            if name in {"超期与日期问题", "文号与机构问题", "外链问题", "元数据问题",
-                        "PDF 与附件问题", "异常归档问题", "重复数据问题", "双渠道对账差异",
-                        "阅办联动问题", "媒体资源问题", "政策解读问题", "整改任务跟踪"}:
-                cell.fill = ALERT_FILL
-    _format_sheet(sheet)
+    else:
+        alert_sheet = name in {"超期与日期问题", "文号与机构问题", "外链问题", "元数据问题",
+                               "PDF 与附件问题", "异常归档问题", "重复数据问题", "双渠道对账差异",
+                               "阅办联动问题", "媒体资源问题", "政策解读问题", "整改任务跟踪"}
+        for row in sheet.iter_rows(min_row=2):
+            for cell in row:
+                if isinstance(cell.value, str) and cell.value.startswith(("http://", "https://")):
+                    cell.hyperlink = cell.value
+                    cell.style = "Hyperlink"
+                if alert_sheet:
+                    cell.fill = ALERT_FILL
+    _format_sheet(sheet, lightweight=lightweight)
+
+
+def _export_cache_paths(job_id: int) -> tuple[Path, Path]:
+    stem = EXPORT_DIR / f"政策巡检结果_任务{job_id}_当前结果"
+    return stem.with_suffix(".xlsx"), stem.with_suffix(".json")
+
+
+def _state_row(conn: sqlite3.Connection, query: str, job_id: int) -> tuple:
+    return tuple(conn.execute(query, (job_id,)).fetchone())
+
+
+def _export_input_signature(conn: sqlite3.Connection, job: sqlite3.Row) -> str:
+    job_id = int(job["id"])
+    state = {
+        "version": EXPORT_CACHE_VERSION,
+        "job": dict(job),
+        "findings": _state_row(
+            conn,
+            """SELECT COUNT(*), COALESCE(MAX(id),0), COALESCE(MAX(created_at),''),
+            COALESCE(SUM(COALESCE(is_current,1)),0),
+            COALESCE(SUM(LENGTH(COALESCE(review_status,'') || COALESCE(machine_status,'') || COALESCE(human_status,''))),0)
+            FROM rule_findings WHERE job_id=?""",
+            job_id,
+        ),
+        "reviews": _state_row(
+            conn,
+            """SELECT COUNT(*), COALESCE(MAX(r.id),0), COALESCE(MAX(r.reviewed_at),'')
+            FROM review_decisions r JOIN rule_findings f ON f.id=r.finding_id WHERE f.job_id=?""",
+            job_id,
+        ),
+        "items": _state_row(
+            conn,
+            """SELECT COUNT(*), COALESCE(MAX(id),0), COALESCE(MAX(checked_at),''),
+            COALESCE(SUM(LENGTH(COALESCE(detail_status,'') || COALESCE(reason,''))),0)
+            FROM scan_item_results WHERE job_id=?""",
+            job_id,
+        ),
+        "job_documents": _state_row(
+            conn,
+            """SELECT COUNT(*), COALESCE(MAX(id),0),
+            COALESCE(SUM(LENGTH(COALESCE(action,'') || COALESCE(reason,''))),0)
+            FROM scan_job_documents WHERE job_id=?""",
+            job_id,
+        ),
+        "links": _state_row(
+            conn,
+            """SELECT COUNT(*), COALESCE(MAX(id),0), COALESCE(MAX(checked_at),''),
+            COALESCE(SUM(LENGTH(COALESCE(result,'') || COALESCE(review_status,''))),0)
+            FROM link_checks WHERE job_id=?""",
+            job_id,
+        ),
+        "events": _state_row(
+            conn,
+            "SELECT COUNT(*), COALESCE(MAX(id),0), COALESCE(MAX(created_at),'') FROM job_events WHERE job_id=?",
+            job_id,
+        ),
+    }
+    encoded = json.dumps(state, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _cached_export_matches(output: Path, metadata_path: Path, signature: str) -> bool:
+    if not output.is_file() or output.stat().st_size == 0 or not metadata_path.is_file():
+        return False
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return metadata.get("version") == EXPORT_CACHE_VERSION and metadata.get("signature") == signature
+
+
+def _write_cache_metadata(metadata_path: Path, signature: str) -> None:
+    temporary = metadata_path.with_name(f".{metadata_path.name}.{uuid.uuid4().hex}.tmp")
+    temporary.write_text(
+        json.dumps({"version": EXPORT_CACHE_VERSION, "signature": signature}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    temporary.replace(metadata_path)
+
+
+def _export_lock(job_id: int) -> threading.Lock:
+    with _EXPORT_LOCKS_GUARD:
+        return _EXPORT_LOCKS.setdefault(job_id, threading.Lock())
 
 
 def export_job(db: Database, job_id: int) -> Path:
+    with _export_lock(job_id):
+        return _export_job_locked(db, job_id)
+
+
+def _export_job_locked(db: Database, job_id: int) -> Path:
     ensure_directories()
     with db.connect() as conn:
-        job = conn.execute("SELECT * FROM scan_jobs WHERE id=?", (job_id,)).fetchone()
+        job = conn.execute(
+            "SELECT * FROM scan_jobs WHERE id=? AND deleted_at IS NULL", (job_id,)
+        ).fetchone()
         if not job:
             raise ValueError("扫描任务不存在")
+        output, metadata_path = _export_cache_paths(job_id)
+        signature = _export_input_signature(conn, job)
+        if _cached_export_matches(output, metadata_path, signature):
+            return output
         findings = conn.execute(
             """SELECT f.*,d.district,d.source_id,d.source_site,d.title,d.url,d.issuing_agency,d.page_document_number,
             d.published_date,d.authored_date FROM rule_findings f JOIN policy_documents d ON d.id=f.document_id
@@ -122,16 +245,6 @@ def export_job(db: Database, job_id: int) -> Path:
               AND TRIM(COALESCE(l.source_area,''))!='' AND TRIM(COALESCE(l.source_page_url,''))!=''
               AND l.result IN ('broken','error')
             ORDER BY d.district,d.id,l.id""", (job_id,)
-        ).fetchall()
-        documents = conn.execute(
-            """SELECT d.*,COALESCE(j.action,'processed') action,COALESCE(j.reason,'') reason,
-            COALESCE(j.page_number,0) page_number,COALESCE(j.item_index,0) item_index,COUNT(f.id) finding_count
-            ,COALESCE((SELECT raw_json FROM document_snapshots s WHERE s.document_id=d.id ORDER BY s.id DESC LIMIT 1),'{}') raw_json
-            FROM policy_documents d LEFT JOIN scan_job_documents j ON d.id=j.document_id AND j.job_id=?
-            LEFT JOIN rule_findings f ON f.document_id=d.id AND f.job_id=?
-            WHERE j.id IS NOT NULL OR d.last_seen_job_id=?
-            GROUP BY d.id,j.action,j.reason,j.page_number,j.item_index
-            ORDER BY d.district,j.page_number,j.item_index""", (job_id, job_id, job_id)
         ).fetchall()
         item_results = conn.execute(
             """SELECT s.*,COALESCE(s.document_id,s.reused_document_id) AS effective_document_id
@@ -571,6 +684,12 @@ def export_job(db: Database, job_id: int) -> Path:
                      "", "", event["message"], "", event["details_json"], event["url"], event["id"]) for event in events)
     _write_sheet(workbook, "扫描运行记录", ["任务ID", "记录类型", "模式", "状态", "扫描完整度", "结束类型", "记录时间", "开始时间", "结束时间", "已覆盖", "详情检查", "复用/跳过", "预计总数", "预计剩余", "访问次数", "重试次数", "强休息次数", "恢复次数", "当前区县", "当前页", "说明", "最后错误", "参数/详情", "URL", "事件ID"], run_rows)
 
-    output = EXPORT_DIR / f"政策巡检结果_任务{job_id}_{datetime.now():%Y%m%d_%H%M%S}.xlsx"
-    workbook.save(output)
-    return output
+    temporary_output = output.with_name(f".{output.stem}.{uuid.uuid4().hex}.xlsx")
+    try:
+        workbook.save(temporary_output)
+        temporary_output.replace(output)
+        _write_cache_metadata(metadata_path, signature)
+        return output
+    finally:
+        if temporary_output.exists():
+            temporary_output.unlink()

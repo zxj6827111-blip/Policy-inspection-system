@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -31,6 +32,7 @@ from app.config import (
 )
 from app.db import Database, utc_now
 from app.exporter import export_job
+from app.putuo_body import clean_putuo_body_text
 from app.findings_model import (
     decision_to_human,
     enrich_finding_row,
@@ -383,8 +385,11 @@ async def job_generation(job_id: int, _user: CurrentUser = Depends(require_login
 
 
 @app.get("/api/jobs")
-async def list_jobs(_user: CurrentUser = Depends(require_login)):
-    return db.list_jobs()
+async def list_jobs(
+    limit: int = Query(default=30, ge=1, le=200),
+    _user: CurrentUser = Depends(require_login),
+):
+    return db.list_jobs(limit)
 
 
 @app.get("/api/baselines")
@@ -392,10 +397,10 @@ async def list_baselines(_user: CurrentUser = Depends(require_login)):
     return db.eligible_baselines()
 
 
-def _site_status(site_key: str) -> dict:
+def _site_status(site_key: str, jobs: list[dict] | None = None) -> dict:
     site = resolve_site(site_key)
     labels = [target.label for target in targets_for_site(site_key)]
-    plan = manager.automatic_plan(labels)
+    plan = manager.automatic_plan(labels, jobs)
     latest = plan["job"]
     baseline = plan["baseline"]
     return {
@@ -416,7 +421,9 @@ def _site_status(site_key: str) -> dict:
 
 @app.get("/api/scan-sites")
 async def list_scan_sites(_user: CurrentUser = Depends(require_login)):
-    return [_site_status(site_key) for site_key in SCAN_SITES]
+    # 保留足够长的历史窗口，避免站点基准较旧时被误判为首次扫描。
+    jobs = db.list_jobs(1000)
+    return [_site_status(site_key, jobs) for site_key in SCAN_SITES]
 
 
 @app.post("/api/site-jobs")
@@ -647,6 +654,33 @@ async def stop_job(
     return {"ok": True}
 
 
+@app.delete("/api/jobs/{job_id}")
+async def delete_job(
+    job_id: int,
+    request: Request,
+    user: CurrentUser = Depends(require_write("jobs:write")),
+    auth: AuthService = Depends(get_auth_service),
+):
+    try:
+        deleted = db.delete_job(job_id, user.username)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    if not deleted:
+        raise HTTPException(404, "任务不存在")
+    ip, ua = _client_meta(request)
+    auth.audit(
+        actor=user,
+        action="jobs.delete",
+        resource_type="job",
+        resource_id=str(job_id),
+        before={"status": deleted["status"], "mode": deleted["mode"]},
+        after={"deleted_at": deleted["deleted_at"], "deleted_by": deleted["deleted_by"]},
+        ip=ip,
+        user_agent=ua,
+    )
+    return {"ok": True, "job_id": job_id}
+
+
 @app.get("/api/jobs/{job_id}/export")
 async def download_export(
     job_id: int,
@@ -657,7 +691,7 @@ async def download_export(
     if not user.has_capability("export:read") and not user.has_role("admin"):
         raise HTTPException(403, "权限不足")
     try:
-        output = export_job(db, job_id)
+        output = await run_in_threadpool(export_job, db, job_id)
     except ValueError as exc:
         raise HTTPException(404, str(exc)) from exc
     ip, ua = _client_meta(request)
@@ -692,6 +726,8 @@ def _finding_query_rows(conn, job_id: int, extra_clause: str = "", params: list 
 
 @app.get("/api/jobs/{job_id}/findings")
 async def list_findings(job_id: int, _user: CurrentUser = Depends(require_login)):
+    if not db.get_job(job_id):
+        raise HTTPException(404, "任务不存在")
     with db.connect() as conn:
         rows = conn.execute(
             """SELECT f.*,d.title,d.url,d.district,COALESCE(r.note,'') review_note
@@ -706,7 +742,9 @@ async def list_findings(job_id: int, _user: CurrentUser = Depends(require_login)
 @app.get("/api/jobs/{job_id}/finding-summary")
 async def finding_summary(job_id: int, _user: CurrentUser = Depends(require_login)):
     with db.connect() as conn:
-        if not conn.execute("SELECT id FROM scan_jobs WHERE id=?", (job_id,)).fetchone():
+        if not conn.execute(
+            "SELECT id FROM scan_jobs WHERE id=? AND deleted_at IS NULL", (job_id,)
+        ).fetchone():
             raise HTTPException(404, "任务不存在")
         rows = conn.execute("SELECT * FROM rule_findings WHERE job_id=? AND COALESCE(is_current,1)=1", (job_id,)).fetchall()
     buckets = {
@@ -728,31 +766,55 @@ async def finding_summary(job_id: int, _user: CurrentUser = Depends(require_logi
     return buckets
 
 
-@app.get("/api/jobs/{job_id}/scan-exceptions")
-async def list_scan_exceptions(job_id: int, _user: CurrentUser = Depends(require_login)):
+def _scan_exceptions_payload(job_id: int | None, *, include_all_statuses: bool) -> dict:
     with db.connect() as conn:
-        if not conn.execute("SELECT id FROM scan_jobs WHERE id=?", (job_id,)).fetchone():
+        if job_id is not None and not conn.execute(
+            "SELECT id FROM scan_jobs WHERE id=? AND deleted_at IS NULL", (job_id,)
+        ).fetchone():
             raise HTTPException(404, "任务不存在")
+        where_sql = "WHERE e.job_id=? AND j.deleted_at IS NULL" if job_id is not None else "WHERE j.deleted_at IS NULL"
+        params = (job_id,) if job_id is not None else ()
         count_rows = conn.execute(
-            "SELECT status,COUNT(*) count FROM scan_exceptions WHERE job_id=? GROUP BY status", (job_id,)
+            f"""SELECT e.status,COUNT(*) count FROM scan_exceptions e
+            JOIN scan_jobs j ON j.id=e.job_id {where_sql} GROUP BY e.status""",
+            params,
         ).fetchall()
         counts = {status: 0 for status in ("pending", "resolved", "review_required")}
         counts.update({row["status"]: int(row["count"]) for row in count_rows})
+        item_filters = []
+        item_params: list[object] = []
+        if job_id is not None:
+            item_filters.append("e.job_id=?")
+            item_params.append(job_id)
+        item_filters.append("j.deleted_at IS NULL")
+        if not include_all_statuses:
+            item_filters.append("e.status='review_required'")
+        item_where = f"WHERE {' AND '.join(item_filters)}" if item_filters else ""
         rows = conn.execute(
-            """SELECT * FROM scan_exceptions WHERE job_id=? AND status='review_required'
-            ORDER BY page_number,item_index""",
-            (job_id,),
+            f"""SELECT e.* FROM scan_exceptions e JOIN scan_jobs j ON j.id=e.job_id {item_where}
+            ORDER BY COALESCE(e.last_checked_at, e.first_seen_at) DESC, e.id DESC""",
+            tuple(item_params),
         ).fetchall()
     return {"items": [dict(row) for row in rows], "counts": counts}
 
 
-@app.get("/api/jobs/{job_id}/review-queue")
-async def review_queue(
-    job_id: int,
+@app.get("/api/scan-exceptions")
+async def global_scan_exceptions(_user: CurrentUser = Depends(require_login)):
+    return _scan_exceptions_payload(None, include_all_statuses=True)
+
+
+@app.get("/api/jobs/{job_id}/scan-exceptions")
+async def list_scan_exceptions(job_id: int, _user: CurrentUser = Depends(require_login)):
+    if job_id == 0:
+        return _scan_exceptions_payload(None, include_all_statuses=True)
+    return _scan_exceptions_payload(job_id, include_all_statuses=False)
+
+
+def _review_queue_payload(
+    job_id: int | None,
     review_status: str = Query(default="pending"),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=10, ge=1, le=50),
-    _user: CurrentUser = Depends(require_login),
 ):
     allowed = {
         "all",
@@ -770,14 +832,21 @@ async def review_queue(
     if review_status not in allowed:
         raise HTTPException(400, "无效的复核状态筛选条件")
     with db.connect() as conn:
-        if not conn.execute("SELECT id FROM scan_jobs WHERE id=?", (job_id,)).fetchone():
+        if job_id is not None and not conn.execute(
+            "SELECT id FROM scan_jobs WHERE id=? AND deleted_at IS NULL", (job_id,)
+        ).fetchone():
             raise HTTPException(404, "任务不存在")
+        where_sql = "WHERE COALESCE(f.is_current,1)=1 AND j.deleted_at IS NULL"
+        params = (job_id,) if job_id is not None else ()
+        if job_id is not None:
+            where_sql += " AND f.job_id=?"
         all_rows = conn.execute(
-            """SELECT f.*,d.title,d.url,d.district,COALESCE(r.note,'') review_note
+            f"""SELECT f.*,d.title,d.url,d.district,COALESCE(r.note,'') review_note
             FROM rule_findings f JOIN policy_documents d ON d.id=f.document_id
+            JOIN scan_jobs j ON j.id=f.job_id
             LEFT JOIN review_decisions r ON r.finding_id=f.id
-            WHERE f.job_id=? ORDER BY f.id DESC""",
-            (job_id,),
+            {where_sql} ORDER BY f.id DESC""",
+            params,
         ).fetchall()
     items = [enrich_finding_row(dict(row)) for row in all_rows]
     counts = {"pending": 0, "confirmed": 0, "dismissed": 0}
@@ -817,6 +886,28 @@ async def review_queue(
         "page_size": page_size,
         "total": total,
     }
+
+
+@app.get("/api/review-queue")
+async def global_review_queue(
+    review_status: str = Query(default="pending"),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=10, ge=1, le=50),
+    _user: CurrentUser = Depends(require_login),
+):
+    return _review_queue_payload(None, review_status, page, page_size)
+
+
+@app.get("/api/jobs/{job_id}/review-queue")
+async def review_queue(
+    job_id: int,
+    review_status: str = Query(default="pending"),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=10, ge=1, le=50),
+    _user: CurrentUser = Depends(require_login),
+):
+    aggregate_job_id = None if job_id == 0 else job_id
+    return _review_queue_payload(aggregate_job_id, review_status, page, page_size)
 
 
 @app.get("/api/findings/{finding_id}/evidence")
@@ -866,6 +957,10 @@ async def finding_evidence(finding_id: int, _user: CurrentUser = Depends(require
             {"field_name": "规则版本", "raw_value": payload.get("rule_version") or ""},
             {"field_name": "人工状态", "raw_value": payload.get("human_status") or ""},
         ]
+    if payload.get("district") == "普陀区":
+        payload["body_text"] = clean_putuo_body_text(
+            payload.get("body_text"), payload.get("title") or ""
+        )
     payload["evidence_fields"] = fields
     # Remove fixed page/body exclusive presentation expectation — keep fields for compat
     payload["display_mode"] = "dynamic_fields"
@@ -2508,25 +2603,26 @@ async def overview_endpoint(_user: CurrentUser = Depends(require_login)):
     """
     with db.connect() as conn:
         jobs = conn.execute(
-            "SELECT * FROM scan_jobs ORDER BY id DESC LIMIT 30"
+            "SELECT * FROM scan_jobs WHERE deleted_at IS NULL ORDER BY id DESC LIMIT 30"
         ).fetchall()
         finding_buckets = {"confirmed_problem": 0, "suspected": 0, "insufficient_data": 0,
                             "collection_error": 0, "auto_excluded": 0, "human_excluded": 0,
                             "customer_formal": 0, "total": 0}
-        for bucket_row in conn.execute(
-            """SELECT
-                SUM(CASE WHEN machine_status='confirmed_by_rule' AND human_status='human_confirmed' THEN 1 ELSE 0 END) AS confirmed_problem,
-                SUM(CASE WHEN machine_status='suspected' AND human_status='unreviewed' THEN 1 ELSE 0 END) AS suspected,
-                SUM(CASE WHEN machine_status='insufficient_data' THEN 1 ELSE 0 END) AS insufficient_data,
-                SUM(CASE WHEN machine_status='auto_excluded' THEN 1 ELSE 0 END) AS auto_excluded,
-                SUM(CASE WHEN human_status='human_dismissed' THEN 1 ELSE 0 END) AS human_excluded,
-                SUM(CASE WHEN is_customer_formal=1 THEN 1 ELSE 0 END) AS customer_formal,
-                COUNT(*) AS total
-               FROM rule_findings WHERE COALESCE(is_current,1)=1"""
-        ).fetchall():
-            finding_buckets.update({k: int(v or 0) for k, v in dict(bucket_row).items()})
+        finding_rows = conn.execute(
+            """SELECT f.* FROM rule_findings f JOIN scan_jobs j ON j.id=f.job_id
+            WHERE COALESCE(f.is_current,1)=1 AND j.deleted_at IS NULL"""
+        ).fetchall()
+        for finding_row in finding_rows:
+            item = enrich_finding_row(dict(finding_row))
+            finding_buckets["total"] += 1
+            bucket = item["ui_bucket"]
+            if bucket in finding_buckets:
+                finding_buckets[bucket] += 1
+            if item["is_customer_formal"]:
+                finding_buckets["customer_formal"] += 1
         jobs_active = conn.execute(
-            "SELECT COUNT(*) FROM scan_jobs WHERE status IN ('pending','running','cooling')"
+            """SELECT COUNT(*) FROM scan_jobs WHERE deleted_at IS NULL
+            AND status IN ('pending','running','cooling')"""
         ).fetchone()[0]
         sites_total = len(SCAN_SITES)
         overdue_count = conn.execute(
@@ -2536,7 +2632,7 @@ async def overview_endpoint(_user: CurrentUser = Depends(require_login)):
             (utc_now(),),
         ).fetchone()[0] if _table_exists(conn, "rectification_tasks") else 0
         archive_findings = conn.execute(
-            "SELECT COUNT(*) FROM archive_findings WHERE COALESCE(is_current,1)=1"
+            "SELECT COUNT(*) FROM archive_findings"
         ).fetchone()[0] if _table_exists(conn, "archive_findings") else 0
         duplicate_pairs = conn.execute(
             "SELECT COUNT(*) FROM duplicate_pairs"
@@ -2578,17 +2674,17 @@ NAV_ITEMS = [
     {"key": "scan-jobs", "label": "扫描任务", "icon": "job", "group": "main", "requires_login": True,
      "api": "/api/jobs", "description": "扫描任务列表与状态"},
     {"key": "confirmed-problems", "label": "确认问题", "icon": "issue", "group": "findings", "requires_login": True,
-     "api": "/api/findings/pdf?bucket=confirmed_problem", "description": "客户正式问题"},
+     "api": "/api/review-queue?review_status=customer_formal", "description": "客户正式问题"},
     {"key": "review-queue", "label": "待复核线索", "icon": "review", "group": "findings", "requires_login": True,
-     "api": "/api/jobs/0/review-queue", "description": "待人工复核的疑似线索"},
+     "api": "/api/review-queue", "description": "待人工复核的疑似线索"},
     {"key": "insufficient-data", "label": "数据不足", "icon": "data", "group": "findings", "requires_login": True,
-     "api": "/api/findings/pdf?bucket=insufficient_data", "description": "证据不足以判定"},
+     "api": "/api/review-queue?review_status=insufficient_data", "description": "证据不足以判定"},
     {"key": "collection-errors", "label": "采集异常", "icon": "alert", "group": "findings", "requires_login": True,
-     "api": "/api/jobs/0/scan-exceptions", "description": "采集阶段异常"},
+     "api": "/api/scan-exceptions", "description": "采集阶段异常"},
     {"key": "auto-excluded", "label": "已自动排除", "icon": "auto", "group": "excluded", "requires_login": True,
-     "api": "/api/findings/pdf?bucket=auto_excluded", "description": "规则自动排除"},
+     "api": "/api/review-queue?review_status=auto_excluded", "description": "规则自动排除"},
     {"key": "human-excluded", "label": "已人工排除", "icon": "human", "group": "excluded", "requires_login": True,
-     "api": "/api/findings/pdf?bucket=human_excluded", "description": "人工排除"},
+     "api": "/api/review-queue?review_status=human_excluded", "description": "人工排除"},
     {"key": "archive", "label": "异常归档", "icon": "archive", "group": "quality", "requires_login": True,
      "api": "/api/archive/findings", "description": "ARCH-001~006 归档问题"},
     {"key": "duplicates", "label": "重复数据", "icon": "duplicate", "group": "quality", "requires_login": True,

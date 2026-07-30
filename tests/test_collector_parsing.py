@@ -15,6 +15,7 @@ from app.collector import (
 )
 from app.config import SCAN_TARGETS
 from app.domain import RelatedLink, SafetyPause
+from app.putuo_body import clean_putuo_body_text
 from app.putuo_collector import PutuoDistrictCollector, parse_putuo_date, putuo_list_item_from_api
 
 
@@ -185,13 +186,18 @@ def test_putuo_date_parser_accepts_metadata_format():
 class PutuoDetailPage:
     url = "https://www.shpt.gov.cn/zhengwu/zdgkml-qzfwj/2026/188/204477.html"
 
-    def __init__(self, text, metadata_items=None):
+    def __init__(self, text, metadata_items=None, article_text=None):
         self.text = text
         self.metadata_items = metadata_items or []
+        self.article_text = article_text
 
     def locator(self, selector):
-        if selector in {"body", "article, .article-content, .TRS_Editor, .content"}:
+        if selector == "body":
             return FakeLocator(self.text)
+        if selector == "#ivs_content, .Article_content":
+            return FakeLocator(self.article_text or "", count=1 if self.article_text is not None else 0)
+        if selector == "article, .article-content, .TRS_Editor":
+            return FakeLocator("", count=0)
         if selector == "h1":
             return FakeLocator("测试政策标题")
         if selector == "a":
@@ -268,6 +274,48 @@ SY310107202601607
     assert detail.record.published_date == date(2026, 4, 30)
     assert detail.record.page_document_number == "普委〔2026〕37号"
     assert detail.record.issuing_agency == "中共上海市普陀区委员会 上海市普陀区人民政府"
+
+
+@pytest.mark.asyncio
+async def test_putuo_detail_prefers_real_article_container_over_page_chrome():
+    page_text = "无障碍操作说明 跳转到网站导航区\n索引号：SY1\n公开主体：普陀区人民政府\n页脚"
+    detail = await PutuoDistrictCollector(None, None, SCAN_TARGETS["putuo_government"])._parse_putuo_detail(
+        PutuoDetailPage(page_text, article_text="真正的政策正文\n第二段"),
+        "测试标题",
+    )
+
+    assert detail.record is not None
+    assert detail.record.body_text == "真正的政策正文\n第二段"
+    assert "跳转到网站导航区" not in detail.record.body_text
+
+
+def test_clean_putuo_body_text_only_changes_strongly_identified_page_chrome():
+    title = "测试政策"
+    polluted = f"""无障碍操作说明 跳转到网站导航区
+{title}
+索引号：
+SY1
+主题分类：
+其他
+公开属性：
+主动公开
+成文日期：
+2026年1月1日
+发文字号：
+普府〔2026〕1号
+发布日期：
+2026年1月2日
+公开主体：
+上海市普陀区人民政府
+
+正文内容
+
+分享：
+关闭窗口"""
+    clean = "正常正文\n分享工作经验，不是页面页脚。"
+
+    assert clean_putuo_body_text(polluted, title) == "正文内容"
+    assert clean_putuo_body_text(clean, title) == clean
 
 
 class FakePutuoApiResponse:

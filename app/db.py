@@ -51,6 +51,8 @@ CREATE TABLE IF NOT EXISTS scan_jobs (
     scan_phase TEXT NOT NULL DEFAULT 'idle',
     generation_id INTEGER,
     generation_stats_json TEXT NOT NULL DEFAULT '{}',
+    deleted_at TEXT,
+    deleted_by TEXT NOT NULL DEFAULT '',
     FOREIGN KEY(baseline_job_id) REFERENCES scan_jobs(id)
 );
 
@@ -391,6 +393,8 @@ class Database:
                 "scan_phase": "TEXT NOT NULL DEFAULT 'idle'",
                 "generation_id": "INTEGER",
                 "generation_stats_json": "TEXT NOT NULL DEFAULT '{}'",
+                "deleted_at": "TEXT",
+                "deleted_by": "TEXT NOT NULL DEFAULT ''",
             },
             "policy_documents": {
                 "last_detail_checked_at": "TEXT",
@@ -596,8 +600,33 @@ class Database:
 
     def get_job(self, job_id: int) -> dict[str, Any] | None:
         with self.connect() as conn:
-            row = conn.execute("SELECT * FROM scan_jobs WHERE id=?", (job_id,)).fetchone()
+            row = conn.execute(
+                "SELECT * FROM scan_jobs WHERE id=? AND deleted_at IS NULL", (job_id,)
+            ).fetchone()
             return dict(row) if row else None
+
+    def delete_job(self, job_id: int, deleted_by: str) -> dict[str, Any] | None:
+        """Soft-delete a non-running job while preserving its audit lineage."""
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM scan_jobs WHERE id=? AND deleted_at IS NULL", (job_id,)
+            ).fetchone()
+            if not row:
+                return None
+            if row["status"] in {"pending", "running", "cooling"}:
+                raise ValueError("执行中的任务不能删除，请先停止任务")
+            deleted_at = utc_now()
+            updated = conn.execute(
+                """UPDATE scan_jobs SET deleted_at=?,deleted_by=?
+                WHERE id=? AND deleted_at IS NULL
+                AND status NOT IN ('pending','running','cooling')""",
+                (deleted_at, deleted_by, job_id),
+            )
+            if updated.rowcount != 1:
+                raise ValueError("任务状态已变化，请刷新后重试")
+            payload = dict(row)
+            payload.update({"deleted_at": deleted_at, "deleted_by": deleted_by})
+            return payload
 
     def list_jobs(self, limit: int = 30) -> list[dict[str, Any]]:
         """List jobs with live finding count semantics (formal vs total)."""
@@ -607,32 +636,46 @@ class Database:
             rows = conn.execute(
                 """SELECT j.*,
                 (SELECT COUNT(*) FROM scan_item_results s WHERE s.job_id=j.id) AS scan_item_count
-                FROM scan_jobs j ORDER BY j.id DESC LIMIT ?""",
+                FROM scan_jobs j WHERE j.deleted_at IS NULL ORDER BY j.id DESC LIMIT ?""",
                 (limit,),
             ).fetchall()
+            if not rows:
+                return []
+
+            # 任务列表是轮询热路径。一次批量读取线索，避免每个任务再执行一条查询。
+            job_ids = [int(row["id"]) for row in rows]
+            placeholders = ",".join("?" for _ in job_ids)
+            finding_rows = conn.execute(
+                f"""SELECT job_id,rule_code,machine_status,human_status,review_status,
+                allow_customer_output,is_current
+                FROM rule_findings
+                WHERE job_id IN ({placeholders}) AND COALESCE(is_current,1)=1""",
+                job_ids,
+            ).fetchall()
+            findings_by_job: dict[int, list[dict[str, Any]]] = {job_id: [] for job_id in job_ids}
+            for finding in finding_rows:
+                findings_by_job[int(finding["job_id"])].append(dict(finding))
+
             result: list[dict[str, Any]] = []
             for row in rows:
                 item = dict(row)
-                findings = conn.execute(
-                    "SELECT * FROM rule_findings WHERE job_id=? AND COALESCE(is_current,1)=1",
-                    (item["id"],),
-                ).fetchall()
-                live = compute_counts_from_rows([dict(r) for r in findings])
-                item.update(live)
+                item.update(compute_counts_from_rows(findings_by_job[int(item["id"])]))
                 result.append(item)
             return result
 
     def active_job(self) -> dict[str, Any] | None:
         with self.connect() as conn:
             row = conn.execute(
-                "SELECT * FROM scan_jobs WHERE status IN ('pending','running','cooling') ORDER BY id DESC LIMIT 1"
+                """SELECT * FROM scan_jobs WHERE deleted_at IS NULL
+                AND status IN ('pending','running','cooling') ORDER BY id DESC LIMIT 1"""
             ).fetchone()
             return dict(row) if row else None
 
     def eligible_baselines(self) -> list[dict[str, Any]]:
         with self.connect() as conn:
             rows = conn.execute(
-                """SELECT * FROM scan_jobs WHERE mode='full' AND status='completed'
+                """SELECT * FROM scan_jobs WHERE deleted_at IS NULL
+                AND mode='full' AND status='completed'
                 AND coverage_status='complete'
                 AND EXISTS(SELECT 1 FROM scan_item_results s WHERE s.job_id=scan_jobs.id)
                 ORDER BY id DESC"""

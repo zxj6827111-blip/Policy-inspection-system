@@ -8,5 +8,5 @@ if (-not (Test-Path -LiteralPath '.venv\Scripts\python.exe')) {
 }
 & '.\.venv\Scripts\python.exe' -m pip install -r requirements.txt
 & '.\.venv\Scripts\python.exe' -m playwright install chromium
-Write-Host '安装完成。运行 .\run.ps1，然后打开 http://127.0.0.1:8765'
+Write-Host '安装完成。运行 .\run.ps1，然后打开 http://127.0.0.1:18765'
 

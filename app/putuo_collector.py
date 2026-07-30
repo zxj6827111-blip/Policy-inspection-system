@@ -13,7 +13,8 @@ from app.config import PUTUO_DISTRICT_URL, ScanTarget
 import hashlib
 
 from app.domain import DetailInspection, PolicyListItem, PolicyRecord, RelatedLink, SafetyPause
-from app.rules import extract_document_numbers
+from app.putuo_body import clean_putuo_body_text
+from app.rules import extract_declared_document_numbers
 from app.safety import SafetyController
 
 
@@ -708,15 +709,26 @@ class PutuoDistrictCollector(BrowserCollector):
             invalid_fields.append("成文日期（格式无效）")
         if values["发布日期"] and not published:
             invalid_fields.append("发布日期（格式无效）")
-        body_locator = page.locator("article, .article-content, .TRS_Editor, .content")
-        body_text = await body_locator.first.inner_text() if await body_locator.count() else text
+        body_locator = page.locator("#ivs_content, .Article_content")
+        if await body_locator.count():
+            body_text = await body_locator.first.inner_text()
+        else:
+            fallback_locator = page.locator("article, .article-content, .TRS_Editor")
+            body_text = (
+                await fallback_locator.first.inner_text()
+                if await fallback_locator.count()
+                else text
+            )
+        body_text = clean_putuo_body_text(body_text, title)
         links = await self._extract_detail_links(page, page.url)
         record = PolicyRecord(
             district="普陀区", title=title, url=page.url,
             source_id=values["索引号"],
             source_site=self.target.label, issuing_agency=values["公开主体"],
             page_document_number=values["发文字号"], published_date=published, authored_date=authored,
-            body_text=body_text, body_document_numbers=extract_document_numbers(body_text), related_links=links,
+            body_text=body_text,
+            body_document_numbers=extract_declared_document_numbers(body_text),
+            related_links=links,
             topic_category=values["主题分类"], disclosure_attribute=values["公开属性"],
             header_detected=True, missing_metadata_fields=[*missing_fields, *invalid_fields],
         )

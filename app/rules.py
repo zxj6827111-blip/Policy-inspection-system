@@ -65,6 +65,39 @@ def extract_document_numbers(text: str) -> list[str]:
     return found
 
 
+def extract_declared_document_numbers(
+    text: str,
+    *,
+    max_nonempty_lines: int = 12,
+    max_standalone_lines: int = 3,
+) -> list[str]:
+    """提取正文开头声明的本文文号，排除表格、附件和正文引用文号。"""
+    found: list[str] = []
+    nonempty = 0
+    for raw_line in (text or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        nonempty += 1
+        if nonempty > max_nonempty_lines:
+            break
+
+        label = re.match(r"^(?:发文字号|文号|文件编号)\s*[:：]?\s*", line)
+        if not label and nonempty > max_standalone_lines:
+            continue
+        candidate = line[label.end():] if label else line
+        matches = list(DOC_NUMBER_RE.finditer(candidate))
+        if len(matches) != 1:
+            continue
+        residue = DOC_NUMBER_RE.sub("", candidate).strip(" \t:：,，。.;；()（）")
+        if residue:
+            continue
+        number = normalize_document_number(matches[0].group(0))
+        if number and number not in found:
+            found.append(number)
+    return found
+
+
 def _valid_date(match: re.Match) -> date | None:
     try:
         parsed = date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
@@ -443,7 +476,13 @@ def evaluate_record(
         )
 
     page_number = normalize_document_number(record.page_document_number)
-    body_numbers = record.body_document_numbers or extract_document_numbers(record.body_text)
+    # 正文中的一般文号多为“依据/收悉”的被引用文件。只有正文开头独立声明的
+    # 文号才可与页面文号做严格一致性判断；无正文时保留显式传入值的兼容路径。
+    body_numbers = (
+        extract_declared_document_numbers(record.body_text)
+        if record.body_text
+        else record.body_document_numbers
+    )
 
     if page_number and body_numbers:
         normalized_body = [normalize_document_number(number) for number in body_numbers]

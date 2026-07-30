@@ -1,10 +1,11 @@
 <!doctype html>
 <html lang="zh-CN">
 <head>
+  <link rel='icon' href='data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 64 64%22%3E%3Crect width=%2264%22 height=%2264%22 rx=%2212%22 fill=%22%2317334b%22/%3E%3Cpath d=%22M18 16h28v32H18z%22 fill=%22%23fff%22/%3E%3Cpath d=%22M24 24h16M24 32h16M24 40h10%22 stroke=%22%231f5aa8%22 stroke-width=%224%22/%3E%3C/svg%3E'>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>上海区级政策文件安全巡检系统</title>
-  <link rel="stylesheet" href="/static/app.css?v=20260727-m61nav">
+  <link rel="stylesheet" href="/static/app.css?v=20260729-task-controls-1">
 </head>
 <body>
   <header class="topbar">
@@ -31,7 +32,7 @@
       <div id="nav-items">
         <!-- 静态首屏兜底（登录后由 /api/nav-items 动态渲染替换） -->
         <details class="side-group" open data-group="main">
-          <summary>主页 <span class="g-count">2</span></summary>
+          <summary>主页</summary>
           <button type="button" class="side-item" data-nav="overview" data-api="/api/overview">
             <span class="nav-icon">🏠</span>
             <span class="s-main"><strong>首页总览</strong><small>全局仪表盘与最近任务</small></span>
@@ -43,39 +44,39 @@
         </details>
 
         <details class="side-group" data-group="findings">
-          <summary>问题与线索 <span class="g-count">4</span></summary>
-          <button type="button" class="side-item" data-nav="confirmed-problems" data-api="/api/findings/pdf?bucket=confirmed_problem">
+          <summary>问题与线索</summary>
+          <button type="button" class="side-item" data-nav="confirmed-problems" data-api="/api/review-queue?review_status=customer_formal">
             <span class="nav-icon">⚠️</span>
             <span class="s-main"><strong>确认问题</strong><small>客户正式问题</small></span>
           </button>
-          <button type="button" class="side-item" data-nav="review-queue" data-api="/api/jobs/0/review-queue">
+          <button type="button" class="side-item" data-nav="review-queue" data-api="/api/review-queue">
             <span class="nav-icon">🔍</span>
             <span class="s-main"><strong>待复核线索</strong><small>待人工复核的疑似线索</small></span>
           </button>
-          <button type="button" class="side-item" data-nav="insufficient-data" data-api="/api/findings/pdf?bucket=insufficient_data">
+          <button type="button" class="side-item" data-nav="insufficient-data" data-api="/api/review-queue?review_status=insufficient_data">
             <span class="nav-icon">📊</span>
             <span class="s-main"><strong>数据不足</strong><small>证据不足以判定</small></span>
           </button>
-          <button type="button" class="side-item" data-nav="collection-errors" data-api="/api/jobs/0/scan-exceptions">
+          <button type="button" class="side-item" data-nav="collection-errors" data-api="/api/scan-exceptions">
             <span class="nav-icon">❗</span>
             <span class="s-main"><strong>采集异常</strong><small>采集阶段异常</small></span>
           </button>
         </details>
 
         <details class="side-group" data-group="excluded">
-          <summary>已排除 <span class="g-count">2</span></summary>
-          <button type="button" class="side-item" data-nav="auto-excluded" data-api="/api/findings/pdf?bucket=auto_excluded">
+          <summary>已排除</summary>
+          <button type="button" class="side-item" data-nav="auto-excluded" data-api="/api/review-queue?review_status=auto_excluded">
             <span class="nav-icon">🤖</span>
             <span class="s-main"><strong>已自动排除</strong><small>规则自动排除</small></span>
           </button>
-          <button type="button" class="side-item" data-nav="human-excluded" data-api="/api/findings/pdf?bucket=human_excluded">
+          <button type="button" class="side-item" data-nav="human-excluded" data-api="/api/review-queue?review_status=human_excluded">
             <span class="nav-icon">👤</span>
             <span class="s-main"><strong>已人工排除</strong><small>人工排除</small></span>
           </button>
         </details>
 
         <details class="side-group" data-group="quality">
-          <summary>数据质量 <span class="g-count">3</span></summary>
+          <summary>数据质量</summary>
           <button type="button" class="side-item" data-nav="archive" data-api="/api/archive/findings">
             <span class="nav-icon">🗄️</span>
             <span class="s-main"><strong>异常归档</strong><small>ARCH-001~006 归档问题</small></span>
@@ -91,7 +92,7 @@
         </details>
 
         <details class="side-group" data-group="documents">
-          <summary>文档与解读 <span class="g-count">3</span></summary>
+          <summary>文档与解读</summary>
           <button type="button" class="side-item" data-nav="pdf-attachments" data-api="/api/findings/pdf">
             <span class="nav-icon">📄</span>
             <span class="s-main"><strong>PDF 与附件</strong><small>PDF 与附件检查结果</small></span>
@@ -107,7 +108,7 @@
         </details>
 
         <details class="side-group" data-group="closure">
-          <summary>整改销号 <span class="g-count">2</span></summary>
+          <summary>整改销号</summary>
           <button type="button" class="side-item" data-nav="rectification" data-api="/api/rectification/tasks">
             <span class="nav-icon">🔧</span>
             <span class="s-main"><strong>整改任务</strong><small>整改任务列表</small></span>
@@ -119,7 +120,7 @@
         </details>
 
         <details class="side-group" data-group="governance">
-          <summary>治理 <span class="g-count">2</span></summary>
+          <summary>治理</summary>
           <button type="button" class="side-item" data-nav="rule-effect" data-api="/api/rule-effect">
             <span class="nav-icon">📐</span>
             <span class="s-main"><strong>规则效果</strong><small>规则精度与降级</small></span>
@@ -131,7 +132,7 @@
         </details>
 
         <details class="side-group" data-group="system">
-          <summary>系统 <span class="g-count">3</span></summary>
+          <summary>系统</summary>
           <button type="button" class="side-item" data-nav="users" data-api="/api/users">
             <span class="nav-icon">👥</span>
             <span class="s-main"><strong>用户与权限</strong><small>用户管理</small></span>
@@ -179,7 +180,7 @@
         <div id="ov-recent-jobs"></div>
 
         <details class="site-scan-section" id="site-scan-section" open>
-          <summary>站点扫描（区级 / 市级平台）<span class="g-alert" id="site-scan-alert" hidden></span><span class="g-count">{{ district_sites|length + municipal_sites|length }}</span></summary>
+          <summary>站点扫描（区级 / 市级平台）<span class="g-alert" id="site-scan-alert" hidden></span></summary>
           <div class="site-head" style="margin-top:14px"><h2>全部站点总览</h2>
             <span class="head-actions">
               <button type="button" class="btn btn-sm" id="batch-toggle">批量扫描</button>
@@ -346,7 +347,7 @@
         <div class="site-head">
           <h2 id="generic-title">-</h2>
           <span class="head-actions">
-            <button type="button" class="btn btn-sm" id="generic-refresh">刷新</button>
+            <button type="button" class="icon-action" id="generic-refresh" title="刷新当前数据" aria-label="刷新当前数据">↻</button>
           </span>
         </div>
         <p class="site-sub" id="generic-sub">-</p>
@@ -386,39 +387,57 @@
 
   <!-- ===== 证据定位 ===== -->
   <dialog id="evidence-dialog" class="evidence-dialog" aria-labelledby="evidence-title">
-  <div id="evidence-fields" class="evidence-fields"></div>
-
     <div class="dlg-head">
       <div><h3 id="evidence-title">问题证据定位</h3><p id="evidence-subtitle"></p></div>
       <button type="button" class="dlg-close" id="evidence-close">✕</button>
     </div>
     <div class="dlg-body">
       <div class="evidence-actions"><a id="evidence-source" class="btn btn-sm" target="_blank" rel="noopener noreferrer">打开原政策页面</a></div>
-      <dl class="kv evidence-fields">
-        <dt>页面值</dt><dd id="evidence-page-value" hidden>-</dd>
-        <dt>正文值</dt><dd id="evidence-body-value" hidden>-</dd>
+      <div id="evidence-fields" class="evidence-field-grid"></div>
+      <dl class="kv evidence-summary">
+        <dt>页面值</dt><dd id="evidence-page-value">-</dd>
+        <dt>正文值</dt><dd id="evidence-body-value">-</dd>
         <dt>规则证据</dt><dd id="evidence-rule-text">-</dd>
       </dl>
-      <p class="muted-note">红框表示规则命中的已采集文本；未在正文中出现的页面字段会保留在上方证据区。</p>
       <pre id="evidence-body" class="evidence-body"></pre>
     </div>
   </dialog>
 
   <!-- ===== 登录 ===== -->
-  <dialog id="login-dialog">
+  <dialog id="login-dialog" class="login-dialog" aria-labelledby="login-title">
     <form method="dialog" id="login-form" class="login-form">
-      <h3>登录</h3>
-      <label>用户名 <input id="login-username" name="username" required></label>
-      <label>密码 <input id="login-password" name="password" type="password" required></label>
-      <p id="login-error" class="error" hidden></p>
-      <menu>
+      <div class="login-brand">
+        <span class="login-mark" aria-hidden="true">政</span>
+        <div><p>上海政策巡检</p><h3 id="login-title">登录管理控制台</h3><span>政策文件安全巡检系统</span></div>
+      </div>
+      <div class="login-fields">
+        <label for="login-username"><span>用户名</span><input id="login-username" name="username" autocomplete="username" placeholder="请输入用户名" required></label>
+        <label for="login-password"><span>密码</span><span class="password-field"><input id="login-password" name="password" type="password" autocomplete="current-password" placeholder="请输入密码" required><button type="button" id="login-password-toggle" class="password-toggle" title="显示密码" aria-label="显示密码">◉</button></span></label>
+        <p id="login-error" class="login-error" role="alert" hidden></p>
+      </div>
+      <div class="login-actions">
         <button type="submit" class="btn btn-primary" id="login-submit">登录</button>
-        <button type="button" class="btn" id="login-cancel" value="cancel">取消</button>
-      </menu>
+        <button type="button" class="btn" id="login-cancel" value="cancel">稍后登录</button>
+      </div>
+      <p class="login-security">仅限授权人员访问，关键操作将写入审计记录。</p>
     </form>
   </dialog>
 
+  <!-- ===== 删除扫描任务确认 ===== -->
+  <dialog id="confirm-delete-job" aria-labelledby="confirm-delete-job-title">
+    <div class="dlg-head"><div><h3 id="confirm-delete-job-title">确认删除扫描任务？</h3><p id="confirm-delete-job-name">-</p></div>
+      <button type="button" class="dlg-close" id="confirm-delete-job-close" aria-label="关闭">✕</button>
+    </div>
+    <div class="dlg-body confirm-body">
+      <p>该任务将从任务列表、首页统计和业务结果视图中移除。已采集政策资料与操作审计仍会保留，便于后续追溯。</p>
+    </div>
+    <div class="dlg-actions">
+      <button type="button" class="btn" id="confirm-delete-job-cancel">取消</button>
+      <button type="button" class="btn-danger" id="confirm-delete-job-ok">确认删除</button>
+    </div>
+  </dialog>
+
   <div id="toast" role="status"></div>
-  <script src="/static/app.js?v=20260727-m61nav"></script>
+  <script src="/static/app.js?v=20260729-task-controls-1"></script>
 </body>
 </html>

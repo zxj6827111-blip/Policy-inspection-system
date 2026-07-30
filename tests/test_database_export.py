@@ -1,3 +1,4 @@
+import json
 import sqlite3
 from datetime import date, datetime
 
@@ -101,6 +102,28 @@ def test_database_and_excel_export(tmp_path, monkeypatch):
     assert workbook["外链问题"]["E2"].value == "详情页侧栏"
     assert workbook["外链问题"]["F2"].value == "政策解读"
     assert workbook["外链问题"]["H2"].hyperlink.target == "https://example.test/read-missing"
+
+
+def test_export_reuses_current_file_until_job_data_changes(tmp_path, monkeypatch):
+    db = Database(tmp_path / "cache.db")
+    db.initialize()
+    job_id = db.create_job(["putuo_government"], "full", {})
+    db.update_job(job_id, status="completed", coverage_status="complete")
+    monkeypatch.setattr("app.exporter.EXPORT_DIR", tmp_path)
+
+    first = export_job(db, job_id)
+    first_metadata = json.loads(first.with_suffix(".json").read_text(encoding="utf-8"))
+    second = export_job(db, job_id)
+
+    assert second == first
+    assert first.name == f"政策巡检结果_任务{job_id}_当前结果.xlsx"
+
+    db.update_job(job_id, pause_reason="缓存失效验证")
+    third = export_job(db, job_id)
+    third_metadata = json.loads(third.with_suffix(".json").read_text(encoding="utf-8"))
+
+    assert third == first
+    assert third_metadata["signature"] != first_metadata["signature"]
 
 
 def test_old_link_checks_schema_migrates_before_occurrence_index(tmp_path):
