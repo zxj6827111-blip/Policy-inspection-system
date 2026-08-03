@@ -449,7 +449,9 @@ class JobManager:
                 return
             targets = [resolve_target(value) for value in json.loads(job["districts_json"])]
             hosts = sorted({
-                "www.shpt.gov.cn" if target.collector_type == "putuo" else "www.shanghai.gov.cn"
+                target.host or (
+                    "www.shpt.gov.cn" if target.collector_type == "putuo" else "www.shanghai.gov.cn"
+                )
                 for target in targets
             })
             waiting_hosts = [host for host in hosts if self._host_locks.setdefault(host, asyncio.Lock()).locked()]
@@ -634,6 +636,16 @@ class JobManager:
     def _collector_for_target(self, browser, safety, target: ScanTarget):
         if target.collector_type == "putuo":
             return PutuoDistrictCollector(browser, safety, target)
+        if target.collector_type == "huaian":
+            from app.huaian_collector import HuaianCollector
+
+            return HuaianCollector(browser, safety, target)
+        if target.collector_type == "suqian":
+            from app.suqian_collector import SuqianCollector, SuqianSzfwjCollector
+
+            if target.key == "suqian_szfwj":
+                return SuqianSzfwjCollector(browser, safety, target)
+            return SuqianCollector(browser, safety, target)
         return BrowserCollector(browser, safety)
 
     async def _record_target_total(

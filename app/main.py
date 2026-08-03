@@ -73,7 +73,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="上海区级政策文件安全巡检系统", version="0.2.0-phase1", lifespan=lifespan)
+app = FastAPI(title="政府政策文件扫描检查系统", version="0.2.0-phase1", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "app" / "static")), name="static")
 
 # M6: 请求上下文中间件（request_id + 请求日志）
@@ -407,6 +407,8 @@ def _site_status(site_key: str, jobs: list[dict] | None = None) -> dict:
         "key": site.key,
         "label": site.label,
         "district": site.district,
+        "province": site.province,
+        "city": site.city,
         "source_level": site.source_level,
         "source_name": site.source_name,
         "host": site.host,

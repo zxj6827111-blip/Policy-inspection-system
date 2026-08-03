@@ -745,7 +745,7 @@ async function renderExceptionView() {
 // ---------- 总览（站点卡片 + 批量） ----------
 function renderOverview() {
   const counts = {attention: 0, active: 0, ready: 0, fresh: 0};
-  const cards = [];
+  const regionCards = [];   // 每项: {province, city, level, card}
   for (const site of sites) {
     const state = siteState(site);
     if (state.code === 'invalid' || state.code === 'attention') counts.attention += 1;
@@ -755,19 +755,63 @@ function renderOverview() {
       invalid: '重新建立基准 →', fresh: '开始首次全量 →',
     }[state.code];
     const check = batchMode ? `<span class="batch-check ${batchSelected.has(site.key) ? 'on' : ''}">${batchSelected.has(site.key) ? '✓' : ''}</span>` : '';
-    cards.push(`<button type="button" class="ov-card ${batchSelected.has(site.key) && batchMode ? 'selected' : ''}" data-key="${site.key}">
+    const levelLabel = site.source_level === '区级' ? '区级网站'
+      : (site.source_level === '市级' ? (site.province === '上海市' ? '市级平台' : '地市级平台') : escapeHtml(site.source_level));
+    regionCards.push({
+      province: site.province || '其他',
+      city: site.city || site.district || '其他',
+      level: levelLabel,
+      card: `<button type="button" class="ov-card ${batchSelected.has(site.key) && batchMode ? 'selected' : ''}" data-key="${site.key}">
       ${check}
       <span class="r1"><strong>${escapeHtml(site.district)} <span class="lv ${site.source_level === '区级' ? 'lv-district' : 'lv-city'}">${escapeHtml(site.source_level)}</span></strong><span class="pill ${state.pill[0]}">${state.pill[1]}</span></span>
       <span class="r2">${escapeHtml(state.sub)}</span>
       <span class="act">${act}</span>
-    </button>`);
+    </button>`,
+    });
   }
+  // 按 省 → 地市 → 平台/区级 分组，保持站点配置顺序
+  const regions = [];
+  const regionIndex = new Map();
+  const cityIndex = new Map();
+  const levelIndex = new Map();
+  for (const entry of regionCards) {
+    if (!regionIndex.has(entry.province)) {
+      regionIndex.set(entry.province, regions.length);
+      regions.push({province: entry.province, cities: []});
+    }
+    const region = regions[regionIndex.get(entry.province)];
+    const cityKey = `${region.province}\u0000${entry.city}`;
+    if (!cityIndex.has(cityKey)) {
+      cityIndex.set(cityKey, region.cities.length);
+      region.cities.push({city: entry.city, levels: []});
+    }
+    const city = region.cities[cityIndex.get(cityKey)];
+    const levelKey = `${cityKey}\u0000${entry.level}`;
+    if (!levelIndex.has(levelKey)) {
+      levelIndex.set(levelKey, city.levels.length);
+      city.levels.push({level: entry.level, cards: []});
+    }
+    city.levels[levelIndex.get(levelKey)].cards.push(entry.card);
+  }
+  const gridHtml = regions.map(region => `
+    <section class="ov-region">
+      <h3 class="ov-region-title">${escapeHtml(region.province)}</h3>
+      ${region.cities.map(city => `
+        <div class="ov-city">
+          <h4 class="ov-city-title">${escapeHtml(city.city)}</h4>
+          ${city.levels.map(level => `
+            <div class="ov-level">
+              <h5 class="ov-level-title">${level.level}</h5>
+              <div class="ov-grid">${level.cards.join('')}</div>
+            </div>`).join('')}
+        </div>`).join('')}
+    </section>`).join('');
   $('#ov-chips').innerHTML = `
     <span class="ov-chip">⚠ 需要处理 <b class="num">${counts.attention}</b></span>
     <span class="ov-chip">▶ 进行中 <b class="num">${counts.active}</b></span>
     <span class="ov-chip">✓ 已建基准 <b class="num">${counts.ready}</b></span>
     <span class="ov-chip">○ 未建基准 <b class="num">${counts.fresh}</b></span>`;
-  $('#ov-grid').innerHTML = cards.join('');
+  $('#ov-grid').innerHTML = gridHtml;
   renderLegacyJobs();
   syncBatchBar();
 }
