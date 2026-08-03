@@ -200,6 +200,11 @@ table.mini .job-open:hover { text-decoration: underline; }
 .ov-chips { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
 .ov-chip { font-size: 13px; border-radius: 999px; border: 1px solid var(--line-strong); background: #fff; padding: 6px 14px; color: var(--ink-700); }
 .ov-chip b { font-weight: 700; }
+.ov-region { margin-bottom: 20px; }
+.ov-region-title { font-size: 15px; color: var(--brand-700); padding: 8px 12px; border-left: 4px solid var(--brand-600); background: var(--brand-50); border-radius: 4px; margin: 0 0 12px; }
+.ov-city { margin: 0 0 14px; }
+.ov-city-title { font-size: 13.5px; color: var(--ink-700); margin: 0 0 8px 2px; font-weight: 650; }
+.ov-level-title { font-size: 12px; color: var(--ink-500); margin: 0 0 8px 2px; font-weight: 600; }
 .ov-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
 .ov-card { position: relative; text-align: left; background: #fff; border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; display: grid; gap: 8px; transition: border-color .15s, box-shadow .15s; }
 .ov-card:hover { border-color: var(--brand-600); box-shadow: 0 2px 8px rgb(22 50 74 / 8%); }

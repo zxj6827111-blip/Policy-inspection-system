@@ -167,11 +167,17 @@ def _seed_default_settings(cur: sqlite3.Cursor) -> None:
         ("backup_wal_checkpoint_on_success", "true", "backup", "备份成功后是否执行 WAL checkpoint"),
         ("log_level", "INFO", "logging", "日志级别（DEBUG/INFO/WARNING/ERROR）"),
         ("metrics_enabled", "true", "monitoring", "是否暴露 /metrics 端点"),
-        ("app_name", "上海区级政策文件安全巡检系统", "general", "应用名称"),
+        ("app_name", "政府政策文件扫描检查系统", "general", "应用名称"),
         ("app_version", "0.2.0-phase1", "general", "应用版本"),
     ]
     cur.executemany(
         """INSERT OR IGNORE INTO system_settings(key, value, category, description, updated_at, updated_by)
            VALUES(?, ?, ?, ?, ?, 'system')""",
         [(k, v, c, d, now) for (k, v, c, d) in defaults],
+    )
+    # 系统更名后，将存量数据库中的旧应用名称同步为现名（幂等）。
+    cur.execute(
+        """UPDATE system_settings SET value=?, updated_at=?, updated_by='system'
+           WHERE key='app_name' AND value='上海区级政策文件安全巡检系统'""",
+        ("政府政策文件扫描检查系统", now),
     )

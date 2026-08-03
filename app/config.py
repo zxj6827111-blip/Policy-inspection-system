@@ -23,6 +23,7 @@ class ScanTarget:
     collector_type: str = "municipal"
     channel_id: str = ""
     list_url: str = ""
+    host: str = ""
 
 
 @dataclass(frozen=True)
@@ -34,6 +35,8 @@ class ScanSite:
     source_name: str
     target_keys: tuple[str, ...]
     host: str
+    province: str = "上海市"
+    city: str = "上海市"
 
 
 # 上海市 16 个行政区县（市级政策文件库 siteId，已与 gwk/policy/page 核对）
@@ -60,6 +63,7 @@ MUNICIPAL_DISTRICTS: tuple[tuple[str, str, str], ...] = (
 def _municipal_target(key: str, district: str) -> ScanTarget:
     return ScanTarget(
         key, f"市级平台·{district}", district, "市级", "上海市政策文件库",
+        host="www.shanghai.gov.cn",
     )
 
 
@@ -78,22 +82,55 @@ SCAN_TARGETS = {
     "putuo_government": ScanTarget(
         "putuo_government", "区级网站·普陀区·区政府文件", "普陀区", "区级", "区政府文件",
         "putuo", "3", "https://www.shpt.gov.cn/zhengwu/qzfwj-zfwj/index.html",
+        "www.shpt.gov.cn",
     ),
     "putuo_bureaus": ScanTarget(
         "putuo_bureaus", "区级网站·普陀区·委办局", "普陀区", "区级", "委办局",
         "putuo", "6", "https://www.shpt.gov.cn/zhengwu/wbj-zfwj/index.html",
+        "www.shpt.gov.cn",
     ),
     "putuo_towns": ScanTarget(
         "putuo_towns", "区级网站·普陀区·街道镇", "普陀区", "区级", "街道镇",
         "putuo", "1225", "https://www.shpt.gov.cn/zhengwu/jdz-zfwj/index.html",
+        "www.shpt.gov.cn",
     ),
     "putuo_normative": ScanTarget(
         "putuo_normative", "区级网站·普陀区·规范性文件", "普陀区", "区级", "规范性文件",
         "putuo", "1614", "https://www.shpt.gov.cn/zhengwu/gfxwj-zfwj/index.html",
+        "www.shpt.gov.cn",
     ),
     "putuo_party_government": ScanTarget(
         "putuo_party_government", "区级网站·普陀区·党政混合信息", "普陀区", "区级", "党政混合信息",
         "putuo", "1621", "https://www.shpt.gov.cn/zhengwu/dzhhxx-zfwj/index.html",
+        "www.shpt.gov.cn",
+    ),
+    # 江苏省·淮安市政策文件库（zfwjKey 区分市政府文件/部门文件/县区文件三类）
+    "huaian_government": ScanTarget(
+        "huaian_government", "地市级网站·淮安市·市政府文件", "淮安市", "市级", "市政府文件",
+        "huaian", "市政府文件", "https://www.huaian.gov.cn/cmsweb/zwgk/zcwj/m/index.html",
+        "www.huaian.gov.cn",
+    ),
+    "huaian_bureaus": ScanTarget(
+        "huaian_bureaus", "地市级网站·淮安市·部门文件", "淮安市", "市级", "部门文件",
+        "huaian", "bm", "https://www.huaian.gov.cn/cmsweb/zwgk/zcwj/m/index.html",
+        "www.huaian.gov.cn",
+    ),
+    "huaian_counties": ScanTarget(
+        "huaian_counties", "地市级网站·淮安市·县区文件", "淮安市", "市级", "县区文件",
+        "huaian", "xq", "https://www.huaian.gov.cn/cmsweb/zwgk/zcwj/m/index.html",
+        "www.huaian.gov.cn",
+    ),
+    # 江苏省·宿迁市政策文件库（单发 JSONP 全量列表，含市级/县区部门/宿豫三类）
+    "suqian_zcwj": ScanTarget(
+        "suqian_zcwj", "地市级网站·宿迁市·政策文件库", "宿迁市", "市级", "政策文件库",
+        "suqian", "", "https://www.suqian.gov.cn/zcwjk/index.shtml",
+        "www.suqian.gov.cn",
+    ),
+    # 江苏省·宿迁市·市政府文件（信息公开体系，静态分页，约1005条）
+    "suqian_szfwj": ScanTarget(
+        "suqian_szfwj", "地市级网站·宿迁市·市政府文件", "宿迁市", "市级", "市政府文件",
+        "suqian", "szfwj", "https://www.suqian.gov.cn/cnsq/szfwj/xxgk_list.shtml",
+        "www.suqian.gov.cn",
     ),
 }
 
@@ -115,6 +152,16 @@ SCAN_SITES = {
         key: _municipal_site(key, district)
         for key, district, _site_id in MUNICIPAL_DISTRICTS
     },
+    "jiangsu_huaian": ScanSite(
+        "jiangsu_huaian", "地市级网站·淮安市", "淮安市", "市级", "政策文件库（三类栏目）",
+        ("huaian_government", "huaian_bureaus", "huaian_counties"),
+        "www.huaian.gov.cn", "江苏省", "淮安市",
+    ),
+    "jiangsu_suqian": ScanSite(
+        "jiangsu_suqian", "地市级网站·宿迁市", "宿迁市", "市级", "政策文件库",
+        ("suqian_zcwj", "suqian_szfwj"),
+        "www.suqian.gov.cn", "江苏省", "宿迁市",
+    ),
 }
 
 # 保留给旧数据和测试使用的区县映射；新增任务使用 SCAN_TARGETS 的 key。
@@ -159,7 +206,10 @@ def district_sites() -> list[ScanSite]:
 
 
 def municipal_sites() -> list[ScanSite]:
-    return [site for site in SCAN_SITES.values() if site.source_level == "市级"]
+    return [
+        site for site in SCAN_SITES.values()
+        if site.source_level == "市级" and site.province == "上海市"
+    ]
 
 
 @dataclass(frozen=True)
