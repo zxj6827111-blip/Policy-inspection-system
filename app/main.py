@@ -70,6 +70,7 @@ async def lifespan(app: FastAPI):
     app.state.runtime_settings = settings
     manager.recover_interrupted()
     manager.ensure_continuous_scheduler()
+    manager.ensure_recovery_sweeper()
     yield
 
 

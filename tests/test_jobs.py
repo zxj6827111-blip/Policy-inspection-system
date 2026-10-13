@@ -594,7 +594,7 @@ async def test_safety_signal_pauses_whole_job_with_cooldown(tmp_path, fake_runti
 
 
 @pytest.mark.asyncio
-async def test_data_validation_pause_requires_manual_review_without_cooldown(tmp_path, fake_runtime, monkeypatch):
+async def test_data_pause_gets_one_auto_retry_then_waits_for_a_human(tmp_path, fake_runtime, monkeypatch):
     class DataMismatchCollector(FakeCollector):
         async def check_robots(self):
             raise SafetyPause("列表数据校验失败")
@@ -605,10 +605,124 @@ async def test_data_validation_pause_requires_manual_review_without_cooldown(tmp
     manager = JobManager(db)
     job_id = await manager.create_and_start(["普陀区"], "full", 1)
     await wait_job(manager, job_id)
+
     job = db.get_job(job_id)
     assert job["status"] == "paused"
     assert job["completion_kind"] == "data_pause"
-    assert job["cooldown_until"] is None
+    assert job["cooldown_until"] is not None, "首次数据暂停应挂上自动重试时间"
+
+    db.update_job(
+        job_id, cooldown_until=(datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(),
+    )
+    assert await manager.resume_due_jobs() == [job_id]
+    await wait_job(manager, job_id)
+
+    again = db.get_job(job_id)
+    assert again["status"] == "paused"
+    assert again["cooldown_until"] is None, "同一原因第二次暂停必须停下来交给人"
+
+
+@pytest.mark.asyncio
+async def test_risk_control_pause_enters_cooldown_and_auto_resumes(tmp_path, fake_runtime, monkeypatch):
+    """各站采集器对风控状态码抛的是 SafetyPause，不能当成数据暂停永远等着。"""
+    class BlockedCollector(FakeCollector):
+        async def check_robots(self):
+            raise SafetyPause("鄂尔多斯市 列表页返回 HTTP 429：https://www.ordos.gov.cn/x/index.html")
+
+    db = Database(tmp_path / "risk-cooldown.db")
+    db.initialize()
+    monkeypatch.setattr("app.jobs.BrowserCollector", BlockedCollector)
+    manager = JobManager(db)
+    job_id = await manager.create_and_start(["普陀区"], "full", 1)
+    await wait_job(manager, job_id)
+
+    job = db.get_job(job_id)
+    assert job["status"] == "cooling"
+    assert job["completion_kind"] == "safety_pause"
+    assert job["cooldown_until"] is not None
+
+
+@pytest.mark.asyncio
+async def test_repeated_cooldown_at_same_progress_stops_auto_resuming(tmp_path, fake_runtime, monkeypatch):
+    """风控退避可以反复，但必须是在推进；同因同进度第二次冷却就停下来交给人。"""
+    class BlockedCollector(FakeCollector):
+        async def check_robots(self):
+            raise SafetyPause("目标站返回风控状态码 429")
+
+    db = Database(tmp_path / "cooldown-stall.db")
+    db.initialize()
+    monkeypatch.setattr("app.jobs.BrowserCollector", BlockedCollector)
+    manager = JobManager(db)
+    job_id = await manager.create_and_start(["普陀区"], "full", 1)
+    await wait_job(manager, job_id)
+    assert db.get_job(job_id)["status"] == "cooling"
+    assert db.get_job(job_id)["cooldown_until"] is not None
+
+    db.update_job(
+        job_id, cooldown_until=(datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(),
+    )
+    assert await manager.resume_due_jobs() == [job_id]
+    await wait_job(manager, job_id)
+
+    job = db.get_job(job_id)
+    assert job["status"] == "cooling"
+    assert job["cooldown_until"] is None, "同因同进度第二次冷却不该再自动续跑"
+    with db.connect() as conn:
+        stalled = conn.execute(
+            "SELECT COUNT(*) FROM job_events WHERE job_id=? AND event_type='cooldown_stalled'", (job_id,),
+        ).fetchone()[0]
+    assert stalled == 1
+
+
+@pytest.mark.asyncio
+async def test_crash_gets_one_auto_retry_then_stays_for_a_human(tmp_path, fake_runtime, monkeypatch):
+    """瞬态崩溃（如 playwright 路由竞态）重试一次；同一个异常再犯就停在 failed 交给人。"""
+    class CrashingCollector(FakeCollector):
+        async def check_robots(self):
+            raise RuntimeError("BrowserContext.new_page: Route.continue_: Route is already handled!")
+
+    db = Database(tmp_path / "crash-retry.db")
+    db.initialize()
+    monkeypatch.setattr("app.jobs.BrowserCollector", CrashingCollector)
+    manager = JobManager(db)
+    job_id = await manager.create_and_start(["普陀区"], "full", 1)
+    await wait_job(manager, job_id)
+
+    job = db.get_job(job_id)
+    assert job["status"] == "failed"
+    assert job["cooldown_until"] is not None
+
+    db.update_job(
+        job_id, cooldown_until=(datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(),
+    )
+    assert await manager.resume_due_jobs() == [job_id]
+    await wait_job(manager, job_id)
+    again = db.get_job(job_id)
+    assert again["status"] == "failed"
+    assert again["cooldown_until"] is None
+
+
+@pytest.mark.asyncio
+async def test_resume_due_jobs_wakes_jobs_whose_timer_died_with_the_process(tmp_path, fake_runtime):
+    """机器睡眠或服务重启后 asyncio.sleep 定时器不存在，只能按墙钟补唤醒。"""
+    db = Database(tmp_path / "sweeper.db")
+    db.initialize()
+    job_id = db.create_job(["普陀区"], "full", {})
+    db.update_job(
+        job_id, status="paused", completion_kind="interrupted",
+        cooldown_until=(datetime.now(timezone.utc) - timedelta(seconds=30)).isoformat(),
+    )
+    manager = JobManager(db)
+    assert await manager.resume_due_jobs() == [job_id]
+    assert db.get_job(job_id)["status"] == "pending"
+
+    not_due = db.create_job(["普陀区"], "full", {})
+    db.update_job(
+        not_due, status="cooling",
+        cooldown_until=(datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+    )
+    assert await manager.resume_due_jobs() == []
+    assert db.get_job(not_due)["status"] == "cooling"
 
 
 @pytest.mark.asyncio
@@ -1404,7 +1518,7 @@ async def test_resume_during_exception_retest_preserves_all_final_totals(tmp_pat
 
 @pytest.mark.asyncio
 async def test_incomplete_normal_target_still_pauses_when_total_changes(tmp_path, fake_runtime, monkeypatch):
-    """未完成的普通来源恢复时总量变化仍必须 SafetyPause。"""
+    """恢复时总量变化不再中途停等人工，而是继续扫完并由完成校验拦住虚报。"""
     disable_request_throttle(monkeypatch)
 
     class ChangingTotalCollector(FakeCollector):
@@ -1436,8 +1550,15 @@ async def test_incomplete_normal_target_still_pauses_when_total_changes(tmp_path
     await wait_job(manager, job_id)
     failed = db.get_job(job_id)
     assert failed["status"] == "paused"
-    assert "列表总量在任务恢复后发生变化" in failed["pause_reason"]
-    assert "原 2 条，现 3 条" in failed["pause_reason"]
+    # 新总量先记账，缺口由完成校验拦下：既不虚报完成，也不会卡在同一个数字上反复停。
+    assert "扫描覆盖校验失败" in failed["pause_reason"]
+    assert "已覆盖 2 / 预计 3" in failed["pause_reason"]
+    assert json.loads(failed["total_by_district_json"])["市级平台·普陀区"] == 3
+    with db.connect() as conn:
+        revised = conn.execute(
+            "SELECT COUNT(*) FROM job_events WHERE job_id=? AND event_type='total_revised'", (job_id,),
+        ).fetchone()[0]
+    assert revised == 1
 
 
 @pytest.mark.asyncio

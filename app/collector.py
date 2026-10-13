@@ -79,6 +79,13 @@ class UncheckableLinkDestination(UnsafeLinkDestination):
     """mailto:/tel: 等非网页地址：没有可核验的页面，但不构成站点缺陷。"""
 
 
+async def _settle_route(route, action: str, *args) -> None:
+    # 路由经常已被浏览器侧结算（下载接管、弹窗、页面关闭），重复处理会抛
+    # "Route is already handled!"，被 playwright 打成整段 traceback 刷满日志。
+    with suppress(Exception):
+        await getattr(route, action)(*args)
+
+
 def destination_addresses_are_public(
     hostname: str, addresses: list[ipaddress.IPv4Address | ipaddress.IPv6Address], *, literal: bool
 ) -> bool:
@@ -661,18 +668,18 @@ class BrowserCollector:
         async def guard_document_navigation(route) -> None:
             nonlocal navigation_failure
             if urlparse(route.request.url).scheme not in {"http", "https"}:
-                await route.continue_()
+                await _settle_route(route, "continue_")
                 return
             if navigation_failure is not None:
-                await route.abort("blockedbyclient")
+                await _settle_route(route, "abort", "blockedbyclient")
                 return
             try:
                 await self._ensure_click_target_allowed(route.request.url)
             except (UnsafeLinkDestination, SafetyPause) as exc:
                 navigation_failure = exc
-                await route.abort("blockedbyclient")
+                await _settle_route(route, "abort", "blockedbyclient")
                 return
-            await route.continue_()
+            await _settle_route(route, "continue_")
 
         def finish_navigation_failure() -> dict[str, Any] | None:
             if navigation_failure is None:

@@ -54,6 +54,7 @@ class JobManager:
         self._run_slots = asyncio.Semaphore(2)
         self.continuous_config = ContinuousScanConfig.from_env()
         self._scheduler_task: asyncio.Task | None = None
+        self._sweeper_task: asyncio.Task | None = None
 
     async def create_and_start(
         self, districts: list[str], mode: str, max_documents: int = 0, baseline_job_id: int | None = None,
@@ -344,13 +345,15 @@ class JobManager:
             rows = conn.execute(
                 "SELECT id FROM scan_jobs WHERE status IN ('pending','running')"
             ).fetchall()
+            # 上次退出时正在跑的任务不是错误：挂上到期时间交给兜底轮询自动续跑，不等人来点。
             conn.execute(
-                """UPDATE scan_jobs SET status='paused',pause_reason='程序上次退出，等待手动恢复',
-                coverage_status='partial',completion_kind='interrupted'
-                WHERE status IN ('pending','running')"""
+                """UPDATE scan_jobs SET status='paused',pause_reason='程序上次退出，已自动续跑',
+                coverage_status='partial',completion_kind='interrupted',cooldown_until=?
+                WHERE status IN ('pending','running')""",
+                ((datetime.now(timezone.utc) + timedelta(seconds=60)).isoformat(),),
             )
         for row in rows:
-            self.db.add_job_event(int(row["id"]), "interrupted", "程序上次退出，等待手动恢复")
+            self.db.add_job_event(int(row["id"]), "interrupted", "程序上次退出，已自动续跑")
         with self.db.connect() as conn:
             legacy_pauses = conn.execute(
                 """SELECT id,pause_reason FROM scan_jobs
@@ -590,33 +593,80 @@ class JobManager:
             self._update_schedule_after_job(job_id, JobStatus.COMPLETED)
             self.db.add_job_event(job_id, "completed", f"{completion_kind} 扫描完成")
         except CooldownPause as exc:
-            cooldown = datetime.now(timezone.utc) + timedelta(seconds=safety_config.cooldown_seconds)
-            self.db.update_job(
-                job_id, status=JobStatus.COOLING, pause_reason=str(exc), cooldown_until=cooldown.isoformat(),
-                coverage_status="partial", completion_kind="safety_pause",
-            )
-            self.db.add_job_event(job_id, "cooling", str(exc), self.db.get_job(job_id)["current_url"])
-            self._update_schedule_after_job(job_id, JobStatus.COOLING)
-            self._tasks[job_id] = asyncio.create_task(self._resume_after_cooldown(job_id, cooldown))
+            await self._enter_cooldown(job_id, str(exc), safety_config.cooldown_seconds)
         except SafetyPause as exc:
+            reason = str(exc)
+            if self._is_cooldown_reason(reason):
+                # 各站采集器对 403/429/5xx 抛的是 SafetyPause 而非 CooldownPause。
+                # 这是风控信号不是数据问题：按冷却退避处理，到点自动续跑，不停下来等人。
+                await self._enter_cooldown(job_id, reason, safety_config.cooldown_seconds)
+                return
             self.db.update_job(
-                job_id, status=JobStatus.PAUSED, pause_reason=str(exc), cooldown_until=None,
+                job_id, status=JobStatus.PAUSED, pause_reason=reason, cooldown_until=None,
                 coverage_status="partial", completion_kind="data_pause",
             )
-            self.db.add_job_event(job_id, "safety_pause", str(exc), self.db.get_job(job_id)["current_url"])
+            self.db.add_job_event(job_id, "safety_pause", reason, self.db.get_job(job_id)["current_url"])
             self._update_schedule_after_job(job_id, JobStatus.PAUSED)
+            self._schedule_auto_retry(job_id, reason, safety_config.cooldown_seconds)
         except Exception as exc:
+            detail = f"{type(exc).__name__}: {exc}"
             self.db.update_job(
-                job_id, status=JobStatus.FAILED, last_error=f"{type(exc).__name__}: {exc}",
+                job_id, status=JobStatus.FAILED, last_error=detail,
                 finished_at=utc_now(), coverage_status="partial", completion_kind="failed",
             )
-            self.db.add_job_event(job_id, "failed", f"{type(exc).__name__}: {exc}")
+            self.db.add_job_event(job_id, "failed", detail)
             self._update_schedule_after_job(job_id, JobStatus.FAILED)
+            # 浏览器/网络这类瞬态崩溃重试一次是划算的；同一个异常再犯一次就说明是真 bug，交给人。
+            self._schedule_auto_retry(job_id, detail, safety_config.cooldown_seconds)
 
     @staticmethod
     def _is_cooldown_reason(reason: str) -> bool:
-        markers = ("403", "429", "验证码", "访问频率", "连续网络失败", "连续运行上限")
+        markers = (
+            "403", "429", "验证码", "访问频率", "连续网络失败", "连续运行上限",
+            "风控状态码", "HTTP 5", "试扫上限",
+        )
         return any(marker in (reason or "") for marker in markers)
+
+    async def _enter_cooldown(self, job_id: int, reason: str, seconds: int) -> None:
+        current = self.db.get_job(job_id) or {}
+        examined = int(current.get("examined_count") or 0)
+        cooldown = datetime.now(timezone.utc) + timedelta(seconds=seconds)
+        self.db.update_job(
+            job_id, status=JobStatus.COOLING, pause_reason=reason, cooldown_until=cooldown.isoformat(),
+            coverage_status="partial", completion_kind="safety_pause",
+        )
+        self.db.add_job_event(
+            job_id, "cooling", reason, current.get("current_url", ""), examined_count=examined,
+        )
+        self._update_schedule_after_job(job_id, JobStatus.COOLING)
+        if self._cooldown_is_stalled(job_id, reason, examined):
+            # 同一个原因、同一条进度上第二次冷却：这不是风控退避，是死循环，交给人。
+            self.db.update_job(job_id, cooldown_until=None)
+            self.db.add_job_event(job_id, "cooldown_stalled", reason)
+            return
+        self._tasks[job_id] = asyncio.create_task(self._resume_after_cooldown(job_id, cooldown))
+
+    def _cooldown_is_stalled(self, job_id: int, reason: str, examined: int) -> bool:
+        with self.db.connect() as conn:
+            row = conn.execute(
+                """SELECT COUNT(*) FROM job_events WHERE job_id=? AND event_type='cooling'
+                AND message=? AND json_extract(details_json,'$.examined_count')=?""",
+                (job_id, reason, examined),
+            ).fetchone()
+        return bool(row and int(row[0]) > 1)
+
+    def _schedule_auto_retry(self, job_id: int, reason: str, seconds: int) -> None:
+        """同一个原因只自动重试一次；再犯就老实停下交给人，不让结构性 bug 反复刷网站。"""
+        with self.db.connect() as conn:
+            already = conn.execute(
+                "SELECT COUNT(*) FROM job_events WHERE job_id=? AND event_type='auto_retry' AND message=?",
+                (job_id, reason),
+            ).fetchone()[0]
+        if already:
+            return
+        retry_at = datetime.now(timezone.utc) + timedelta(seconds=min(seconds, 900))
+        self.db.update_job(job_id, cooldown_until=retry_at.isoformat())
+        self.db.add_job_event(job_id, "auto_retry", reason)
 
     async def _resume_after_cooldown(self, job_id: int, cooldown_until: datetime) -> None:
         delay = max(0.0, (cooldown_until - datetime.now(timezone.utc)).total_seconds())
@@ -629,9 +679,45 @@ class JobManager:
         except ValueError as exc:
             self.db.update_job(
                 job_id, status=JobStatus.PAUSED, pause_reason=f"自动恢复未执行：{exc}",
-                coverage_status="partial", completion_kind="auto_resume_blocked",
+                cooldown_until=None, coverage_status="partial", completion_kind="auto_resume_blocked",
             )
             self.db.add_job_event(job_id, "auto_resume_blocked", str(exc))
+
+    def ensure_recovery_sweeper(self) -> None:
+        if self._sweeper_task and not self._sweeper_task.done():
+            return
+        self._sweeper_task = asyncio.create_task(self._recovery_loop())
+
+    async def _recovery_loop(self) -> None:
+        while True:
+            await asyncio.sleep(60)
+            try:
+                await self.resume_due_jobs()
+            except Exception as exc:  # noqa: BLE001 — 兜底轮询不得拖垮服务
+                print(f"recovery sweeper error: {type(exc).__name__}: {exc}")
+
+    async def resume_due_jobs(self) -> list[int]:
+        """按墙钟补唤醒：asyncio.sleep 挂的定时器在机器睡眠或服务重启后就丢了。"""
+        now = datetime.now(timezone.utc)
+        with self.db.connect() as conn:
+            rows = conn.execute(
+                """SELECT id,cooldown_until FROM scan_jobs
+                WHERE status IN ('cooling','paused','partial','failed') AND cooldown_until IS NOT NULL"""
+            ).fetchall()
+        resumed = []
+        for row in rows:
+            try:
+                due = datetime.fromisoformat(row["cooldown_until"])
+            except (TypeError, ValueError):
+                continue
+            if due > now:
+                continue
+            try:
+                await self.resume(int(row["id"]), automatic=True)
+            except ValueError:
+                continue
+            resumed.append(int(row["id"]))
+        return resumed
 
     def _collector_for_target(self, browser, safety, target: ScanTarget):
         if target.collector_type == "putuo":
@@ -646,34 +732,34 @@ class JobManager:
             if target.key == "suqian_szfwj":
                 return SuqianSzfwjCollector(browser, safety, target)
             return SuqianCollector(browser, safety, target)
+        if target.collector_type == "ordos":
+            from app.ordos_collector import OrdosZykCollector
+
+            return OrdosZykCollector(browser, safety, target)
         return BrowserCollector(browser, safety)
 
-    async def _record_target_total(
-        self, job_id: int, label: str, total: int, *, allow_revision: bool = False,
-    ) -> None:
+    async def _record_target_total(self, job_id: int, label: str, total: int) -> None:
         current = self.db.get_job(job_id)
         totals = json.loads(current["total_by_district_json"] or "{}")
         examined = json.loads(current["examined_by_district_json"] or "{}")
         previous_total = totals.get(label)
         examined_count = int(examined.get(label, 0))
-        uses_snapshot = bool(current.get("generation_id")) or self._job_uses_snapshot_contract(current)
-        if (
-            previous_total is not None
-            and examined_count > 0
-            and int(previous_total) != int(total)
-        ):
-            if uses_snapshot:
-                # 快照任务以稳定身份为准；totalCount 仅观测，不触发暂停。
-                allow_revision = True
-            elif not allow_revision:
-                raise SafetyPause(
-                    f"{label} 列表总量在任务恢复后发生变化：原 {previous_total} 条，现 {total} 条"
+        total = int(total)
+        if previous_total is not None and examined_count > 0 and int(previous_total) != total:
+            # 长批次扫描期间网站发布新件是常态，总量漂移只记账、不暂停：这里抛 SafetyPause 时
+            # totals[label] 还没写回，下次恢复拿到同一个新值会再抛一次，任务永远出不去。
+            # 真正兜住漏扫的是完成时的 _validate_complete_coverage。
+            if total < examined_count:
+                self.db.add_job_event(
+                    job_id, "total_clamped",
+                    f"{label} 声明总量 {total} 小于已覆盖 {examined_count}，按已覆盖记账",
                 )
-            if not uses_snapshot and int(total) < examined_count:
-                raise SafetyPause(
-                    f"{label} 修订后的列表总量 {total} 小于已覆盖 {examined_count} 条"
+                total = examined_count
+            else:
+                self.db.add_job_event(
+                    job_id, "total_revised", f"{label} 列表总量由 {previous_total} 修订为 {total}",
                 )
-        totals[label] = int(total)
+        totals[label] = total
         examined.setdefault(label, 0)
         self.db.update_job(
             job_id,
@@ -1036,7 +1122,7 @@ class JobManager:
         # Discovery plus bounded catch-up has reached the final stable identity set.
         # The remote total is only a diagnostic signal; completion is gated by this set.
         self.repo.update_generation(generation_id, observed_total=counts["total"])
-        await self._record_target_total(job_id, target.label, real_total, allow_revision=True)
+        await self._record_target_total(job_id, target.label, real_total)
         examined_by = json.loads((self.db.get_job(job_id) or {}).get("examined_by_district_json") or "{}")
         examined_by[target.label] = counts["total"]
         totals = json.loads((self.db.get_job(job_id) or {}).get("total_by_district_json") or "{}")
@@ -1431,7 +1517,7 @@ class JobManager:
                     f"{target.label} 列表截断分页未确认真实终点，任务不能标记完成"
                 )
             await self._record_target_total(
-                job_id, target.label, await collector.estimated_total(), allow_revision=True,
+                job_id, target.label, await collector.estimated_total(),
             )
         self.db.update_job(
             job_id, current_district_index=target_index + 1, current_district="",
