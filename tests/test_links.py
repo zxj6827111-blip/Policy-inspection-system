@@ -242,6 +242,62 @@ async def test_private_or_local_destinations_are_rejected_before_request(url):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "url",
+    [
+        "mailto:bdrg0908@163.com.%E8%AF%A6%E6%83%85%E9%99%84%E4%BB%B6",
+        "tel:047712345678",
+        "",
+    ],
+)
+async def test_non_web_link_is_recorded_without_pausing_the_job(url):
+    # 鄂尔多斯部门文件里有「附件」写成 mailto: 的条目，早先会抛 SafetyPause 停掉整个任务。
+    called = False
+
+    def handler(_request):
+        nonlocal called
+        called = True
+        return httpx.Response(200, content=b"unexpected")
+
+    checker = checker_with(handler)
+    try:
+        result = await checker.check("附件", url)
+    finally:
+        await checker.client.aclose()
+    assert called is False
+    assert result["result"] == "review_required"
+    assert result["error_type"] == "unsupported_scheme"
+    assert result["review_status"] == "manual_review"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://files.example.test:8443/attach.pdf",
+        "https://user:pw@files.example.test/attach.pdf",
+    ],
+)
+async def test_credential_or_port_restriction_is_a_per_link_result(url):
+    # 政务附件挂在 8080/8443 很常见：记成这一条查不了可以，停掉整批扫描不行。
+    called = False
+
+    def handler(_request):
+        nonlocal called
+        called = True
+        return httpx.Response(200, content=b"unexpected")
+
+    checker = checker_with(handler)
+    try:
+        result = await checker.check("附件", url)
+    finally:
+        await checker.client.aclose()
+    assert called is False
+    assert result["result"] == "error"
+    assert result["error_type"] == "unsafe_destination"
+
+
+@pytest.mark.asyncio
 async def test_tun_fake_ip_is_allowed_only_when_resolved_from_public_hostname():
     called = False
 

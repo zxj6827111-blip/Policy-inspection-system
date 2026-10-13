@@ -75,6 +75,10 @@ class UnsafeLinkDestination(RuntimeError):
     """关联外链不满足公网访问约束，必须记录但绝不能实际请求。"""
 
 
+class UncheckableLinkDestination(UnsafeLinkDestination):
+    """mailto:/tel: 等非网页地址：没有可核验的页面，但不构成站点缺陷。"""
+
+
 def destination_addresses_are_public(
     hostname: str, addresses: list[ipaddress.IPv4Address | ipaddress.IPv6Address], *, literal: bool
 ) -> bool:
@@ -1172,9 +1176,9 @@ class LinkChecker:
     async def _ensure_allowed(self, url: str) -> None:
         parsed = urlparse(url)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-            raise SafetyPause(f"关联链接不是可检查的 HTTP(S) 地址：{url}")
+            raise UncheckableLinkDestination(f"关联链接不是可检查的 HTTP(S) 地址：{url}")
         if parsed.username or parsed.password or (parsed.port and parsed.port not in {80, 443}):
-            raise SafetyPause(f"关联链接包含不安全的认证信息或端口：{url}")
+            raise UnsafeLinkDestination(f"关联链接包含不安全的认证信息或端口：{url}")
         if parsed.netloc.lower() == urlparse(TARGET_URL).netloc.lower() and self.target_allowed_check:
             self.target_allowed_check(url)
             return
@@ -1310,6 +1314,13 @@ class LinkChecker:
                         redirect_chain=redirect_chain,
                     )
                     return self._with_related_metadata(result, related)
+            except UncheckableLinkDestination:
+                # 「附件」写成邮件地址不是失效链接：只作内部待复核记录，不能中断整批扫描。
+                result.update(
+                    result="review_required", error_type="unsupported_scheme", final_url="",
+                    redirect_chain=[], review_status="manual_review",
+                )
+                return self._with_related_metadata(result, related)
             except UnsafeLinkDestination:
                 result.update(result="error", error_type="unsafe_destination", final_url="", redirect_chain=[])
                 return self._with_related_metadata(result, related)
