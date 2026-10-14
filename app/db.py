@@ -369,6 +369,13 @@ class Database:
             self._migrate_m4(conn)
             self._migrate_m5(conn)
             self._migrate_m6(conn)
+            self._migrate_rectify_ledger(conn)
+
+    @staticmethod
+    def _migrate_rectify_ledger(conn: sqlite3.Connection) -> None:
+        from app.migrations.rectify_ledger import run_rectify_ledger_migration
+
+        run_rectify_ledger_migration(conn)
 
     @staticmethod
     def _migrate(conn: sqlite3.Connection) -> None:

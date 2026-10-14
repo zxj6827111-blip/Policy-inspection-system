@@ -675,6 +675,70 @@ async def test_repeated_cooldown_at_same_progress_stops_auto_resuming(tmp_path, 
 
 
 @pytest.mark.asyncio
+async def test_incremental_rechecks_open_findings_and_records_closure(tmp_path, fake_runtime, monkeypatch):
+    """上期有问题的文档必须重开复查；问题消失要显式记销号，不能只是从报表里凭空消失。"""
+    class RectifiableCollector(FakeCollector):
+        published = date(2026, 9, 1)   # 列表成文 7/1、页面发布 9/1 → DATE-001 超期命中
+
+        async def open_item(self, item):
+            self.opened.append(item.url)
+            return PolicyRecord(
+                district=item.district, title=item.title, url=item.url,
+                published_date=RectifiableCollector.published, authored_date=item.published_date,
+            )
+
+    db = Database(tmp_path / "rectify.db")
+    db.initialize()
+    monkeypatch.setattr("app.jobs.BrowserCollector", RectifiableCollector)
+    RectifiableCollector.datasets = {"普陀区": [item("普陀区", 0, "x")]}
+    RectifiableCollector.opened = []
+    manager = JobManager(db)
+
+    first = await manager.create_and_start(["普陀区"], "full", 0)
+    await wait_job(manager, first)
+    with db.connect() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM rule_findings WHERE job_id=? AND rule_code='DATE-001'", (first,),
+        ).fetchone()[0] == 1
+    assert len(RectifiableCollector.opened) == 1
+
+    # 网站把发布日期改对了：增量必须重开这条详情，而不是把上期结论抄过来。
+    RectifiableCollector.published = date(2026, 7, 2)
+    second = await manager.create_and_start(["普陀区"], "incremental", 0, first)
+    await wait_job(manager, second)
+
+    assert len(RectifiableCollector.opened) == 2, "基线仍有未关闭问题时必须重开详情复查"
+    with db.connect() as conn:
+        still = conn.execute(
+            "SELECT COUNT(*) FROM rule_findings WHERE job_id=? AND COALESCE(is_current,1)=1", (second,),
+        ).fetchone()[0]
+        row = conn.execute(
+            "SELECT kind,baseline_job_id,rule_code,before_value FROM finding_transitions WHERE job_id=?",
+            (second,),
+        ).fetchone()
+    assert still == 0
+    assert row is not None and row[0] == "closed" and row[1] == first and row[2] == "DATE-001"
+
+
+@pytest.mark.asyncio
+async def test_clean_documents_are_still_reused_without_reopening(tmp_path, fake_runtime, monkeypatch):
+    """没有问题的文档不该被重开：否则每轮增量都要全量重扫，复查成本失控。"""
+    db = Database(tmp_path / "reuse.db")
+    db.initialize()
+    fake_runtime.datasets = {"普陀区": [item("普陀区", 0, "clean")]}
+    fake_runtime.opened = []
+    manager = JobManager(db)
+
+    first = await manager.create_and_start(["普陀区"], "full", 0)
+    await wait_job(manager, first)
+    assert len(fake_runtime.opened) == 1
+
+    second = await manager.create_and_start(["普陀区"], "incremental", 0, first)
+    await wait_job(manager, second)
+    assert len(fake_runtime.opened) == 1, "无未关闭问题的文档应直接复用基线"
+
+
+@pytest.mark.asyncio
 async def test_site_overstated_total_is_recorded_as_an_inspection_finding(tmp_path, fake_runtime, monkeypatch):
     """按实测条数收尾可以，但「站点标称与实发不一致」必须留下审计痕迹。"""
     class OverstatingCollector(FakeCollector):

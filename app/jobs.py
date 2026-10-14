@@ -944,6 +944,10 @@ class JobManager:
             return False, "基线详情异常或表头字段不完整"
         if row.get("has_legacy_hidden_links"):
             return False, "基线含无页面位置证据的历史链接，必须重新打开详情核验"
+        if row.get("has_open_findings"):
+            # 基线仍有未关闭问题就必须重开复查：复用会把旧结论逐行抄进新任务，
+            # 网站早已改好的问题会被当成当期问题继续报给客户。
+            return False, "基线仍有未关闭问题，必须重新打开详情复查是否已整改"
         if row["detail_status"] in {"no_header_pass", "reused_current_no_header", "reused_baseline_no_header"}:
             return True, "基线无表头 PASS，列表信息未变化"
         if self._all_missing_fields(self._inspection_from_baseline(item, row)):
@@ -1306,6 +1310,8 @@ class JobManager:
         agency_rows = self.db.agency_rules(target.district)
         findings = evaluate_record(record, agency_rows, calendar, knowledge=self._knowledge_for_district(target.district))
         document_id = self.repo.save_record(job_id, record, findings)
+        if baseline_job_id and document_id is not None:
+            self.repo.reconcile_rectifications(job_id, int(baseline_job_id), document_id)
         detail_status = "checked_incomplete" if record.missing_metadata_fields else "checked_complete"
         reason = (
             "详情页表头字段不完整，已记录 META-001 并继续既有检查"
@@ -1483,6 +1489,8 @@ class JobManager:
             agency_rows = self.db.agency_rules(target.district)
             findings = evaluate_record(record, agency_rows, calendar, knowledge=self._knowledge_for_district(target.district))
             document_id = self.repo.save_record(job_id, record, findings)
+            if baseline_job_id and document_id is not None:
+                self.repo.reconcile_rectifications(job_id, int(baseline_job_id), document_id)
             detail_status = "checked_incomplete" if record.missing_metadata_fields else "checked_complete"
             reason = (
                 "详情页表头字段不完整，已记录 META-001 并继续既有检查"

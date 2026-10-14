@@ -417,7 +417,14 @@ class Repository:
                       AND (l.visible=0 OR l.review_status='legacy_hidden'
                            OR TRIM(COALESCE(l.source_area,''))=''
                            OR TRIM(COALESCE(l.source_page_url,''))='')
-                ) AS has_legacy_hidden_links
+                ) AS has_legacy_hidden_links,
+                EXISTS(
+                    SELECT 1 FROM rule_findings f
+                    WHERE f.job_id=s.job_id
+                      AND f.document_id=COALESCE(s.document_id,s.reused_document_id)
+                      AND COALESCE(f.is_current, 1)=1
+                      AND COALESCE(f.human_status, '') <> 'human_dismissed'
+                ) AS has_open_findings
                 FROM scan_item_results s WHERE s.job_id=? AND s.target_key=? AND s.url=?
                 ORDER BY s.checked_at DESC LIMIT 1""",
                 (baseline_job_id, item.source_key, item.url),
@@ -520,6 +527,67 @@ class Repository:
         with self.db.connect() as conn:
             row = conn.execute("SELECT * FROM policy_documents WHERE id=?", (document_id,)).fetchone()
         return dict(row) if row else None
+
+    def reconcile_rectifications(
+        self, job_id: int, baseline_job_id: int, document_id: int,
+    ) -> dict[str, int]:
+        """增量复查后与基线对齐：本轮不再命中的记「销号」，人工驳回却又命中的记「冲突」。
+
+        只在文档确实被重新打开并成功评估之后调用——否则「本轮没有这行」只代表没看，
+        不代表网站改好了。人工驳回过的仍按驳回结论不报，这里只留一条提醒。
+        """
+        with self.db.connect() as conn:
+            doc = conn.execute(
+                "SELECT district,source_site,title,url FROM policy_documents WHERE id=?", (document_id,),
+            ).fetchone()
+            baseline = {
+                row["rule_code"]: dict(row)
+                for row in conn.execute(
+                    """SELECT * FROM rule_findings
+                    WHERE job_id=? AND document_id=? AND COALESCE(is_current, 1)=1""",
+                    (baseline_job_id, document_id),
+                ).fetchall()
+            }
+            current = {
+                row["rule_code"]: dict(row)
+                for row in conn.execute(
+                    """SELECT * FROM rule_findings
+                    WHERE job_id=? AND document_id=? AND COALESCE(is_current, 1)=1""",
+                    (job_id, document_id),
+                ).fetchall()
+            }
+        now = utc_now()
+        counts = {"closed": 0, "reconfirmed_after_dismissal": 0}
+        with self.db.connect() as conn:
+            for rule_code, old in baseline.items():
+                stable_key = old["stable_key"] or f"{document_id}:{rule_code}"
+                new = current.get(rule_code)
+                if new is None:
+                    kind = "closed"
+                    after_value = ""
+                elif old["human_status"] == "human_dismissed" or new["human_status"] == "human_dismissed":
+                    kind = "reconfirmed_after_dismissal"
+                    after_value = str(new["page_value"] or "")
+                else:
+                    continue
+                conn.execute(
+                    """INSERT INTO finding_transitions(
+                        job_id,baseline_job_id,document_id,stable_key,rule_code,category,severity,
+                        kind,detail,before_value,after_value,source_site,district,title,document_url,recorded_at
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    ON CONFLICT(job_id,stable_key,kind) DO NOTHING""",
+                    (
+                        job_id, baseline_job_id, document_id, stable_key, rule_code,
+                        old["category"], old["severity"], kind, old["detail"],
+                        str(old["page_value"] or ""), after_value,
+                        dict(doc)["source_site"] if doc else "",
+                        dict(doc)["district"] if doc else "",
+                        dict(doc)["title"] if doc else "",
+                        dict(doc)["url"] if doc else "", now,
+                    ),
+                )
+                counts[kind] += 1
+        return counts
 
     def incremental_decision(
         self, url: str, title: str, published_date: date | None, refresh_days: int = 30,
