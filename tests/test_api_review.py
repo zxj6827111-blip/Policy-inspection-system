@@ -306,10 +306,10 @@ def test_index_exposes_district_and_sixteen_municipal_sites(tmp_path, monkeypatc
     assert 'name="mode"' not in html
     assert 'name="baseline_job_id"' not in html
 
-    # 19 个站点通过 /api/scan-sites 暴露（区级 1 + 市级 16 + 江苏 2）
+    # 22 个站点通过 /api/scan-sites 暴露（上海区级 1 + 上海市级 16 + 江苏 2 + 鄂尔多斯 3）
     assert sites_response.status_code == 200
     sites = sites_response.json()
-    assert len(sites) == 19
+    assert len(sites) == 22
     keys = {site["key"] for site in sites}
     assert "putuo_district" in keys
     assert "municipal_putuo" in keys
@@ -318,8 +318,15 @@ def test_index_exposes_district_and_sixteen_municipal_sites(tmp_path, monkeypatc
     assert "municipal_pudong" in keys
     assert "jiangsu_huaian" in keys
     assert "jiangsu_suqian" in keys
-    assert {site["province"] for site in sites} == {"上海市", "江苏省"}
+    assert {"ordos_municipal", "ordos_departments", "yjhl_banner"} <= keys
+    assert {site["province"] for site in sites} == {"上海市", "江苏省", "内蒙古自治区"}
     assert {site["city"] for site in sites if site["key"] == "jiangsu_huaian"} == {"淮安市"}
+    ordos_sites = [site for site in sites if site["province"] == "内蒙古自治区"]
+    assert {site["city"] for site in ordos_sites} == {"鄂尔多斯市"}
+    assert {site["key"] for site in ordos_sites} == {
+        "ordos_municipal", "ordos_departments", "yjhl_banner",
+    }
+    assert len(next(site for site in sites if site["key"] == "ordos_departments")["target_labels"]) == 30
 
 
 def test_scan_sites_reuses_one_prefetched_job_snapshot(tmp_path, monkeypatch):
@@ -340,7 +347,7 @@ def test_scan_sites_reuses_one_prefetched_job_snapshot(tmp_path, monkeypatch):
         response = client.get("/api/scan-sites")
 
     assert response.status_code == 200
-    assert len(response.json()) == 19
+    assert len(response.json()) == 22
     assert calls == 1
 
 
@@ -383,9 +390,9 @@ def test_municipal_sites_cover_sixteen_districts_with_site_ids():
 
     munis = municipal_sites()
     assert len(munis) == 16
-    assert len(district_sites()) == 1
-    assert district_sites()[0].key == "putuo_district"
-    assert len(SCAN_SITES) == 19
+    # 区级组里除普陀区外，新增鄂尔多斯市下辖的伊金霍洛旗；municipal_sites 仍只含上海市级。
+    assert [site.key for site in district_sites()] == ["putuo_district", "yjhl_banner"]
+    assert len(SCAN_SITES) == 22
     assert set(DISTRICT_SITE_IDS) == {site.district for site in munis}
     assert DISTRICT_SITE_IDS["普陀区"] == "0075"
     assert DISTRICT_SITE_IDS["崇明区"] == "0085"

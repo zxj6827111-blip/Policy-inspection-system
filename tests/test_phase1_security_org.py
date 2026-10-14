@@ -180,6 +180,58 @@ def test_puweiban_2013_41_joint_forward_no_org001(tmp_path, monkeypatch):
     assert any(item.get("field_name") == "联合发文机关" for item in org2.evidence_fields)
 
 
+def test_yijinhuoluo_office_page_shorthand_no_org001(tmp_path, monkeypatch):
+    """伊金霍洛旗详情页把办公室写作「伊旗政府办/伊政办」，是同一主体的旗级简称，不该报机构问题。"""
+    db, _client = _app_client(tmp_path, monkeypatch)
+    with db.connect() as conn:
+        knowledge = load_knowledge(conn, "伊金霍洛旗")
+    for agency in ("伊旗政府办", "伊政办"):
+        record = PolicyRecord(
+            "伊金霍洛旗",
+            "伊金霍洛旗人民政府办公室关于印发实施方案的通知",
+            "https://example.test/yjhl-office",
+            issuing_agency=agency,
+            page_document_number="伊政办发〔2019〕38号",
+        )
+        findings = evaluate_record(record, [], WorkdayCalendar(), knowledge=knowledge)
+        assert not any(f.rule_code == "ORG-001" for f in findings), agency
+
+
+def test_yijinhuoluo_government_and_office_family_stays_tolerated(tmp_path, monkeypatch):
+    """政府本级挂伊政办发代字是公文惯例，库里 13 条全称写法一律放行；简称写法不能例外地报出来。"""
+    db, _client = _app_client(tmp_path, monkeypatch)
+    with db.connect() as conn:
+        knowledge = load_knowledge(conn, "伊金霍洛旗")
+    for agency in ("伊金霍洛旗人民政府", "伊金霍洛旗政府", "伊旗政府"):
+        record = PolicyRecord(
+            "伊金霍洛旗",
+            "决定成立工程建设协调领导小组",
+            "https://example.test/yjhl-gov",
+            issuing_agency=agency,
+            page_document_number="伊政办发〔2011〕102号",
+        )
+        findings = evaluate_record(record, [], WorkdayCalendar(), knowledge=knowledge)
+        assert not any(f.rule_code == "ORG-001" for f in findings), agency
+
+
+def test_yijinhuoluo_garbled_agency_field_still_reported(tmp_path, monkeypatch):
+    """详情页把发布机构写成「人民政府政府办公室」，是页面脏值，机构线索要保住。"""
+    db, _client = _app_client(tmp_path, monkeypatch)
+    with db.connect() as conn:
+        knowledge = load_knowledge(conn, "伊金霍洛旗")
+    record = PolicyRecord(
+        "伊金霍洛旗",
+        "关于印发道路交通安全应急处置预案的通知",
+        "https://example.test/yjhl-dirty",
+        issuing_agency="人民政府政府办公室",
+        page_document_number="伊政办发〔2008〕15号",
+    )
+    findings = evaluate_record(record, [], WorkdayCalendar(), knowledge=knowledge)
+    org1 = next(f for f in findings if f.rule_code == "ORG-001")
+    assert org1.machine_status == "suspected"
+    assert org1.allow_customer_output is False
+
+
 def test_street_office_and_historical_alias_symbols(tmp_path, monkeypatch):
     db, _client = _app_client(tmp_path, monkeypatch)
     with db.connect() as conn:

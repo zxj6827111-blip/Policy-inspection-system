@@ -24,6 +24,9 @@ class ScanTarget:
     channel_id: str = ""
     list_url: str = ""
     host: str = ""
+    # 鄂尔多斯各栏目共用一套资源库采集器，靠这两个字段选择列表/详情页解析模板。
+    list_layout: str = ""
+    detail_layout: str = ""
 
 
 @dataclass(frozen=True)
@@ -71,6 +74,67 @@ def _municipal_site(key: str, district: str) -> ScanSite:
     return ScanSite(
         key, f"市级平台·{district}", district, "市级", "上海市政策文件库",
         (key,), "www.shanghai.gov.cn",
+    )
+
+
+ORDOS_HOST = "www.ordos.gov.cn"
+YJHL_HOST = "www.yjhl.gov.cn"
+ORDOS_PROVINCE = "内蒙古自治区"
+ORDOS_CITY = "鄂尔多斯市"
+
+# 鄂尔多斯市政务公开“部门文件”栏目下的 30 个部门子站目录（与官网 bmwj 菜单一致）。
+# 官网无“市人民政府办公室”“市人民政府外事办公室”独立子栏目：前者文件在“政策文件”栏目，
+# 后者未单独开栏；“市农牧业局”即需求清单中的“市农牧局”。
+ORDOS_DEPARTMENTS: tuple[tuple[str, str], ...] = (
+    ("sfzhggwyh_n", "市发展和改革委员会"),
+    ("sgyhxxhj", "市工业和信息化局"),
+    ("sjytyj", "市教育体育局"),
+    ("skxjsj_n", "市科学技术局"),
+    ("smzswwyh_n", "市民族事务委员会"),
+    ("smzj_n", "市民政局"),
+    ("sczj_n", "市财政局"),
+    ("srlzyhshbzj_n", "市人力资源和社会保障局"),
+    ("szrzyj", "市自然资源局"),
+    ("szfhcxjsj", "市住房和城乡建设局"),
+    ("ssthjj", "市生态环境局"),
+    ("sjtysj_n", "市交通运输局"),
+    ("sslj", "市水利局"),
+    ("snmyj_n", "市农牧业局"),
+    ("slyhcyj", "市林业和草原局"),
+    ("sswj_n", "市商务局"),
+    ("swhhlyj", "市文化和旅游局"),
+    ("ssjj_n", "市审计局"),
+    ("syjglj", "市应急管理局"),
+    ("stjj_n", "市统计局"),
+    ("snyj", "市能源局"),
+    ("sxfj", "市信访局"),
+    ("sgyzcjdglwyh", "市国有资产监督管理委员会"),
+    ("swshjkwyh", "市卫生健康委员会"),
+    ("sgaj_n", "市公安局"),
+    ("ssfj_n", "市司法局"),
+    ("styjrswj", "市退役军人事务局"),
+    ("sscjdglj", "市市场监督管理局"),
+    ("sylbzj", "市医疗保障局"),
+    ("szwfwj", "市行政审批政务服务与数据管理局"),
+)
+
+
+def _ordos_target(
+    key: str, column: str, district: str, path: str, source_name: str,
+    list_layout: str, detail_layout: str, host: str = ORDOS_HOST,
+) -> ScanTarget:
+    prefix = "地市级网站·鄂尔多斯市" if host == ORDOS_HOST else "区级网站·伊金霍洛旗"
+    return ScanTarget(
+        key, f"{prefix}·{column}", district, "市级" if host == ORDOS_HOST else "区级",
+        source_name, "ordos", path, f"https://{host}{path}", host,
+        list_layout, detail_layout,
+    )
+
+
+def _ordos_department_target(slug: str, name: str) -> ScanTarget:
+    return _ordos_target(
+        f"ordos_dept_{slug}", f"部门文件·{name}", ORDOS_CITY,
+        f"/ordosml/ordoszf/bmwj/{slug}/", "部门文件", "rightlist", "bg_sl",
     )
 
 
@@ -132,6 +196,40 @@ SCAN_TARGETS = {
         "suqian", "szfwj", "https://www.suqian.gov.cn/cnsq/szfwj/xxgk_list.shtml",
         "www.suqian.gov.cn",
     ),
+    # 内蒙古自治区·鄂尔多斯市政务公开“文件库”（宏科 was40 资源库，index_N.html 静态分页）
+    "ordos_policy": _ordos_target(
+        "ordos_policy", "政策文件", ORDOS_CITY, "/ordosml/ordoszf/4033/",
+        "政策文件库", "table1", "bg_sl",
+    ),
+    "ordos_regulations": _ordos_target(
+        "ordos_regulations", "规章", ORDOS_CITY, "/ordosml/ordoszf/gz/",
+        "政策文件库", "ruleslist", "rules",
+    ),
+    "ordos_local_regulations": _ordos_target(
+        "ordos_local_regulations", "地方性法规", ORDOS_CITY, "/ordosml/ordoszf/dfxfg/",
+        "政策文件库", "rightlist", "plain",
+    ),
+    "ordos_valid_normative": _ordos_target(
+        "ordos_valid_normative", "现行有效规范性文件库", ORDOS_CITY,
+        "/ordosml/xzgfxwj_153966/xxyxxgfxwj/", "政策文件库", "table1", "gfxwj_table",
+    ),
+    "ordos_invalid_normative": _ordos_target(
+        "ordos_invalid_normative", "废止失效规范性文件", ORDOS_CITY,
+        "/ordosml/xzgfxwj_153966/fzsxgfxwj/", "政策文件库", "table1", "gfxwj_table",
+    ),
+    **{
+        f"ordos_dept_{slug}": _ordos_department_target(slug, name)
+        for slug, name in ORDOS_DEPARTMENTS
+    },
+    # 内蒙古自治区·鄂尔多斯市·伊金霍洛旗（同族资源库，列表表头为索引号/标题/文号/成文日期）
+    "yjhl_policy": _ordos_target(
+        "yjhl_policy", "政策文件", "伊金霍洛旗", "/yqxxgk_zyk/",
+        "政策文件资源库", "zyk_table", "tx_content", YJHL_HOST,
+    ),
+    "yjhl_valid_normative": _ordos_target(
+        "yjhl_valid_normative", "现行有效规范性文件库", "伊金霍洛旗",
+        "/yqxxgk_zyk/gfxwj/xxyxgfxwjk/", "政策文件资源库", "zyk_table", "tx_content", YJHL_HOST,
+    ),
 }
 
 
@@ -161,6 +259,29 @@ SCAN_SITES = {
         "jiangsu_suqian", "地市级网站·宿迁市", "宿迁市", "市级", "政策文件库",
         ("suqian_zcwj", "suqian_szfwj"),
         "www.suqian.gov.cn", "江苏省", "宿迁市",
+    ),
+    "ordos_municipal": ScanSite(
+        "ordos_municipal", "地市级网站·鄂尔多斯市", ORDOS_CITY, "市级",
+        "文件库（政策文件等五类栏目）",
+        (
+            "ordos_policy",
+            "ordos_regulations",
+            "ordos_local_regulations",
+            "ordos_valid_normative",
+            "ordos_invalid_normative",
+        ),
+        ORDOS_HOST, ORDOS_PROVINCE, ORDOS_CITY,
+    ),
+    "ordos_departments": ScanSite(
+        "ordos_departments", "地市级网站·鄂尔多斯市·部门文件", ORDOS_CITY, "市级",
+        f"部门文件（{len(ORDOS_DEPARTMENTS)} 个部门栏目）",
+        tuple(f"ordos_dept_{slug}" for slug, _name in ORDOS_DEPARTMENTS),
+        ORDOS_HOST, ORDOS_PROVINCE, ORDOS_CITY,
+    ),
+    "yjhl_banner": ScanSite(
+        "yjhl_banner", "区级网站·伊金霍洛旗", "伊金霍洛旗", "区级", "政策文件资源库",
+        ("yjhl_policy", "yjhl_valid_normative"),
+        YJHL_HOST, ORDOS_PROVINCE, ORDOS_CITY,
     ),
 }
 

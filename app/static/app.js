@@ -223,6 +223,19 @@ function siteState(site) {
   return {code:'fresh', dot:'s-none', pill:['pill-neutral','○ 尚未扫描'], sub:'未建基准 · 待首次全量'};
 }
 
+// 上海走“市级平台 + 区县”，其余省份按地市/区县（旗）表述。
+function siteLevelLabel(site) {
+  if (site.source_level === '区级') return '区级网站';
+  if (site.source_level === '市级') return site.province === '上海市' ? '市级平台' : '地市级平台';
+  return site.source_level;
+}
+
+function siteParallelHint(site) {
+  const siblings = sites.filter(item => item.host === site.host && item.key !== site.key);
+  if (!siblings.length) return '独立域名，可与其他站点并行';
+  return `与 ${siblings.length} 个站点同属 ${site.host}，自动排队`;
+}
+
 // ---------- 侧栏（21 项导航） ----------
 function renderNav(items) {
   navItems = Array.isArray(items) ? items : [];
@@ -742,76 +755,94 @@ async function renderExceptionView() {
   }
 }
 
-// ---------- 总览（站点卡片 + 批量） ----------
+// ---------- 总览（省份并栏 + 紧凑行） ----------
+// 同一地市、同一级别下重名的站点（如鄂尔多斯的文件库与部门文件）用标签尾段或来源名区分。
+function siteDisplayNames(list) {
+  const dupes = new Map();
+  for (const site of list) {
+    const id = `${site.province}\u0000${site.city}\u0000${site.source_level}\u0000${site.district}`;
+    dupes.set(id, (dupes.get(id) || 0) + 1);
+  }
+  const names = {};
+  for (const site of list) {
+    const id = `${site.province}\u0000${site.city}\u0000${site.source_level}\u0000${site.district}`;
+    let name = site.district;
+    if (dupes.get(id) > 1) {
+      const tail = String(site.label || '').split('·').pop();
+      const extra = (tail && tail !== site.district) ? tail : String(site.source_name || '').split('（')[0];
+      if (extra) name = `${site.district} · ${extra}`;
+    }
+    names[site.key] = name;
+  }
+  return names;
+}
+
+const OV_METER = [
+  ['attention', 'var(--warn-700)'], ['active', 'var(--run-700)'],
+  ['ready', 'var(--ok-700)'], ['fresh', 'var(--line-strong)'],
+];
+const OV_PILL = {attention: 'pill-warn', active: 'pill-run', ready: 'pill-ok', fresh: 'pill-neutral'};
+const OV_MARK = {attention: '⚠', active: '▶', ready: '✓', fresh: '○'};
+
 function renderOverview() {
   const counts = {attention: 0, active: 0, ready: 0, fresh: 0};
-  const regionCards = [];   // 每项: {province, city, level, card}
+  const names = siteDisplayNames(sites);
+  const actions = {
+    active: '查看进度', attention: '处理并恢复', ready: '查看详情',
+    invalid: '重建基准', fresh: '首次全量',
+  };
+  const panels = [];
+  const panelIndex = new Map();
+  const cityIndex = new Map();
   for (const site of sites) {
     const state = siteState(site);
-    if (state.code === 'invalid' || state.code === 'attention') counts.attention += 1;
-    else counts[state.code] += 1;
-    const act = {
-      active: '查看进度 →', attention: '处理并恢复 →', ready: '查看详情 →',
-      invalid: '重新建立基准 →', fresh: '开始首次全量 →',
-    }[state.code];
-    const check = batchMode ? `<span class="batch-check ${batchSelected.has(site.key) ? 'on' : ''}">${batchSelected.has(site.key) ? '✓' : ''}</span>` : '';
-    const levelLabel = site.source_level === '区级' ? '区级网站'
-      : (site.source_level === '市级' ? (site.province === '上海市' ? '市级平台' : '地市级平台') : escapeHtml(site.source_level));
-    regionCards.push({
-      province: site.province || '其他',
-      city: site.city || site.district || '其他',
-      level: levelLabel,
-      card: `<button type="button" class="ov-card ${batchSelected.has(site.key) && batchMode ? 'selected' : ''}" data-key="${site.key}">
-      ${check}
-      <span class="r1"><strong>${escapeHtml(site.district)} <span class="lv ${site.source_level === '区级' ? 'lv-district' : 'lv-city'}">${escapeHtml(site.source_level)}</span></strong><span class="pill ${state.pill[0]}">${state.pill[1]}</span></span>
-      <span class="r2">${escapeHtml(state.sub)}</span>
-      <span class="act">${act}</span>
-    </button>`,
-    });
+    const bucket = state.code === 'invalid' ? 'attention' : state.code;
+    counts[bucket] += 1;
+
+    const province = site.province || '其他';
+    if (!panelIndex.has(province)) {
+      panelIndex.set(province, panels.length);
+      panels.push({province, cities: [], cityIndex: new Map(), counts: {attention: 0, active: 0, ready: 0, fresh: 0}, total: 0});
+    }
+    const panel = panels[panelIndex.get(province)];
+    panel.counts[bucket] += 1;
+    panel.total += 1;
+
+    const city = site.city || site.district || '其他';
+    if (!panel.cityIndex.has(city)) {
+      panel.cityIndex.set(city, panel.cities.length);
+      panel.cities.push({city, rows: []});
+    }
+    panel.cities[panel.cityIndex.get(city)].rows.push(`
+      <button type="button" class="ov-card st-${state.code} ${batchMode && batchSelected.has(site.key) ? 'selected' : ''}" data-key="${site.key}">
+        ${batchMode ? `<span class="batch-check ${batchSelected.has(site.key) ? 'on' : ''}">${batchSelected.has(site.key) ? '✓' : ''}</span>` : ''}
+        <span class="dot ${state.dot}"></span>
+        <span class="ov-main"><strong><span class="ov-nm">${escapeHtml(names[site.key])}</span><span class="lv ${site.source_level === '区级' ? 'lv-district' : 'lv-city'}">${escapeHtml(siteLevelLabel(site))}</span></strong><small>${escapeHtml(state.sub)}</small></span>
+        <span class="pill ${state.pill[0]}">${state.pill[1]}</span>
+        <span class="ov-act">${actions[state.code]}</span>
+      </button>`);
   }
-  // 按 省 → 地市 → 平台/区级 分组，保持站点配置顺序
-  const regions = [];
-  const regionIndex = new Map();
-  const cityIndex = new Map();
-  const levelIndex = new Map();
-  for (const entry of regionCards) {
-    if (!regionIndex.has(entry.province)) {
-      regionIndex.set(entry.province, regions.length);
-      regions.push({province: entry.province, cities: []});
-    }
-    const region = regions[regionIndex.get(entry.province)];
-    const cityKey = `${region.province}\u0000${entry.city}`;
-    if (!cityIndex.has(cityKey)) {
-      cityIndex.set(cityKey, region.cities.length);
-      region.cities.push({city: entry.city, levels: []});
-    }
-    const city = region.cities[cityIndex.get(cityKey)];
-    const levelKey = `${cityKey}\u0000${entry.level}`;
-    if (!levelIndex.has(levelKey)) {
-      levelIndex.set(levelKey, city.levels.length);
-      city.levels.push({level: entry.level, cards: []});
-    }
-    city.levels[levelIndex.get(levelKey)].cards.push(entry.card);
-  }
-  const gridHtml = regions.map(region => `
-    <section class="ov-region">
-      <h3 class="ov-region-title">${escapeHtml(region.province)}</h3>
-      ${region.cities.map(city => `
-        <div class="ov-city">
-          <h4 class="ov-city-title">${escapeHtml(city.city)}</h4>
-          ${city.levels.map(level => `
-            <div class="ov-level">
-              <h5 class="ov-level-title">${level.level}</h5>
-              <div class="ov-grid">${level.cards.join('')}</div>
-            </div>`).join('')}
-        </div>`).join('')}
-    </section>`).join('');
+
+  $('#ov-grid').classList.toggle('batching', batchMode);
+  $('#ov-grid').innerHTML = panels.map(panel => {
+    const meter = OV_METER.filter(([key]) => panel.counts[key])
+      .map(([key, color]) => `<i style="flex:${panel.counts[key]};background:${color}"></i>`).join('');
+    const meta = OV_METER.filter(([key]) => panel.counts[key])
+      .map(([key]) => `<span class="pill ${OV_PILL[key]}">${OV_MARK[key]} ${panel.counts[key]}</span>`).join('');
+    return `<section class="ov-panel">
+      <h3 class="ov-panel-title">${escapeHtml(panel.province)}<span class="ov-panel-count">${panel.total} 个来源</span></h3>
+      <div class="ov-panel-meter">${meter}</div>
+      ${panel.cities.length > 1 || panel.total > 1 ? `<div class="ov-panel-meta">${meta}</div>` : ''}
+      <div class="ov-panel-body">
+        ${panel.cities.map(city => `${panel.cities.length > 1 ? `<div class="ov-city">${escapeHtml(city.city)}</div>` : ''}${city.rows.join('')}`).join('')}
+      </div>
+    </section>`;
+  }).join('');
   $('#ov-chips').innerHTML = `
     <span class="ov-chip">⚠ 需要处理 <b class="num">${counts.attention}</b></span>
     <span class="ov-chip">▶ 进行中 <b class="num">${counts.active}</b></span>
     <span class="ov-chip">✓ 已建基准 <b class="num">${counts.ready}</b></span>
     <span class="ov-chip">○ 未建基准 <b class="num">${counts.fresh}</b></span>`;
-  $('#ov-grid').innerHTML = gridHtml;
   renderLegacyJobs();
   syncBatchBar();
 }
@@ -1031,7 +1062,7 @@ function renderRail(site, state, job) {
     info.push(`<dt>覆盖栏目</dt><dd class="chips">${site.target_labels.map(label => `<span>${escapeHtml(label.split('·').pop())}</span>`).join('')}</dd>`);
   }
   if (site.baseline_job_id) info.push(`<dt>基准</dt><dd>基线 #${site.baseline_job_id}</dd>`);
-  info.push(`<dt>并行</dt><dd>${site.source_level === '市级' ? '与其余市级区县同域排队' : '与市级平台不同域，可并行'}</dd>`);
+  info.push(`<dt>并行</dt><dd>${escapeHtml(siteParallelHint(site))}</dd>`);
   $('#rail-info').innerHTML = info.join('');
 
   const body = $('#rail-schedule-body');
@@ -1087,7 +1118,7 @@ function renderSitePage() {
   const job = displayJobFor(site);
   $('#site-title').textContent = site.district;
   const level = $('#site-level');
-  level.textContent = site.source_level === '区级' ? '区级网站' : '市级平台';
+  level.textContent = siteLevelLabel(site);
   level.className = `lv ${site.source_level === '区级' ? 'lv-district' : 'lv-city'}`;
   const pill = $('#site-pill');
   pill.className = `pill ${state.pill[0]}`;
