@@ -6,6 +6,8 @@ import pytest
 from app.config import ORDOS_DEPARTMENTS, SCAN_SITES, SCAN_TARGETS, resolve_target, targets_for_site
 from app.domain import SafetyPause
 from app.ordos_collector import (
+    ORDOS_BODY_SELECTORS,
+    ORDOS_LINK_CONTAINERS,
     OrdosZykCollector,
     declared_pagination,
     header_fields,
@@ -247,6 +249,32 @@ async def test_consistent_declared_count_reports_no_discrepancy():
     collector = _served_pages({1: (14, 14), 2: (13, 13)})
     assert await collector.estimated_total() == 27
     assert collector.total_discrepancy == ""
+
+
+# 伊金霍洛旗详情页实测结构：附件不是独立块，而是内联在正文 .content-brief 的 <p> 里。
+YJHL_DETAIL_HTML = """
+<html><body><div class="content-brief">
+<p>各镇人民政府，旗人民政府各部门：</p>
+<p>现就调整全旗住宅小区包联单位相关事宜通知如下：</p>
+<p>附件：1.<a href="./W020260930419615676780.pdf" oldsrc="W020260930419615676780.pdf">全旗住宅小区包联单位划分表</a></p>
+<p>&nbsp; &nbsp; 2.<a href="./W020260930419615799790.pdf" oldsrc="W020260930419615799790.pdf">住宅小区安全隐患排查问题表</a></p>
+</div></body></html>
+"""
+
+
+def test_yjhl_inline_attachments_fall_inside_the_configured_containers():
+    # 曾经 .content-brief 不在容器表里，导致伊金霍洛旗 365 份文档一条附件都没检查。
+    from bs4 import BeautifulSoup
+
+    scoped = BeautifulSoup(YJHL_DETAIL_HTML, "html.parser").select(ORDOS_LINK_CONTAINERS)
+    found = {
+        a["href"] for node in scoped for a in node.find_all("a", href=True)
+        if a["href"].lower().endswith(".pdf")
+    }
+    assert len(found) == 2
+
+    body = BeautifulSoup(YJHL_DETAIL_HTML, "html.parser").select_one(ORDOS_BODY_SELECTORS)
+    assert body is not None and "包联单位划分表" in body.get_text()
 
 
 def test_table1_layout_skips_mobile_duplicate_cell():

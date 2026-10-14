@@ -41,9 +41,10 @@ ORDOS_LABEL_ALIASES = {
     "时效性": "有效性",
 }
 # 详情正文与附件容器：政策文件/部门文件走 bg_sl 模板，规范性文件库走 ql_detailbro 模板，
-# 伊金霍洛旗走 tx_content 模板。规章与地方性法规详情页没有这套元数据，按无表头 PASS 处理。
-ORDOS_BODY_SELECTORS = "div.content_zhwy_2022, .ql_detailbro_content, div.mainContainer, #Content"
-ORDOS_LINK_CONTAINERS = ".zcxz, .ba_ul, .fjxz, .ql_detailbro_content, div.content_zhwy_2022, #Content"
+# 伊金霍洛旗走 tx_content 模板，其正文容器是 .content-brief，附件直接内联在正文 <p> 里
+# （<p>附件：1.<a href="./W0….pdf">标题</a></p>），没有独立的附件块。
+ORDOS_BODY_SELECTORS = "div.content_zhwy_2022, .ql_detailbro_content, div.mainContainer, #Content, .content-brief"
+ORDOS_LINK_CONTAINERS = ".zcxz, .ba_ul, .fjxz, .ql_detailbro_content, div.content_zhwy_2022, #Content, .content-brief"
 
 _INVISIBLE_RE = re.compile(r"[\s　​‌‍⁠﻿]+")
 _LABEL_TAIL_RE = re.compile(r"[:：]+$")
