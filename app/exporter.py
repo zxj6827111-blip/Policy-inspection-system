@@ -24,7 +24,7 @@ from app.findings_model import enrich_finding_row, is_customer_formal_problem
 HEAD_FILL = PatternFill("solid", fgColor="1F4E78")
 ALERT_FILL = PatternFill("solid", fgColor="FCE4D6")
 LARGE_SHEET_ROW_THRESHOLD = 5_000
-EXPORT_CACHE_VERSION = 1
+EXPORT_CACHE_VERSION = 2
 
 _WORKDAY_CALENDAR = WorkdayCalendar(provider=is_workday)
 _FALLBACK_WORKDAY_CALENDAR = WorkdayCalendar()
@@ -121,8 +121,9 @@ def _write_sheet(workbook: Workbook, name: str, headers: list[str], rows: list[t
                 cell.style = "Hyperlink"
     else:
         alert_sheet = name in {"超期与日期问题", "文号与机构问题", "外链问题", "元数据问题",
-                               "PDF 与附件问题", "异常归档问题", "重复数据问题", "双渠道对账差异",
-                               "阅办联动问题", "媒体资源问题", "政策解读问题", "整改任务跟踪"}
+                               "本期整改销号", "PDF 与附件问题", "异常归档问题", "重复数据问题",
+                               "双渠道对账差异", "阅办联动问题", "媒体资源问题", "政策解读问题",
+                               "整改任务跟踪"}
         for row in sheet.iter_rows(min_row=2):
             for cell in row:
                 if isinstance(cell.value, str) and cell.value.startswith(("http://", "https://")):
@@ -490,7 +491,9 @@ def _export_job_locked(db: Database, job_id: int) -> Path:
         if missing_fields:
             metadata_row = (
                 item_result["source_label"], item_result["channel_id"], item_result["title"], item_result["source_id"],
-                "、".join(missing_fields), item_result["detail_status"], item_result["reason"], item_result["url"],
+                "、".join(missing_fields),
+                status_names.get(item_result["detail_status"], item_result["detail_status"]),
+                item_result["reason"], item_result["url"],
             )
             priority = 2 if item_result["detail_status"] == "checked_incomplete" else 1
             current = metadata_by_url.get(item_result["url"])
@@ -509,6 +512,27 @@ def _export_job_locked(db: Database, job_id: int) -> Path:
         workbook, "元数据问题",
         ["来源 Sheet", "栏目 ID", "标题", "索引号", "缺失/无效字段", "处理结果", "处理说明", "链接"],
         metadata_rows,
+    )
+
+    # 增量复查后「上期报过、本期不再命中」的问题。没有这张表，「问题不见了」
+    # 就分不清是真整改还是本轮根本没重开详情。
+    with db.connect() as transition_conn:
+        closed_transitions = transition_conn.execute(
+            """SELECT source_site,district,title,rule_code,category,severity,detail,before_value,
+            baseline_job_id,recorded_at,document_url FROM finding_transitions
+            WHERE job_id=? AND kind='closed' ORDER BY document_id,id""", (job_id,),
+        ).fetchall()
+    closure_rows = [
+        (r["source_site"] or "市级平台", r["district"], r["title"], r["rule_code"], r["category"],
+         r["severity"], r["detail"], r["before_value"], r["baseline_job_id"], r["recorded_at"],
+         r["document_url"])
+        for r in closed_transitions
+    ]
+    _write_sheet(
+        workbook, "本期整改销号",
+        ["来源", "区县", "文件标题", "规则", "问题类别", "严重度", "上期问题", "上期页面值",
+         "上期任务 ID", "销号时间", "文件链接"],
+        closure_rows,
     )
 
     pdf_rows = [

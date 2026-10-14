@@ -87,7 +87,7 @@ def test_database_and_excel_export(tmp_path, monkeypatch):
     monkeypatch.setattr("app.exporter.EXPORT_DIR", tmp_path)
     output = export_job(db, job_id)
     workbook = load_workbook(output)
-    assert workbook.sheetnames == ["问题汇总", "超期与日期问题", "文号与机构问题", "外链问题", "全量明细", "元数据问题", "PDF 与附件问题", "异常归档问题", "重复数据问题", "双渠道对账差异", "阅办联动问题", "媒体资源问题", "政策解读问题", "整改任务跟踪", "扫描运行记录"]
+    assert workbook.sheetnames == ["问题汇总", "超期与日期问题", "文号与机构问题", "外链问题", "全量明细", "元数据问题", "本期整改销号", "PDF 与附件问题", "异常归档问题", "重复数据问题", "双渠道对账差异", "阅办联动问题", "媒体资源问题", "政策解读问题", "整改任务跟踪", "扫描运行记录"]
     assert workbook["全量明细"]["F2"].value == "测试文件"
     assert workbook["全量明细"]["AB2"].hyperlink.target == "https://example.test/10001.html"
     assert workbook["超期与日期问题"]["E2"].value == datetime(2026, 1, 1)
@@ -102,6 +102,40 @@ def test_database_and_excel_export(tmp_path, monkeypatch):
     assert workbook["外链问题"]["E2"].value == "详情页侧栏"
     assert workbook["外链问题"]["F2"].value == "政策解读"
     assert workbook["外链问题"]["H2"].hyperlink.target == "https://example.test/read-missing"
+
+
+def test_export_lists_rectified_findings_in_its_own_sheet(tmp_path, monkeypatch):
+    """销号必须能单独导出：否则「本期问题变少了」分不清是网站改了还是根本没复查。"""
+    db = Database(tmp_path / "closure.db")
+    db.initialize()
+    job_id = db.create_job(["putuo_government"], "incremental", {})
+    db.update_job(job_id, status="completed", coverage_status="complete")
+    with db.connect() as conn:
+        cur = conn.execute(
+            """INSERT INTO policy_documents(
+                district,url,title,content_hash,first_seen_job_id,last_seen_job_id,
+                last_detail_checked_at,first_seen_at,last_seen_at
+            ) VALUES('普陀区','https://example.test/closure','关于某工作的通知','deadbeef',?,?,
+                '2026-10-01','2026-09-01','2026-10-01')""",
+            (job_id, job_id),
+        )
+        document_id = int(cur.lastrowid)
+        conn.execute(
+            """INSERT INTO finding_transitions(
+                job_id,baseline_job_id,document_id,stable_key,rule_code,category,severity,kind,
+                detail,before_value,after_value,source_site,district,title,document_url,recorded_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (job_id, 11, document_id, f"{document_id}:DATE-001", "DATE-001", "日期问题", "high", "closed",
+             "成文日期至发布日期相隔 38 个工作日，超过 20 个工作日", "2026-06-01", "", "市级平台",
+             "普陀区", "关于某工作的通知", "https://example.test/closure", "2026-10-14T00:00:00+00:00"),
+        )
+    monkeypatch.setattr("app.exporter.EXPORT_DIR", tmp_path)
+
+    sheet = load_workbook(export_job(db, job_id))["本期整改销号"]
+    assert sheet.max_row == 2
+    assert sheet["D2"].value == "DATE-001"
+    assert "超过 20 个工作日" in sheet["G2"].value
+    assert sheet["I2"].value == 11
 
 
 def test_export_reuses_current_file_until_job_data_changes(tmp_path, monkeypatch):
@@ -309,7 +343,8 @@ def test_export_deduplicates_metadata_problem_sheet_by_url(tmp_path, monkeypatch
 
     assert workbook["全量明细"].max_row == 3
     assert workbook["元数据问题"].max_row == 2
-    assert workbook["元数据问题"]["F2"].value == "checked_incomplete"
+    assert workbook["元数据问题"]["F2"].value == "表头不完整，已记录问题"
+    assert workbook["元数据问题"]["F2"].value == workbook["全量明细"]["Y2"].value
     assert workbook["问题汇总"]["A2"].value == source_label
     assert workbook["问题汇总"]["B2"].value == "元数据问题"
     assert workbook["问题汇总"]["C2"].value == 1
