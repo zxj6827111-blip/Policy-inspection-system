@@ -79,6 +79,14 @@ class UncheckableLinkDestination(UnsafeLinkDestination):
     """mailto:/tel: 等非网页地址：没有可核验的页面，但不构成站点缺陷。"""
 
 
+# 部分政务站（实测伊金霍洛旗）对非浏览器 UA 直接返回 403/550。httpx 默认带
+# python-httpx/x 标识，会把「我们被站点拒了」误报成「附件打不开」进客户报表。
+LINK_CHECK_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+)
+
+
 async def _settle_route(route, action: str, *args) -> None:
     # 路由经常已被浏览器侧结算（下载接管、弹窗、页面关闭），重复处理会抛
     # "Route is already handled!"，被 playwright 打成整段 traceback 刷满日志。
@@ -1173,7 +1181,9 @@ class LinkChecker:
         self.client: httpx.AsyncClient | None = None
 
     async def __aenter__(self):
-        self.client = httpx.AsyncClient(follow_redirects=False, timeout=30)
+        self.client = httpx.AsyncClient(
+            follow_redirects=False, timeout=30, headers={"User-Agent": LINK_CHECK_USER_AGENT},
+        )
         return self
 
     async def __aexit__(self, *_args):

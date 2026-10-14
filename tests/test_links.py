@@ -4,7 +4,7 @@ import httpx
 import pytest
 from playwright.async_api import TimeoutError as PlaywrightTimeout
 
-from app.collector import LinkChecker
+from app.collector import LINK_CHECK_USER_AGENT, LinkChecker
 from app.config import SafetyConfig
 from app.domain import RelatedLink, SafetyPause
 from app.safety import SafetyController
@@ -23,7 +23,10 @@ def checker_with(handler):
         SafetyConfig(consecutive_failure_limit=10), sleep=FakeSleep(), rng=random.Random(1)
     )
     checker = LinkChecker(safety, resolver=lambda _host: ["1.1.1.1"])
-    checker.client = httpx.AsyncClient(transport=httpx.MockTransport(handler), follow_redirects=False)
+    checker.client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), follow_redirects=False,
+        headers={"User-Agent": LINK_CHECK_USER_AGENT},
+    )
     return checker
 
 
@@ -239,6 +242,35 @@ async def test_private_or_local_destinations_are_rejected_before_request(url):
     assert called is False
     assert result["result"] == "error"
     assert result["error_type"] == "unsafe_destination"
+
+
+@pytest.mark.asyncio
+async def test_link_checker_sends_a_browser_user_agent():
+    # 伊金霍洛旗对 python-httpx 默认 UA 返回 550，一次扫描就误报过 119 条「附件打不开」。
+    safety = SafetyController(SafetyConfig(), sleep=FakeSleep(), rng=random.Random(1))
+    async with LinkChecker(safety) as checker:
+        request = checker.client.build_request("GET", "https://links.test/a.pdf")
+    assert request.headers["user-agent"].startswith("Mozilla/5.0")
+
+
+@pytest.mark.asyncio
+async def test_range_header_does_not_drop_the_user_agent():
+    # check() 逐请求带 Range，必须与客户端默认 UA 共存而不是覆盖掉。
+    seen = {}
+
+    def handler(request):
+        seen["ua"] = request.headers.get("user-agent", "")
+        seen["range"] = request.headers.get("range", "")
+        return httpx.Response(206, headers={"Content-Type": "application/pdf"}, content=b"%PDF-1.7")
+
+    checker = checker_with(handler)
+    try:
+        result = await checker.check("附件", "https://links.test/a.pdf")
+    finally:
+        await checker.client.aclose()
+    assert seen["ua"].startswith("Mozilla/5.0")
+    assert seen["range"] == "bytes=0-65535"
+    assert result["result"] == "ok"
 
 
 @pytest.mark.asyncio
