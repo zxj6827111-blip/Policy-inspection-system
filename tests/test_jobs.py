@@ -675,6 +675,29 @@ async def test_repeated_cooldown_at_same_progress_stops_auto_resuming(tmp_path, 
 
 
 @pytest.mark.asyncio
+async def test_site_overstated_total_is_recorded_as_an_inspection_finding(tmp_path, fake_runtime, monkeypatch):
+    """按实测条数收尾可以，但「站点标称与实发不一致」必须留下审计痕迹。"""
+    class OverstatingCollector(FakeCollector):
+        total_discrepancy = "伊金霍洛旗·现行有效规范性文件库 页面标称 27 条，走完其声明的 2 页实际只发布 2 条"
+
+    db = Database(tmp_path / "discrepancy.db")
+    db.initialize()
+    monkeypatch.setattr("app.jobs.BrowserCollector", OverstatingCollector)
+    fake_runtime.datasets = {"普陀区": [item("普陀区", 0, "a"), item("普陀区", 1, "b")]}
+    manager = JobManager(db)
+    job_id = await manager.create_and_start(["普陀区"], "full", 0)
+    await wait_job(manager, job_id)
+
+    assert db.get_job(job_id)["status"] == "completed"
+    with db.connect() as conn:
+        rows = conn.execute(
+            "SELECT message FROM job_events WHERE job_id=? AND event_type='total_discrepancy'", (job_id,),
+        ).fetchall()
+    assert len(rows) == 1
+    assert "实际只发布 2 条" in rows[0][0]
+
+
+@pytest.mark.asyncio
 async def test_crash_gets_one_auto_retry_then_stays_for_a_human(tmp_path, fake_runtime, monkeypatch):
     """瞬态崩溃（如 playwright 路由竞态）重试一次；同一个异常再犯就停在 failed 交给人。"""
     class CrashingCollector(FakeCollector):

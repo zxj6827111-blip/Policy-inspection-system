@@ -1519,6 +1519,10 @@ class JobManager:
             await self._record_target_total(
                 job_id, target.label, await collector.estimated_total(),
             )
+            discrepancy = getattr(collector, "total_discrepancy", "")
+            if discrepancy:
+                # 站点标称条数与实际发布条数不一致，本身就是巡检发现，必须留下审计痕迹。
+                self.db.add_job_event(job_id, "total_discrepancy", discrepancy)
         self.db.update_job(
             job_id, current_district_index=target_index + 1, current_district="",
             current_page=1, current_item_index=-1,

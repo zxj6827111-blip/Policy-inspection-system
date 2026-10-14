@@ -248,6 +248,10 @@ class OrdosZykCollector(BrowserCollector):
         self._enumerated = 0
         self._exhausted = False
         self._discovered = False
+        self._walked_from_first = False
+        self._reached_declared_end = False
+        self._page_link_counts: dict[int, tuple[int, int]] = {}
+        self.total_discrepancy = ""
 
     @property
     def rendered_hosts(self) -> set[str]:
@@ -290,6 +294,10 @@ class OrdosZykCollector(BrowserCollector):
                 self._current_items = []
                 return []
             if status >= 400:
+                if status in {502, 503, 504} and attempt == 0:
+                    # 政务站网关偶发 5xx：先重取一次，别为一次抖动进 30 分钟冷却。
+                    await self.safety.retry_wait(1)
+                    return await self._fetch_page(page_number, attempt=1)
                 raise SafetyPause(f"{self.site_label} 列表页返回 HTTP {status}：{page_target}")
             pages, records = declared_pagination(text)
             if pages is not None:
@@ -315,6 +323,9 @@ class OrdosZykCollector(BrowserCollector):
                     f"{self.site_label}「{self.target.source_name}」第 {page_number} 页重取后仍未解析到条目，"
                     "采集器需要更新"
                 )
+            self._page_link_counts[page_number] = (
+                len(items), len(set(DETAIL_HREF_RE.findall(text))),
+            )
             self._current_page = page_number
             self._current_items = items
             self._pages[page_number] = items
@@ -344,20 +355,36 @@ class OrdosZykCollector(BrowserCollector):
             await self._discover_all_pages()
 
     async def estimated_total(self) -> int:
-        # countRecord 是站点声明的栏目总量，跨批次稳定；_enumerated 只数本轮 iter_items 的产出，
-        # 从列表中途恢复时会远小于已覆盖数，拿它当总量会让收尾修订永远判负、任务无法完成。
-        if self._declared_records:
-            return self._declared_records
+        declared = int(self._declared_records or 0)
+        actual = len({item.stable_id for rows in self._pages.values() for item in rows})
+        if declared and actual < declared and self._pagination_is_complete():
+            self.total_discrepancy = (
+                f"{self.target.label} 页面标称 {declared} 条，走完其声明的 {self._declared_pages} 页"
+                f"实际只发布 {actual} 条"
+            )
+            return actual
+        if declared:
+            return declared
         if self._discovered:
             return sum(len(rows) for rows in self._pages.values())
         if self._exhausted:
             return self._enumerated
         return 0
 
+    def _pagination_is_complete(self) -> bool:
+        # 三条同时成立才允许用实测条数替代站点标称：本轮从第 1 页走到站点自己声明的末页，
+        # 且每页解析出的条数都等于该页真实存在的详情链接数（没有漏解析）。
+        # 缺任何一条都退回标称数，让覆盖校验继续拦着可能的漏扫。
+        if not (self._walked_from_first and self._reached_declared_end and self._pages):
+            return False
+        return all(parsed == raw for parsed, raw in self._page_link_counts.values())
+
     async def iter_items(self, district: str, start_page: int = 1, start_item_index: int = -1):
         self._seen_identities = set()
         self._enumerated = 0
         self._exhausted = False
+        self._walked_from_first = int(start_page) <= 1
+        self._reached_declared_end = False
         page_number = max(1, int(start_page))
         while True:
             if page_number == self._current_page:
@@ -378,7 +405,10 @@ class OrdosZykCollector(BrowserCollector):
                 self._seen_identities.add(item.stable_id)
                 self._enumerated += 1
                 yield item
-            if self._declared_pages is None or page_number >= self._declared_pages:
+            if self._declared_pages is None:
+                break
+            if page_number >= self._declared_pages:
+                self._reached_declared_end = True
                 break
             page_number += 1
         self._exhausted = True

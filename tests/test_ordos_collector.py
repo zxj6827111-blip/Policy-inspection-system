@@ -177,6 +177,78 @@ async def test_mid_page_still_empty_after_retry_pauses_for_collector_fix():
         await collector._fetch_page(3)
 
 
+async def test_gateway_5xx_on_list_page_is_refetched_once():
+    # 伊金霍洛旗实测出现过列表第 3 页 504、首页 0.3 秒就恢复：不该为一次网关抖动冷却半小时。
+    collector = _list_collector([(504, "<html>gateway</html>"), (200, TABLE1_HTML)])
+    collector._declared_pages = 105
+    items = await collector._fetch_page(3)
+    assert len(items) == 1
+    assert len(collector.context.request.calls) == 2
+
+
+async def test_persistent_gateway_5xx_still_pauses_into_cooldown():
+    collector = _list_collector([(504, ""), (504, "")])
+    collector._declared_pages = 105
+    with pytest.raises(SafetyPause, match="HTTP 504"):
+        await collector._fetch_page(3)
+
+
+def _served_pages(counts: dict[int, tuple[int, int]], *, from_first=True, to_end=True):
+    """搭一个「走完声明分页、每页解析数=页面详情链接数」的采集器状态。"""
+    from app.domain import PolicyListItem
+
+    collector = OrdosZykCollector(None, None, SCAN_TARGETS["yjhl_valid_normative"])
+    collector._declared_records = 27
+    collector._declared_pages = 2
+    for page, (parsed, _raw) in counts.items():
+        collector._pages[page] = [
+            PolicyListItem(
+                district="伊金霍洛旗", page_number=page, item_index=index,
+                title=f"文件{page}-{index}",
+                url=f"https://www.yjhl.gov.cn/x/t20260101_{page}{index}.html",
+                stable_id=f"yjhl_valid_normative|url:{page}/{index}",
+            )
+            for index in range(parsed)
+        ]
+    collector._page_link_counts = counts
+    collector._walked_from_first = from_first
+    collector._reached_declared_end = to_end
+    return collector
+
+
+async def test_overstated_declared_count_falls_back_to_measured_pages():
+    # 伊金霍洛旗「现行有效规范性文件库」实测：标称 27 条，走完声明的 2 页只有 15 条。
+    collector = _served_pages({1: (8, 8), 2: (7, 7)})
+    assert await collector.estimated_total() == 15
+    assert "标称 27" in collector.total_discrepancy
+    assert "实际只发布 15" in collector.total_discrepancy
+
+
+async def test_resumed_pass_never_overrides_the_declared_count():
+    collector = _served_pages({1: (8, 8), 2: (7, 7)}, from_first=False)
+    assert await collector.estimated_total() == 27
+    assert collector.total_discrepancy == ""
+
+
+async def test_unreached_declared_end_keeps_the_declared_count():
+    collector = _served_pages({1: (8, 8), 2: (7, 7)}, to_end=False)
+    assert await collector.estimated_total() == 27
+    assert collector.total_discrepancy == ""
+
+
+async def test_dropped_rows_are_blamed_on_the_collector_not_the_site():
+    # 某页解析数少于页面真实详情链接数 = 采集器漏解析，不能反过来认定站点少发布。
+    collector = _served_pages({1: (5, 8), 2: (7, 7)})
+    assert await collector.estimated_total() == 27
+    assert collector.total_discrepancy == ""
+
+
+async def test_consistent_declared_count_reports_no_discrepancy():
+    collector = _served_pages({1: (14, 14), 2: (13, 13)})
+    assert await collector.estimated_total() == 27
+    assert collector.total_discrepancy == ""
+
+
 def test_table1_layout_skips_mobile_duplicate_cell():
     target = SCAN_TARGETS["ordos_policy"]
     items = parse_ordos_list_page(TABLE1_HTML, 1, target)
