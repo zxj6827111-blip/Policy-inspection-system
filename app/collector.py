@@ -1252,9 +1252,17 @@ class LinkChecker:
         return enriched
 
     @staticmethod
-    def _is_transient_server_error(result: dict) -> bool:
+    def _needs_direct_confirmation(result: dict) -> bool:
+        """判定这条 broken 够不够格直接报给客户。
+
+        没有 HTTP 状态码就没有证据：`click_no_response` 这类只是浏览器那次点击没接到
+        响应（实测伊金霍洛旗 7 条里 7 条用独立客户端取都是 200/206）；5xx 则是站点瞬态。
+        两者都必须换一种请求姿势复验一次；404/410 这类有状态的仍不触发，不白打站点流量。
+        """
+        if result.get("result") != "broken":
+            return False
         status = result.get("status_code")
-        return result.get("result") == "broken" and isinstance(status, int) and status >= 500
+        return not isinstance(status, int) or status >= 500
 
     async def check(self, kind: str, url: str, related: RelatedLink | None = None) -> dict:
         if related and related.check_result:
@@ -1282,12 +1290,17 @@ class LinkChecker:
                     review_status="manual_review",
                 )
                 return self._with_related_metadata(result, related)
-            if self._is_transient_server_error(rendered):
+            if self._needs_direct_confirmation(rendered):
                 # 浏览器请求上下文回 5xx 不足以判定附件失效：实测伊金霍洛旗会对每篇文档「第一个
-                # 被检查的附件」回 550，而同一 URL 稍后用独立 HTTP 客户端取是 200 带真实字节。
-                # 两种请求姿势都失败，才有资格进客户可见的外链问题表。
+                # 被检查的附件」回 550，同一 URL 稍后用独立 HTTP 客户端取是 200 带真实字节；
+                # `click_no_response` 那 7 条也一样，独立客户端取全是 200/206。
+                # 但复验只有在**给出结论**时才作数：它自己也没连上时保留原判，
+                # 否则真失效会被这条逻辑改判成"没结论"，从客户报表里悄悄消失。
                 confirmed = await self._check_direct(kind, url, related)
-                if confirmed.get("result") != "broken" or not self._is_transient_server_error(confirmed):
+                decisive = confirmed.get("result") == "ok" or (
+                    confirmed.get("result") == "broken" and not self._needs_direct_confirmation(confirmed)
+                )
+                if decisive:
                     return confirmed
             return rendered
         return await self._check_direct(kind, url, related)

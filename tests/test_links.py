@@ -510,7 +510,7 @@ async def test_5xx_that_survives_both_request_shapes_stays_a_reported_failure():
 
 @pytest.mark.asyncio
 async def test_browser_side_404_is_final_without_paying_for_a_second_request():
-    """404 是真失效，不该为它多打一次请求；只有瞬态性的 5xx 才需要复验。"""
+    """404 已经有明确的 HTTP 证据，是真失效，不该为它多打一次请求。"""
     seen = []
 
     def handler(request):
@@ -526,4 +526,35 @@ async def test_browser_side_404_is_final_without_paying_for_a_second_request():
     assert seen == []
     assert result["result"] == "broken"
     assert result["status_code"] == 404
+
+
+@pytest.mark.asyncio
+async def test_broken_without_http_evidence_also_gets_reconfirmed():
+    """click_no_response 没有状态码＝没证据：实测伊旗 7 条里 7 条独立客户端取都是 200/206。"""
+    def handler(_request):
+        return httpx.Response(206, headers={"Content-Type": "application/pdf"}, content=b"%PDF-1.7 real")
+
+    no_response = {**BROWSER_550, "status_code": None, "error_type": "click_no_response"}
+    checker = rendered_checker_with(handler, no_response)
+    try:
+        result = await checker.check("附件", "https://links.test/a.pdf")
+    finally:
+        await checker.client.aclose()
+    assert result["result"] == "ok"
+    assert result["status_code"] == 206
+
+
+@pytest.mark.asyncio
+async def test_click_no_response_that_also_fails_directly_stays_reported():
+    def handler(_request):
+        raise httpx.ConnectError("connection refused")
+
+    no_response = {**BROWSER_550, "status_code": None, "error_type": "click_no_response"}
+    checker = rendered_checker_with(handler, no_response)
+    try:
+        result = await checker.check("附件", "https://links.test/a.pdf")
+    finally:
+        await checker.client.aclose()
+    assert result["result"] == "broken"
+    assert result["error_type"] == "click_no_response"
 
