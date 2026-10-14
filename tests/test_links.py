@@ -453,3 +453,77 @@ async def test_fixed_target_host_uses_target_rules_without_generic_dns_classific
     url = "https://www.shanghai.gov.cn/gwk/resource/file?filename=test.pdf"
     await checker._ensure_allowed(url)
     assert allowed == [url]
+
+
+def rendered_checker_with(handler, rendered_result):
+    """把浏览器请求姿势的固定返回值接进 LinkChecker，独立客户端仍走 mock。"""
+    checker = checker_with(handler)
+    checker.rendered_hosts = {"links.test"}
+
+    async def rendered(kind, url, related=None):
+        return dict(rendered_result)
+
+    checker.rendered_checker = rendered
+    return checker
+
+
+BROWSER_550 = {
+    "kind": "附件", "url": "https://links.test/a.pdf", "final_url": "https://links.test/a.pdf",
+    "status_code": 550, "result": "broken", "error_type": "http_error", "page_title": "",
+    "redirect_chain": ["https://links.test/a.pdf"], "review_status": "confirmed",
+}
+
+
+@pytest.mark.asyncio
+async def test_browser_side_5xx_is_reconfirmed_by_an_independent_http_client():
+    """实测症状回归：伊金霍洛旗对每篇文档第一个附件回 550，独立客户端取是 200。"""
+    seen = []
+
+    def handler(request):
+        seen.append(str(request.url))
+        return httpx.Response(200, headers={"Content-Type": "application/pdf"}, content=b"%PDF-1.7 real")
+
+    checker = rendered_checker_with(handler, BROWSER_550)
+    try:
+        result = await checker.check("附件", "https://links.test/a.pdf")
+    finally:
+        await checker.client.aclose()
+    assert seen == ["https://links.test/a.pdf"]
+    assert result["result"] == "ok"
+    assert result["status_code"] == 200
+
+
+@pytest.mark.asyncio
+async def test_5xx_that_survives_both_request_shapes_stays_a_reported_failure():
+    def handler(_request):
+        return httpx.Response(550, headers={"Content-Type": "text/plain"}, content=b"refused")
+
+    checker = rendered_checker_with(handler, BROWSER_550)
+    try:
+        result = await checker.check("附件", "https://links.test/a.pdf")
+    finally:
+        await checker.client.aclose()
+    assert result["result"] == "broken"
+    assert result["status_code"] == 550
+    assert result["error_type"] == "http_error"
+
+
+@pytest.mark.asyncio
+async def test_browser_side_404_is_final_without_paying_for_a_second_request():
+    """404 是真失效，不该为它多打一次请求；只有瞬态性的 5xx 才需要复验。"""
+    seen = []
+
+    def handler(request):
+        seen.append(str(request.url))
+        return httpx.Response(200, headers={"Content-Type": "application/pdf"}, content=b"%PDF-1.7")
+
+    not_found = {**BROWSER_550, "status_code": 404, "error_type": "http_error"}
+    checker = rendered_checker_with(handler, not_found)
+    try:
+        result = await checker.check("附件", "https://links.test/a.pdf")
+    finally:
+        await checker.client.aclose()
+    assert seen == []
+    assert result["result"] == "broken"
+    assert result["status_code"] == 404
+

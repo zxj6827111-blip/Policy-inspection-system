@@ -1251,13 +1251,18 @@ class LinkChecker:
         enriched.setdefault("evidence", "")
         return enriched
 
+    @staticmethod
+    def _is_transient_server_error(result: dict) -> bool:
+        status = result.get("status_code")
+        return result.get("result") == "broken" and isinstance(status, int) and status >= 500
+
     async def check(self, kind: str, url: str, related: RelatedLink | None = None) -> dict:
         if related and related.check_result:
             return self._with_related_metadata(related.check_result, related)
         result = {"kind": kind, "url": url, "result": "error", "error_type": ""}
         if self.rendered_checker and urlparse(url).netloc.lower() in self.rendered_hosts:
             try:
-                return self._with_related_metadata(
+                rendered = self._with_related_metadata(
                     await self._call_rendered_checker(kind, url, related), related
                 )
             except SafetyPause:
@@ -1277,9 +1282,21 @@ class LinkChecker:
                     review_status="manual_review",
                 )
                 return self._with_related_metadata(result, related)
+            if self._is_transient_server_error(rendered):
+                # 浏览器请求上下文回 5xx 不足以判定附件失效：实测伊金霍洛旗会对每篇文档「第一个
+                # 被检查的附件」回 550，而同一 URL 稍后用独立 HTTP 客户端取是 200 带真实字节。
+                # 两种请求姿势都失败，才有资格进客户可见的外链问题表。
+                confirmed = await self._check_direct(kind, url, related)
+                if confirmed.get("result") != "broken" or not self._is_transient_server_error(confirmed):
+                    return confirmed
+            return rendered
+        return await self._check_direct(kind, url, related)
+
+    async def _check_direct(self, kind: str, url: str, related: RelatedLink | None) -> dict:
+        result = {"kind": kind, "url": url, "result": "error", "error_type": ""}
         if self.client is None:
             async with self:
-                return await self.check(kind, url, related)
+                return await self._check_direct(kind, url, related)
         for attempt in range(self.safety.config.max_retries + 1):
             try:
                 current_url = url
