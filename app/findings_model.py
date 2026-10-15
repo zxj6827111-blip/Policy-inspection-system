@@ -4,6 +4,17 @@ from __future__ import annotations
 
 from typing import Any
 
+# 跨任务视图（全局问题清单、总览计数）必须按 (文档,规则) 只留最新一条：
+# is_current 的语义是"该任务内未被后续覆盖"，同一缺陷被多个任务重复命中时每个任务都留一条
+# current，按任务导出要保留各自的历史，但全局视图直接累加就会把同一个问题数成好几份。
+# 别名必须是 f，因为片段里要用 f.document_id / f.rule_code 关联外层。
+LATEST_PER_DOCUMENT_RULE = """
+    f.id = (SELECT f2.id FROM rule_findings f2
+            WHERE f2.document_id = f.document_id AND f2.rule_code = f.rule_code
+              AND COALESCE(f2.is_current, 1) = 1
+            ORDER BY COALESCE(f2.created_at, '') DESC, f2.id DESC LIMIT 1)
+"""
+
 # Machine conclusions
 MACHINE_CONFIRMED_BY_RULE = "confirmed_by_rule"
 MACHINE_SUSPECTED = "suspected"

@@ -597,3 +597,52 @@ def test_full_rebuild_rejects_unknown_site_as_bad_request(tmp_path, monkeypatch)
     assert response.status_code == 400
     assert "不支持的扫描站点" in response.json()["detail"]
     assert db.list_jobs() == []
+
+
+def test_global_findings_list_reports_a_recurring_problem_once(tmp_path, monkeypatch):
+    """同一缺陷被多个任务重复命中时，全局清单只数一次，但按任务视图仍各自保留。"""
+    db = Database(tmp_path / "recurring.db")
+    monkeypatch.setattr(main_module, "db", db)
+    monkeypatch.setattr(main_module, "manager", JobManager(db))
+    repo = Repository(db)
+    record = PolicyRecord("普陀区", "反复超期文件", "https://example.test/recurring")
+    finding = Finding("DATE-001", "日期问题", "medium", "confirmed", "成文至发布超过 20 个工作日")
+
+    with TestClient(main_module.app) as client:
+        first = db.create_job(["普陀区"], "full", {}, 1)
+        second = db.create_job(["普陀区"], "incremental", {}, 1)
+        db.update_job(first, status="completed", coverage_status="complete")
+        db.update_job(second, status="completed", coverage_status="complete")
+        repo.save_record(first, record, [finding])
+        repo.save_record(second, record, [finding])
+
+        payload = client.get("/api/review-queue", params={"review_status": "all"}).json()
+        assert payload["total"] == 1, payload
+        assert payload["items"][0]["job_id"] == second, "全局清单应保留最新一次命中的那条"
+
+        # 历史任务自己的视图不能被全局去重弄空
+        assert len(client.get(f"/api/jobs/{first}/findings").json()) == 1
+        scoped = client.get(
+            f"/api/jobs/{first}/review-queue", params={"review_status": "all"}
+        ).json()
+        assert [row["job_id"] for row in scoped["items"]] == [first], scoped
+
+
+def test_overview_counts_each_recurring_problem_once(tmp_path, monkeypatch):
+    """总览的 findings 分桶同样是跨任务口径，重复命中不能重复计数。"""
+    db = Database(tmp_path / "recurring-overview.db")
+    monkeypatch.setattr(main_module, "db", db)
+    monkeypatch.setattr(main_module, "manager", JobManager(db))
+
+    with TestClient(main_module.app) as client:
+        repo = Repository(db)
+        record = PolicyRecord("普陀区", "反复超期文件", "https://example.test/recurring-ov")
+        finding = Finding("DATE-001", "日期问题", "medium", "confirmed", "成文至发布超过 20 个工作日")
+        first = db.create_job(["普陀区"], "full", {}, 1)
+        second = db.create_job(["普陀区"], "incremental", {}, 1)
+        db.update_job(first, status="completed", coverage_status="complete")
+        db.update_job(second, status="completed", coverage_status="complete")
+        repo.save_record(first, record, [finding])
+        repo.save_record(second, record, [finding])
+        buckets = client.get("/api/overview").json()["finding_buckets"]
+    assert buckets["total"] == 1, buckets

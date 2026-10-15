@@ -34,6 +34,7 @@ from app.db import Database, utc_now
 from app.exporter import export_job
 from app.putuo_body import clean_putuo_body_text
 from app.findings_model import (
+    LATEST_PER_DOCUMENT_RULE,
     decision_to_human,
     enrich_finding_row,
     is_customer_formal_problem,
@@ -840,9 +841,12 @@ def _review_queue_payload(
         ).fetchone():
             raise HTTPException(404, "任务不存在")
         where_sql = "WHERE COALESCE(f.is_current,1)=1 AND j.deleted_at IS NULL"
-        params = (job_id,) if job_id is not None else ()
+        params: tuple = ()
         if job_id is not None:
             where_sql += " AND f.job_id=?"
+            params = (job_id,)
+        else:
+            where_sql += f" AND {LATEST_PER_DOCUMENT_RULE}"
         all_rows = conn.execute(
             f"""SELECT f.*,d.title,d.url,d.district,COALESCE(r.note,'') review_note
             FROM rule_findings f JOIN policy_documents d ON d.id=f.document_id
@@ -2612,8 +2616,9 @@ async def overview_endpoint(_user: CurrentUser = Depends(require_login)):
                             "collection_error": 0, "auto_excluded": 0, "human_excluded": 0,
                             "customer_formal": 0, "total": 0}
         finding_rows = conn.execute(
-            """SELECT f.* FROM rule_findings f JOIN scan_jobs j ON j.id=f.job_id
-            WHERE COALESCE(f.is_current,1)=1 AND j.deleted_at IS NULL"""
+            "SELECT f.* FROM rule_findings f JOIN scan_jobs j ON j.id=f.job_id"
+            " WHERE COALESCE(f.is_current,1)=1 AND j.deleted_at IS NULL"
+            f" AND {LATEST_PER_DOCUMENT_RULE}"
         ).fetchall()
         for finding_row in finding_rows:
             item = enrich_finding_row(dict(finding_row))
