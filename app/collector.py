@@ -795,6 +795,14 @@ class BrowserCollector:
                 return result
 
             self.safety.after_request(None, "", enforce_risk=False)
+            # 点击没接到响应 ≠ 附件打不开：普陀重开详情后 17 条这类记录，独立请求取全部是
+            # 206 且带真实字节。先用浏览器自身的请求上下文直接取一次拿 HTTP 证据，
+            # 拿不到证据才保留 click_no_response。
+            if related.url:
+                with suppress(Exception):
+                    probed = await self._check_browser_attachment(related.kind, related.url)
+                    if probed.get("status_code") is not None:
+                        return self._with_link_metadata(probed, related)
             return self._link_error_result(related, "click_no_response", "点击后未出现跳转、下载或网络响应", result="broken")
         except (PlaywrightTimeout, asyncio.TimeoutError, httpx.TimeoutException) as exc:
             blocked_result = finish_navigation_failure()
