@@ -5,6 +5,8 @@ from playwright.async_api import TimeoutError as PlaywrightTimeout
 
 from app.collector import (
     BrowserCollector,
+    DETAIL_BODY_TEXT_SELECTOR,
+    DETAIL_LINK_AREA_SELECTORS,
     attachment_payload_error,
     comparable_title,
     extract_labeled_value,
@@ -774,13 +776,17 @@ async def test_putuo_detail_without_header_is_passed_without_record():
 
 
 class FakeLocator:
-    def __init__(self, text="", count=1, items=None):
+    def __init__(self, text="", count=1, items=None, children=None):
         self.text = text
         self._count = count
         self.items = items or []
+        self.children = children
 
     async def count(self):
         return self._count
+
+    async def all(self):
+        return [] if not self._count else list(getattr(self, "children", None) or [self])
 
     async def inner_text(self):
         return self.text
@@ -807,10 +813,7 @@ class FakeDetailPage:
             return FakeLocator(self.text)
         if selector == "h1":
             return FakeLocator("测试政策标题")
-        if selector in {
-            "article, .article-content, .policy-content, .TRS_Editor",
-            "article, .article-content, .policy-content, .TRS_Editor, .content, .article, .detail-content, .pages_content, .zw",
-        }:
+        if selector in {DETAIL_LINK_AREA_SELECTORS[0][1], DETAIL_BODY_TEXT_SELECTOR}:
             return FakeLocator(self.text, items=[
                 {"text": "政策解读", "href": "https://www.shanghai.gov.cn/read/1"},
                 {"text": "附件", "href": "https://www.shanghai.gov.cn/file/a.pdf"},
@@ -834,6 +837,54 @@ async def test_parse_complete_dynamic_detail_and_business_id():
     assert record.published_date == record.authored_date == date(2026, 7, 3)
     assert [link.kind for link in record.related_links] == ["政策解读", "附件"]
     assert [link.source_area for link in record.related_links] == ["详情页正文", "详情页正文"]
+
+
+@pytest.mark.asyncio
+async def test_detail_links_survive_decoy_container_and_site_specific_attach_box():
+    """普陀真实事故：附件长在 `ul.attachments`／`#ivs_content` 里，而 `.content` 先命中一个空壳页头。
+
+    老实现只取每个区域的第一个匹配容器，于是这些页面一条附件都记不上，
+    报表里表现为「该文件有附件但从未检查」，不是「检查过且正常」。
+    """
+    class DecoyPage:
+        url = "https://www.shpt.gov.cn/zhengwu/jyta-tcbzhzw/2025/83/195443.html"
+
+        def locator(self, selector):
+            if selector == DETAIL_LINK_AREA_SELECTORS[0][1]:
+                return FakeLocator(children=[
+                    # 排在前面的通用容器里没有附件（实测就是 div.google-content 这类空壳）
+                    FakeLocator(items=[]),
+                    FakeLocator(items=[{
+                        "text": "附件：办理结果",
+                        "href": "https://www.shpt.gov.cn/zhengwu/jyta-tcbzhzw/2025/83/195443/a.pdf",
+                    }]),
+                ])
+            return FakeLocator("", count=0)
+
+    links = await BrowserCollector(None, None)._extract_detail_links(DecoyPage(), DecoyPage.url)
+    assert [link.url for link in links] == [
+        "https://www.shpt.gov.cn/zhengwu/jyta-tcbzhzw/2025/83/195443/a.pdf"
+    ]
+    assert links[0].source_area == "详情页正文"
+
+
+@pytest.mark.asyncio
+async def test_detail_links_do_not_duplicate_across_overlapping_containers():
+    """同一附件被嵌套容器重复命中时只能记一条，否则链接检查量会虚高。"""
+    inner = FakeLocator(items=[{"text": "附件表", "href": "https://x.test/b.xlsx"}])
+
+    class NestedPage:
+        url = "https://x.test/p.html"
+
+        def locator(self, selector):
+            if selector == DETAIL_LINK_AREA_SELECTORS[0][1]:
+                outer = FakeLocator(items=[{"text": "附件表", "href": "https://x.test/b.xlsx"}])
+                outer.children = [outer, inner]
+                return outer
+            return FakeLocator("", count=0)
+
+    links = await BrowserCollector(None, None)._extract_detail_links(NestedPage(), NestedPage.url)
+    assert len(links) == 1
 
 
 @pytest.mark.asyncio

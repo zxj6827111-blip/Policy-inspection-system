@@ -8,7 +8,7 @@ from app.db import Database
 from app.domain import DetailInspection, PolicyListItem, PolicyRecord
 from app.domain import CooldownPause, ItemReviewRequired, SafetyPause
 from app.jobs import JobManager
-from app.repository import Repository
+from app.repository import PAGE_LINK_CHECK_VERSION, Repository
 
 
 class FakeBrowser:
@@ -276,7 +276,7 @@ async def test_legacy_baseline_without_link_rows_forces_detail_recheck(tmp_path,
         version = conn.execute(
             "SELECT link_check_version FROM scan_item_results WHERE job_id=?", (job_id,)
         ).fetchone()[0]
-    assert version == 1
+    assert version == PAGE_LINK_CHECK_VERSION
 
 
 @pytest.mark.asyncio

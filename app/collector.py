@@ -36,6 +36,22 @@ DETAIL_METADATA_READY = """() => {
 RELATED_CLICK_SELECTOR = "a[href], button, [role=button], [onclick], [data-url], [data-href]"
 LIST_RELATED_TRIGGER_SELECTOR = '.tag-image[alt="政策解读"], .tag-image[alt="阅办联动"]'
 LIST_POPOVER_ITEM_SELECTOR = ".ant-popover .tag-popover-item.clickable:visible"
+
+# 详情页按区域取可见链接。普陀实测有 21/22 篇的附件长在通用名单之外
+# （`ul.uli14.attachments`、`div.pdf-content`），列在此处的容器整条遍历而不是只取第一个，
+# 因为 `.content` 这类通用名会先命中页头/统计脚本的空壳 div。
+DETAIL_LINK_AREA_SELECTORS = [
+    (
+        "详情页正文",
+        "article, .article-content, .Article_content, .article_content, .policy-content,"
+        " .TRS_Editor, .content, .article, .detail-content, .pages_content, .zw, #ivs_content,"
+        " .attachments, .attachment-list, .attachment-actions, .pdf-content, .pdf-box",
+    ),
+    ("详情页侧栏", "aside, .right, .side, .related, .relates, .interpret, .policy-interpret"),
+    ("详情页标题区", ".policy-detail-header, .detail-header, .detail-title, .article-title, h1"),
+]
+# 正文文本抽取用窄口径：只认页面主体，不复用上面那组宽名单，避免把附件/侧栏容器当正文
+DETAIL_BODY_TEXT_SELECTOR = "article, .article-content, .policy-content, .TRS_Editor"
 VISIBLE_LINKS_JS = """els => els.map((el, index) => {
     const style = window.getComputedStyle(el);
     const rects = el.getClientRects();
@@ -1076,35 +1092,19 @@ class BrowserCollector:
 
     async def _extract_detail_links(self, page: Page, url: str) -> list[RelatedLink]:
         links: list[RelatedLink] = []
-        scoped_selectors = [
-            ("详情页正文", "article, .article-content, .policy-content, .TRS_Editor, .content, .article, .detail-content, .pages_content, .zw"),
-            ("详情页侧栏", "aside, .right, .side, .related, .relates, .interpret, .policy-interpret"),
-            ("详情页标题区", ".policy-detail-header, .detail-header, .detail-title, .article-title, h1"),
-        ]
-        for source_area, selector in scoped_selectors:
-            locator = page.locator(selector)
-            if not await locator.count():
-                continue
-            for related in await self._extract_visible_links_from_locator(locator.first, url, source_area):
-                self._add_related_link(links, related)
-        if links:
-            return links
+        for source_area, selector in DETAIL_LINK_AREA_SELECTORS:
+            for locator in await page.locator(selector).all():
+                for related in await self._extract_visible_links_from_locator(locator, url, source_area):
+                    self._add_related_link(links, related)
         return links
 
     async def _precheck_detail_links(self, page: Page, links: list[RelatedLink]) -> None:
-        area_selectors = {
-            "详情页正文": "article, .article-content, .policy-content, .TRS_Editor, .content, .article, .detail-content, .pages_content, .zw",
-            "详情页侧栏": "aside, .right, .side, .related, .relates, .interpret, .policy-interpret",
-            "详情页标题区": ".policy-detail-header, .detail-header, .detail-title, .article-title, h1",
-        }
-        for source_area, selector in area_selectors.items():
+        for source_area, selector in DETAIL_LINK_AREA_SELECTORS:
             area_links = [link for link in links if link.source_area == source_area]
             if not area_links:
                 continue
-            locator = page.locator(selector)
-            if not await locator.count():
-                continue
-            await self._precheck_links_in_container(page, locator.first, area_links)
+            for locator in await page.locator(selector).all():
+                await self._precheck_links_in_container(page, locator, area_links)
 
     async def _parse_detail(self, page: Page, district: str, fallback_title: str) -> PolicyRecord:
         url = page.url

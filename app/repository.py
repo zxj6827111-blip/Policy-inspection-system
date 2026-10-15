@@ -10,7 +10,7 @@ from app.db import Database, utc_now
 from app.domain import Finding, PolicyListItem, PolicyRecord
 
 
-PAGE_LINK_CHECK_VERSION = 1
+PAGE_LINK_CHECK_VERSION = 2
 
 
 class Repository:
