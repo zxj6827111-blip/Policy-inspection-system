@@ -320,7 +320,11 @@ class JobManager:
         job_id = int(job["id"])
         if job["cooldown_until"] and not automatic:
             cooldown_until = datetime.fromisoformat(job["cooldown_until"])
-            manual_allowed = job["status"] == JobStatus.PAUSED and not self._is_cooldown_reason(job["pause_reason"])
+            # 批次上限只是我们自己排的下一班，不是站点风控退避，人工点就该立刻走；
+            # 只有真·冷却（风控/连续失败/上限时长）才需要拦住手动恢复。
+            manual_allowed = job["completion_kind"] == "limit" or (
+                job["status"] == JobStatus.PAUSED and not self._is_cooldown_reason(job["pause_reason"])
+            )
             if datetime.now(timezone.utc) < cooldown_until and not manual_allowed:
                 raise ValueError(f"安全冷却尚未结束，请在 {cooldown_until.astimezone().isoformat()} 后恢复")
         self.db.update_job(
