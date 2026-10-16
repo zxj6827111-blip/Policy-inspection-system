@@ -424,7 +424,17 @@ class Repository:
                       AND f.document_id=COALESCE(s.document_id,s.reused_document_id)
                       AND COALESCE(f.is_current, 1)=1
                       AND COALESCE(f.human_status, '') <> 'human_dismissed'
-                ) AS has_open_findings
+                ) AS has_open_findings,
+                EXISTS(
+                    SELECT 1 FROM link_checks l
+                    WHERE l.document_id=COALESCE(s.document_id,s.reused_document_id)
+                      AND l.link_kind='附件'
+                ) AS has_attachment_checks,
+                EXISTS(
+                    SELECT 1 FROM policy_documents d
+                    WHERE d.id=COALESCE(s.document_id,s.reused_document_id)
+                      AND d.body_text LIKE '%附件%'
+                ) AS declares_attachment
                 FROM scan_item_results s WHERE s.job_id=? AND s.target_key=? AND s.url=?
                 ORDER BY s.checked_at DESC LIMIT 1""",
                 (baseline_job_id, item.source_key, item.url),

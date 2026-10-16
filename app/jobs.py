@@ -938,8 +938,13 @@ class JobManager:
         listed_date = item.published_date.isoformat() if item.published_date else None
         if (row["listed_date"] or None) != listed_date:
             return False, "列表发布日期发生变化"
-        if int(row.get("link_check_version") or 0) < PAGE_LINK_CHECK_VERSION:
-            return False, "基线尚未按页面可见链接规则检查，必须重新打开详情核验"
+        if int(row.get("link_check_version") or 0) < PAGE_LINK_CHECK_VERSION and (
+            row.get("declares_attachment") and not row.get("has_attachment_checks")
+        ):
+            # 规则升级本身不再触发全库重开：升级期间产生的历史误判（无 HTTP 证据的 broken、
+            # 被站点拒 UA 的 403）已经逐条复验回写过，真正遗留的缺口只有"正文声明了附件
+            # 却从没检查过附件"这一类。只重开这些，既保住准确性，也不用把 23800 条全跑一遍。
+            return False, "基线声明了附件却从未检查过附件，必须重新打开详情核验"
         if row["detail_status"] in {"exception", "checked_incomplete"}:
             return False, "基线详情异常或表头字段不完整"
         if row.get("has_legacy_hidden_links"):

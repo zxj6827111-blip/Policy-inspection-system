@@ -230,8 +230,20 @@ async def test_legacy_hidden_baseline_link_forces_detail_recheck(tmp_path, fake_
 
 
 @pytest.mark.asyncio
-async def test_legacy_baseline_without_link_rows_forces_detail_recheck(tmp_path, fake_runtime):
-    db = Database(tmp_path / "legacy-no-links.db")
+@pytest.mark.parametrize(
+    ("body_text", "attach_checked", "expect_reopen"),
+    [
+        ("正文：附件：1.实施方案.pdf", False, True),
+        ("正文里只写了实施要求，没有清单引用", False, False),
+        ("正文：附件：1.实施方案.pdf", True, False),
+    ],
+    ids=["declared-but-never-checked", "nothing-declared", "already-checked"],
+)
+async def test_legacy_version_reopens_only_for_missing_attachment_coverage(
+    tmp_path, fake_runtime, body_text, attach_checked, expect_reopen
+):
+    """规则升级不该把整库重跑：只有"声明了附件却从没检查过附件"的条目才重开详情。"""
+    db = Database(tmp_path / f"legacy-{body_text[:4]}.db")
     db.initialize()
     baseline_job = db.create_job(["普陀区"], "full", {}, 0)
     db.update_job(
@@ -243,24 +255,28 @@ async def test_legacy_baseline_without_link_rows_forces_detail_recheck(tmp_path,
     document_id = repository.save_record(
         baseline_job,
         PolicyRecord(
-            "普陀区", "文件same", url,
+            "普陀区", "文件same", url, body_text=body_text,
             published_date=date(2026, 7, 1), authored_date=date(2026, 7, 1),
         ),
         [],
     )
+    baseline_row = PolicyListItem(
+        "普陀区", 1, 0, "文件same", url, date(2026, 7, 1),
+        source_site="市级平台·普陀区", source_key="municipal_putuo",
+    )
     repository.record_scan_item(
-        baseline_job,
-        PolicyListItem(
-            "普陀区", 1, 0, "文件same", url, date(2026, 7, 1),
-            source_site="市级平台·普陀区", source_key="municipal_putuo",
-        ),
-        detail_status="checked_complete", header_detected=True,
+        baseline_job, baseline_row, detail_status="checked_complete", header_detected=True,
         authored_date=date(2026, 7, 1), published_date=date(2026, 7, 1), document_id=document_id,
     )
+    if attach_checked:
+        repository.save_link_check(baseline_job, document_id, {
+            "kind": "附件", "url": "https://example.test/a.pdf", "result": "ok",
+            "status_code": 200, "source_area": "详情页正文", "link_text": "附件",
+            "source_page_url": url, "interaction_type": "href",
+        })
     with db.connect() as conn:
         conn.execute(
-            "UPDATE scan_item_results SET link_check_version=0 WHERE job_id=?",
-            (baseline_job,),
+            "UPDATE scan_item_results SET link_check_version=0 WHERE job_id=?", (baseline_job,)
         )
     fake_runtime.datasets = {"普陀区": [item("普陀区", 0, "same")]}
     manager = JobManager(db)
@@ -269,14 +285,15 @@ async def test_legacy_baseline_without_link_rows_forces_detail_recheck(tmp_path,
     await wait_job(manager, job_id)
 
     job = db.get_job(job_id)
-    assert fake_runtime.opened == [url]
-    assert job["processed_count"] == 1
-    assert job["skipped_count"] == 0
-    with db.connect() as conn:
-        version = conn.execute(
-            "SELECT link_check_version FROM scan_item_results WHERE job_id=?", (job_id,)
-        ).fetchone()[0]
-    assert version == PAGE_LINK_CHECK_VERSION
+    assert (fake_runtime.opened == [url]) is expect_reopen, fake_runtime.opened
+    assert job["processed_count"] == (1 if expect_reopen else 0)
+    assert job["skipped_count"] == (0 if expect_reopen else 1)
+    if expect_reopen:
+        with db.connect() as conn:
+            version = conn.execute(
+                "SELECT link_check_version FROM scan_item_results WHERE job_id=?", (job_id,)
+            ).fetchone()[0]
+        assert version == PAGE_LINK_CHECK_VERSION
 
 
 @pytest.mark.asyncio
