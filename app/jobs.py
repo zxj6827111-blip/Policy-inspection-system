@@ -1633,12 +1633,19 @@ class JobManager:
 
     def _mark_partial_limit(self, job_id: int, current: dict) -> None:
         remaining = max(int(current["estimated_total"]) - int(current["examined_count"]), 0)
-        reason = f"已达到本批次安全试扫上限，预计尚余 {remaining} 条；可手动恢复下一批"
+        reason = f"已达到本批次安全试扫上限，预计尚余 {remaining} 条；到点自动继续下一批"
+        # 只写"可手动恢复下一批"会让长任务每天卡在批次边界等人点按钮：
+        # 续跑轮询本来就管 partial，只要给下一次唤醒留出时间，批次之间就能自动衔接。
+        try:
+            cooldown_seconds = int(json.loads(current.get("safety_json") or "{}").get("cooldown_seconds") or 1800)
+        except (TypeError, ValueError):
+            cooldown_seconds = 1800
+        next_run = datetime.now(timezone.utc) + timedelta(seconds=cooldown_seconds)
         self.db.update_job(
             job_id, status=JobStatus.PARTIAL, coverage_status="partial", completion_kind="limit",
-            pause_reason=reason, current_url="",
+            pause_reason=reason, current_url="", cooldown_until=next_run.isoformat(),
         )
-        self.db.add_job_event(job_id, "partial_limit", reason)
+        self.db.add_job_event(job_id, "partial_limit", f"{reason}（{next_run.isoformat(timespec='seconds')}）")
 
     def _record_safety_event(self, job_id: int, event_type: str, details: dict) -> None:
         current = self.db.get_job(job_id)

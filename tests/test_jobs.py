@@ -1766,3 +1766,34 @@ async def test_incomplete_capped_target_resume_from_beyond_declared_page(tmp_pat
             "SELECT COUNT(*) FROM scan_item_results WHERE job_id=?", (job_id,)
         ).fetchone()[0]
     assert item_count == 14
+
+
+@pytest.mark.asyncio
+async def test_batch_limit_leaves_a_wakeup_time_for_the_next_batch(tmp_path):
+    """批次跑满上限必须自带下次唤醒时间，否则续跑轮询接不上，长任务天天等人工点恢复。"""
+    db = Database(tmp_path / "partial-limit.db")
+    db.initialize()
+    job_id = db.create_job(["普陀区"], "full", {"cooldown_seconds": 1800}, 1)
+    db.update_job(
+        job_id, status="running", estimated_total=100, examined_count=1,
+        batch_examined_count=1,
+    )
+    manager = JobManager(db)
+
+    manager._mark_partial_limit(job_id, dict(db.get_job(job_id)))
+
+    job = db.get_job(job_id)
+    assert job["status"] == "partial"
+    assert job["cooldown_until"], "批次上限没有安排下次唤醒，任务会一直等人工"
+    due = datetime.fromisoformat(job["cooldown_until"])
+    assert (due - datetime.now(timezone.utc)).total_seconds() > 0
+    assert "自动继续" in job["pause_reason"]
+
+    # 未到点不该被抢跑，到点后轮询要能接上
+    assert await manager.resume_due_jobs() == []
+    with db.connect() as conn:
+        conn.execute(
+            "UPDATE scan_jobs SET cooldown_until=? WHERE id=?",
+            ((datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(), job_id),
+        )
+    assert job_id in await manager.resume_due_jobs()
