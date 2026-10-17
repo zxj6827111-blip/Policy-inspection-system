@@ -540,6 +540,45 @@ async def test_putuo_capped_last_page_overflow_enters_capped_mode():
 
 
 @pytest.mark.asyncio
+async def test_putuo_bureau_last_page_overflow_at_20000_does_not_pause_job():
+    """生产实测委办局(channel 6)：totalCount=20000、totalPage=1334，第 1334 页仍返回整页。
+
+    旧代码只认 10000 这一个截断上限，所以这里被判成条数异常，任务每次恢复都停在同一页等人工。
+    """
+    page_size = 15
+    total_count = 20_000
+    total_pages = 1_334  # ceil(20000/15)，推导末页应为 5 条
+    payload = {
+        "data": {
+            "list": [
+                {"id": 700_000 + i, "doc_flag": "1", "title": f"f{i}", "url": f"/f{i}.html"}
+                for i in range(page_size)
+            ],
+            "pageNo": total_pages,
+            "totalPage": total_pages,
+            "totalCount": total_count,
+        }
+    }
+    collector = PutuoDistrictCollector(
+        None, FakePutuoApiSafety(), SCAN_TARGETS["putuo_bureaus"], page_size=page_size,
+    )
+    collector.context = type("Context", (), {"request": FakePutuoApiRequest(payload)})()
+
+    records = await collector._fetch_page(total_pages)
+
+    assert len(records) == page_size
+    assert collector.capped_pagination_active is True
+
+
+def test_putuo_truncation_accepts_every_round_cap_not_just_10000():
+    collector = PutuoDistrictCollector(None, FakePutuoApiSafety(), SCAN_TARGETS["putuo_bureaus"])
+    assert collector.is_truncated_total(10_000) is True
+    assert collector.is_truncated_total(20_000) is True
+    assert collector.is_truncated_total(1_447) is False
+    assert collector.is_truncated_total(0) is False
+
+
+@pytest.mark.asyncio
 async def test_putuo_capped_mode_continues_past_declared_page_with_fixed_response_page():
     page_size = 3
     cap = 10
@@ -609,7 +648,7 @@ async def test_putuo_capped_mode_continues_past_declared_page_with_fixed_respons
 
 
 @pytest.mark.asyncio
-async def test_putuo_capped_mode_stops_on_repeated_page_not_infinite():
+async def test_putuo_capped_mode_ends_on_repeated_page_without_pausing():
     page_size = 2
     cap = 4
     repeated = {
@@ -639,7 +678,11 @@ async def test_putuo_capped_mode_stops_on_repeated_page_not_infinite():
     }
 
     class MultiPageRequest:
+        def __init__(self):
+            self.calls = []
+
         async def post(self, _url, *, data, timeout, fail_on_status_code):
+            self.calls.append(int(data["pageNo"]))
             return FakePutuoApiResponse({"data": pages[int(data["pageNo"])]})
 
     class PageCollector(PutuoDistrictCollector):
@@ -651,11 +694,19 @@ async def test_putuo_capped_mode_stops_on_repeated_page_not_infinite():
         page_size=page_size, api_total_cap=cap, capped_max_extra_pages=20,
     )
     collector.page = object()
-    collector.context = type("Context", (), {"request": MultiPageRequest()})()
+    request = MultiPageRequest()
+    collector.context = type("Context", (), {"request": request})()
 
-    with pytest.raises(SafetyPause, match="重复返回已扫描记录"):
-        async for _ in collector.iter_items("普陀区"):
-            pass
+    items = []
+    async for item in collector.iter_items("普陀区"):
+        items.append(item)
+
+    # 尾页被重复回来时按「扫完」收尾：不再抛 SafetyPause 把人叫来点恢复。
+    # 第 3 页那两条是新记录（截断后官网仍往后发），第 4 页整页重复才算终点。
+    assert len(items) == 6
+    assert collector.capped_pagination_active is True
+    assert collector.capped_pagination_resolved is True
+    assert request.calls == [1, 2, 3, 4]
 
 
 @pytest.mark.asyncio

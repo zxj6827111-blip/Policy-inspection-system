@@ -182,6 +182,7 @@ async def discover_target_pages(
     capped = bool(getattr(collector, "capped_pagination_active", False))
     max_extra = int(getattr(collector, "capped_max_extra_pages", 2000) or 2000)
     api_cap = int(getattr(collector, "api_total_cap", 10_000) or 10_000)
+    is_truncated = getattr(collector, "is_truncated_total", None)
 
     while True:
         if not is_running():
@@ -246,11 +247,11 @@ async def discover_target_pages(
             else:
                 reused_discovery += 1
 
-        if capped and declared_pages and page > declared_pages:
-            if new_on_page == 0:
-                raise SafetyPause(f"普陀区官网列表截断分页在第 {page} 页重复返回已扫描记录，无法确认真实终点")
-            if new_on_page != len(items):
-                raise SafetyPause(f"普陀区官网列表截断分页在第 {page} 页出现部分重复记录，已暂停")
+        if capped and declared_pages and page > declared_pages and new_on_page == 0:
+            # 整页都是已知记录：官网在把尾页重复回来，这就是真实终点，不该停下来等人确认。
+            if hasattr(collector, "_capped_resolved"):
+                collector._capped_resolved = True
+            break
 
         if on_progress:
             on_progress(page, new_count, reused_discovery)
@@ -278,7 +279,12 @@ async def discover_target_pages(
 
         if not capped and declared_pages and page >= declared_pages:
             # probe beyond if at cap
-            if observed == api_cap or (getattr(collector, "_declared_total_count", None) == api_cap):
+            declared_count = int(getattr(collector, "_declared_total_count", 0) or 0)
+            if callable(is_truncated):
+                at_cap = bool(is_truncated(observed)) or bool(is_truncated(declared_count))
+            else:
+                at_cap = observed == api_cap or declared_count == api_cap
+            if at_cap:
                 page += 1
                 continue
             break

@@ -998,7 +998,8 @@ async def test_putuo_capped_scan_refreshes_real_total_before_complete(tmp_path, 
 
 
 @pytest.mark.asyncio
-async def test_putuo_capped_unresolved_cannot_complete(tmp_path, monkeypatch):
+async def test_putuo_capped_repeated_tail_completes_without_manual_resume(tmp_path, monkeypatch):
+    """截断分页把尾页重复回来时，按「扫完」收尾，不再停在半路等人工点恢复。"""
     disable_request_throttle(monkeypatch)
     from app.putuo_collector import PutuoDistrictCollector
 
@@ -1066,9 +1067,12 @@ async def test_putuo_capped_unresolved_cannot_complete(tmp_path, monkeypatch):
     job_id = await manager.create_and_start(["区级网站·普陀区·委办局"], "full")
     await wait_job(manager, job_id)
     job = db.get_job(job_id)
-    assert job["status"] == "paused"
-    assert job["coverage_status"] == "partial"
-    assert "重复返回已扫描记录" in job["pause_reason"]
+    assert job["status"] == "completed"
+    assert job["coverage_status"] == "complete"
+    # 1..9 落在声明范围内，10..12 来自超出声明尾页的截断尾部，全部都要被扫到。
+    assert job["examined_count"] == 12
+    assert job["estimated_total"] == 12
+    assert job["pause_reason"] == ""
 
 
 @pytest.mark.asyncio

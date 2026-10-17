@@ -161,6 +161,7 @@ class PutuoDistrictCollector(BrowserCollector):
         self._total_count: int | None = None
         self._declared_total_pages = 0
         self._declared_total_count: int | None = None
+        self._truncated_total: int | None = None
         self._current_page = 1
         self._capped_mode = False
         self._capped_resolved = False
@@ -222,6 +223,18 @@ class PutuoDistrictCollector(BrowserCollector):
             return self.page_size
         return total_count - self.page_size * (total_pages - 1)
 
+    def is_truncated_total(self, total_count: int) -> bool:
+        """官网把大栏目 totalCount 截断成整数上限：实测 10000 与 20000 都出现过。
+
+        上限不止一个值，所以判定按「配置的 api_total_cap 及其整数倍」，再叠上
+        本次扫描用证据学到的那个上限。
+        """
+        if not total_count:
+            return False
+        if total_count in {self.api_total_cap, self._truncated_total or 0}:
+            return True
+        return total_count > self.api_total_cap and total_count % self.api_total_cap == 0
+
     def _maybe_enter_capped_mode(
         self,
         *,
@@ -232,8 +245,6 @@ class PutuoDistrictCollector(BrowserCollector):
     ) -> None:
         if self._capped_mode:
             return
-        if total_count != self.api_total_cap:
-            return
         expected_rows = self._expected_rows(page_number, total_pages, total_count)
         last_page_overflow = (
             page_number == total_pages
@@ -242,8 +253,10 @@ class PutuoDistrictCollector(BrowserCollector):
             and len(records) <= self.page_size
         )
         beyond_declared = page_number > total_pages and len(records) > 0
-        # 仅在强截断证据下进入：声明末页条数溢出，或超声明页仍返回数据。
+        # 截断证据是接口自相矛盾：声明末页实际返回了整页，或超出声明页仍有数据。
+        # 这跟上限具体是几无关，所以不再要求 total_count 等于某个固定值。
         if last_page_overflow or beyond_declared:
+            self._truncated_total = total_count
             self._capped_mode = True
 
     async def _fetch_page(self, page_number: int) -> list[dict]:
@@ -290,7 +303,7 @@ class PutuoDistrictCollector(BrowserCollector):
 
             # 超远页：官网返回空元数据，视为没有更多数据。
             if not records and total_count == 0 and total_pages == 0 and response_page == 0:
-                if self._capped_mode and page_number > (self._declared_total_pages or 0):
+                if page_number > max(self._declared_total_pages or 0, 1):
                     self._current_page = page_number
                     self._current_records = []
                     return []
@@ -347,7 +360,9 @@ class PutuoDistrictCollector(BrowserCollector):
                 self._total_count = total_count
                 self._total_pages = total_pages
                 self._estimated_total = total_count
-            if self._capped_mode and total_count not in {self.api_total_cap, 0}:
+            if self._capped_mode and total_count not in {
+                self._declared_total_count, self.api_total_cap, 0
+            }:
                 if total_count != self._declared_total_count:
                     raise SafetyPause(
                         f"普陀区官网列表截断元数据在扫描期间发生变化：{self._declared_total_count} -> {total_count}"
@@ -358,11 +373,11 @@ class PutuoDistrictCollector(BrowserCollector):
                 self._total_pages = total_pages
                 self._estimated_total = total_count
             else:
-                # 截断期间不把 10000 当作真实终点；真实总量在 iter_items 结束后写回。
+                # 截断期间不把接口报的上限当作真实终点；真实总量在分页结束后写回。
                 self._total_count = self._declared_total_count
                 self._total_pages = self._declared_total_pages
                 discovered = self._resume_examined + self._yielded_unique
-                self._estimated_total = max(self.api_total_cap, discovered)
+                self._estimated_total = max(self._truncated_total or self.api_total_cap, discovered)
             self._current_page = page_number
             self._current_records = records
             return records
@@ -397,15 +412,6 @@ class PutuoDistrictCollector(BrowserCollector):
             raise SafetyPause(f"普陀区官网列表接口返回了无效页码：{page_number}/{total_pages}")
         expected_rows = self._expected_rows(page_number, total_pages, total_count)
         if len(records) != expected_rows:
-            # 命中 CAP 且末页条数大于推导值：转入截断模式而不是立即失败。
-            if (
-                total_count == self.api_total_cap
-                and page_number == total_pages
-                and len(records) > expected_rows
-                and len(records) <= self.page_size
-            ):
-                self._capped_mode = True
-                return records
             raise SafetyPause(
                 f"普陀区官网列表第 {page_number} 页条数异常：应为 {expected_rows} 条，实际 {len(records)} 条"
             )
@@ -556,9 +562,10 @@ class PutuoDistrictCollector(BrowserCollector):
             new_identities = [identity for identity in identities if identity not in self._seen_identities]
 
             if page_number > declared_pages:
-                # 超页仍有新数据：确认进入截断模式
+                # 超页仍有数据：确认进入截断模式
                 if not self._capped_mode:
-                    if declared_count == self.api_total_cap and new_identities:
+                    if self.is_truncated_total(declared_count) and new_identities:
+                        self._truncated_total = declared_count
                         self._capped_mode = True
                     else:
                         raise SafetyPause(
@@ -566,14 +573,9 @@ class PutuoDistrictCollector(BrowserCollector):
                             f"declared={declared_pages}"
                         )
                 if not new_identities:
-                    raise SafetyPause(
-                        f"普陀区官网列表截断分页在第 {page_number} 页重复返回已扫描记录，"
-                        f"无法确认真实终点，channel_id={self.channel_id}"
-                    )
-                if len(new_identities) < len(identities):
-                    raise SafetyPause(
-                        f"普陀区官网列表截断分页在第 {page_number} 页出现部分重复记录，已暂停"
-                    )
+                    # 整页都是已扫记录：官网把尾页重复回来了，这就是真实终点。
+                    reached_end = True
+                    break
 
             for index, api_record in enumerate(records):
                 if page_number == start_page and index <= start_item_index:
@@ -581,16 +583,19 @@ class PutuoDistrictCollector(BrowserCollector):
                     continue
                 identity = identities[index]
                 if identity in self._seen_identities:
-                    raise SafetyPause(
-                        f"普陀区官网列表出现跨页重复记录，已暂停：{identity} @ page={page_number}"
-                    )
+                    if page_number <= declared_pages:
+                        raise SafetyPause(
+                            f"普陀区官网列表出现跨页重复记录，已暂停：{identity} @ page={page_number}"
+                        )
+                    # 尾页附近 display_date 大量相同，跨页重复属于排序不稳定，跳过即可。
+                    continue
                 self._seen_identities.add(identity)
                 self._yielded_unique += 1
                 if self._capped_mode:
                     self._estimated_total = max(
                         self._estimated_total,
                         self._resume_examined + self._yielded_unique,
-                        self.api_total_cap,
+                        self._truncated_total or self.api_total_cap,
                     )
                 yield putuo_list_item_from_api(
                     api_record, page_number, index, source_site=self.target.label, source_key=self.target.key,
@@ -599,10 +604,11 @@ class PutuoDistrictCollector(BrowserCollector):
 
             # 声明末页处理：若已确认截断则继续向后；否则尝试探测下一页。
             if page_number == declared_pages and not self._capped_mode:
-                if declared_count == self.api_total_cap:
+                if self.is_truncated_total(declared_count):
                     next_page = page_number + 1
                     await self._fetch_page(next_page)
                     if self._current_records:
+                        self._truncated_total = declared_count
                         self._capped_mode = True
                         page_number = next_page
                         continue
