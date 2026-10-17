@@ -476,6 +476,64 @@ async def test_putuo_api_rejects_non_policy_doc_flag_with_filter_failure():
     assert "doc_flag='0'" in message
 
 
+@pytest.mark.asyncio
+async def test_putuo_api_skips_single_non_policy_record_and_keeps_scanning():
+    """单条 doc_flag!=1 混进列表时跳过它继续扫，不再把整轮扫描停在路上。"""
+    payload = {
+        "data": {
+            "list": [
+                {"id": 1, "doc_flag": "1", "title": "文件甲", "url": "/a1.html"},
+                {"id": 144838, "doc_flag": "0", "channel_id": "3390", "title": "环评备案", "url": "/a2.html"},
+                {"id": 3, "doc_flag": "1", "title": "文件乙", "url": "/a3.html"},
+            ],
+            "pageNo": 1,
+            "totalPage": 1,
+            "totalCount": 3,
+        }
+    }
+    collector = PutuoDistrictCollector(None, FakePutuoApiSafety(), SCAN_TARGETS["putuo_bureaus"])
+    collector.context = type("Context", (), {"request": FakePutuoApiRequest(payload)})()
+
+    records = await collector._fetch_page(1)
+
+    assert [item["id"] for item in records] == [1, 3]
+    anomalies = collector.drain_list_anomalies()
+    assert len(anomalies) == 1
+    assert anomalies[0]["record_id"] == 144838
+    assert anomalies[0]["doc_flag"] == "0"
+    assert "非文件记录" in anomalies[0]["message"]
+
+
+@pytest.mark.asyncio
+async def test_putuo_list_page_skips_foreign_detail_domain_record():
+    payload = {
+        "data": {
+            "list": [
+                {"id": 1, "doc_flag": "1", "title": "政策文件", "url": "/a1.html"},
+                {
+                    "id": 2,
+                    "doc_flag": "1",
+                    "title": "建设项目环境影响登记表备案系统",
+                    "url": "https://beian.china-eia.com/f/announcement/announcementShow",
+                },
+            ],
+            "pageNo": 1,
+            "totalPage": 1,
+            "totalCount": 2,
+        }
+    }
+    collector = PutuoDistrictCollector(None, FakePutuoApiSafety(), SCAN_TARGETS["putuo_bureaus"])
+    collector.context = type("Context", (), {"request": FakePutuoApiRequest(payload)})()
+
+    items = await collector.fetch_list_page(1)
+
+    assert [item.url for item in items] == ["https://www.shpt.gov.cn/a1.html"]
+    anomalies = collector.drain_list_anomalies()
+    assert len(anomalies) == 1
+    assert anomalies[0]["url"] == "https://beian.china-eia.com/f/announcement/announcementShow"
+    assert "异常详情域名" in anomalies[0]["message"]
+
+
 def test_putuo_list_item_rejects_external_detail_domain():
     with pytest.raises(SafetyPause, match="异常详情域名"):
         putuo_list_item_from_api(

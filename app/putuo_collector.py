@@ -92,6 +92,13 @@ def putuo_stable_identity(target_key: str, record: dict, *, list_url: str = PUTU
 
 
 
+def putuo_record_detail_url(record: dict, *, list_url: str = PUTUO_DISTRICT_URL) -> str:
+    raw_url = str(
+        record.get("url") or record.get("link") or record.get("linkUrl") or record.get("website") or ""
+    ).strip()
+    return urljoin(list_url, raw_url) if raw_url else ""
+
+
 def putuo_list_item_from_api(
     record: dict, page_number: int, item_index: int, *, source_site: str = "区级网站·普陀区",
     source_key: str = "putuo_government", source_channel_id: str = "3", list_url: str = PUTUO_DISTRICT_URL,
@@ -165,6 +172,7 @@ class PutuoDistrictCollector(BrowserCollector):
         self._current_page = 1
         self._capped_mode = False
         self._capped_resolved = False
+        self._list_anomalies: list[dict] = []
         self._resume_examined = 0
         self._yielded_unique = 0
         self._seen_identities: set[str] = set()
@@ -200,21 +208,55 @@ class PutuoDistrictCollector(BrowserCollector):
                 raise SafetyPause(f"robots.txt 禁止自动访问目标路径：{urlparse(url).path}")
 
     def _validate_doc_flags(self, records: list, page_number: int) -> None:
-        for record in records:
-            if not isinstance(record, dict):
+        """接口已按 docFlag=1 过滤，个别记录仍会漏进来。
+
+        整页都不是文件记录才认定过滤失效；单条混入时跳过它继续扫，
+        一条脏数据不该让两万份文件的扫描停下来等人确认。
+        """
+        offenders = [record for record in records if not self._is_policy_record(record)]
+        if not offenders:
+            return
+        first = offenders[0]
+        if len(offenders) == len(records):
+            if not isinstance(first, dict):
                 raise SafetyPause(
                     f"普陀区官网政策文件过滤失效，接口返回了非文件记录："
                     f"page_number={page_number}, id=?, channel_id={self.channel_id}, doc_flag=?"
                 )
-            record_doc_flag = _record_doc_flag(record)
-            if record_doc_flag != "1":
-                record_id = record.get("id", "?")
-                channel = record.get("channel_id") or record.get("channelId") or self.channel_id
-                raise SafetyPause(
-                    f"普陀区官网政策文件过滤失效，接口返回了非文件记录："
-                    f"page_number={page_number}, id={record_id}, channel_id={channel}, "
-                    f"doc_flag={record_doc_flag!r}"
-                )
+            record_id = first.get("id", "?")
+            channel = first.get("channel_id") or first.get("channelId") or self.channel_id
+            raise SafetyPause(
+                f"普陀区官网政策文件过滤失效，接口返回了非文件记录："
+                f"page_number={page_number}, id={record_id}, channel_id={channel}, "
+                f"doc_flag={_record_doc_flag(first)!r}"
+            )
+        for record in offenders:
+            self._note_list_anomaly(
+                record, page_number, "列表接口混入非文件记录（doc_flag 不是 1），已跳过"
+            )
+
+    @staticmethod
+    def _is_policy_record(record) -> bool:
+        return isinstance(record, dict) and _record_doc_flag(record) == "1"
+
+    def _note_list_anomaly(self, record, page_number: int, message: str, *, url: str = "") -> None:
+        info = record if isinstance(record, dict) else {}
+        self._list_anomalies.append(
+            {
+                "page": page_number,
+                "record_id": info.get("id", "?"),
+                "channel_id": info.get("channel_id") or info.get("channelId") or self.channel_id,
+                "doc_flag": _record_doc_flag(info) if info else "?",
+                "title": str(info.get("title") or "")[:120],
+                "url": url or putuo_record_detail_url(info, list_url=self.list_url),
+                "message": message,
+            }
+        )
+
+    def drain_list_anomalies(self) -> list[dict]:
+        """发现阶段取走并清空被跳过的列表记录，用于留痕。"""
+        anomalies, self._list_anomalies = self._list_anomalies, []
+        return anomalies
 
     def _expected_rows(self, page_number: int, total_pages: int, total_count: int) -> int:
         if not total_count:
@@ -379,8 +421,8 @@ class PutuoDistrictCollector(BrowserCollector):
                 discovered = self._resume_examined + self._yielded_unique
                 self._estimated_total = max(self._truncated_total or self.api_total_cap, discovered)
             self._current_page = page_number
-            self._current_records = records
-            return records
+            self._current_records = [record for record in records if self._is_policy_record(record)]
+            return self._current_records
         except SafetyPause:
             raise
         except Exception as exc:
@@ -474,13 +516,21 @@ class PutuoDistrictCollector(BrowserCollector):
         records = await self._fetch_page(page_number)
         items: list[PolicyListItem] = []
         for index, api_record in enumerate(records):
-            items.append(
-                putuo_list_item_from_api(
-                    api_record, page_number, index,
-                    source_site=self.target.label, source_key=self.target.key,
-                    source_channel_id=self.channel_id, list_url=self.list_url,
+            try:
+                items.append(
+                    putuo_list_item_from_api(
+                        api_record, page_number, index,
+                        source_site=self.target.label, source_key=self.target.key,
+                        source_channel_id=self.channel_id, list_url=self.list_url,
+                    )
                 )
-            )
+            except SafetyPause as exc:
+                domain = urlparse(putuo_record_detail_url(api_record, list_url=self.list_url)).netloc.lower()
+                if domain and domain != "www.shpt.gov.cn":
+                    # 单条列表记录指向非本站详情域名（实测混入过环评备案外链）：跳过它继续扫。
+                    self._note_list_anomaly(api_record, page_number, str(exc))
+                    continue
+                raise
         return items
 
     async def discover_head_pages(self, max_pages: int = 2) -> list[PolicyListItem]:

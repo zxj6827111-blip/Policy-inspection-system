@@ -211,7 +211,20 @@ async def discover_target_pages(
                     reused_discovery += 1
             break
 
+        drain_anomalies = getattr(collector, "drain_list_anomalies", None)
+        anomalies = drain_anomalies() if callable(drain_anomalies) else []
+        for anomaly in anomalies:
+            details = {k: v for k, v in anomaly.items() if k not in {"message", "url"}}
+            db.add_job_event(
+                job_id, "list_record_skipped",
+                str(anomaly.get("message", "")), str(anomaly.get("url", "")), **details,
+            )
+
         if not items:
+            if anomalies:
+                # 整页记录都被当作异常跳过了：这不是空页，继续往后翻。
+                page += 1
+                continue
             empty_pages += 1
             if page <= declared_pages and not capped:
                 raise SafetyPause(f"{target.label} 列表第 {page} 页在声明范围内为空")
