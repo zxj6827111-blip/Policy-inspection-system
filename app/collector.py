@@ -166,6 +166,27 @@ def is_attachment_url(url: str) -> bool:
     return any(value.lower().endswith((".pdf", ".doc", ".docx", ".xls", ".xlsx")) for value in candidates)
 
 
+OFFICE_SUFFIX_KINDS = {
+    ".pdf": "pdf",
+    ".docx": "ooxml",
+    ".xlsx": "ooxml",
+    ".pptx": "ooxml",
+    ".doc": "ole2",
+    ".xls": "ole2",
+    ".ppt": "ole2",
+}
+
+
+def _payload_magic_kind(payload: bytes) -> str:
+    if payload.startswith(b"PK\x03\x04"):
+        return "ooxml"
+    if payload.startswith(b"\xd0\xcf\x11\xe0"):
+        return "ole2"
+    if payload.startswith(b"%PDF"):
+        return "pdf"
+    return "unknown"
+
+
 def attachment_payload_error(url: str, content_type: str, payload: bytes) -> tuple[str, str]:
     if not payload:
         return "empty_file", "附件响应为空"
@@ -176,12 +197,23 @@ def attachment_payload_error(url: str, content_type: str, payload: bytes) -> tup
     query = parse_qs(parsed.query)
     candidates = [parsed.path, *query.get("filename", []), *query.get("pathname", [])]
     suffix = next((Path(value).suffix.lower() for value in candidates if Path(value).suffix), "")
-    if suffix == ".pdf" and not payload.startswith(b"%PDF"):
-        return "invalid_pdf", "PDF 文件头无效"
-    if suffix in {".docx", ".xlsx"} and not payload.startswith(b"PK"):
-        return "invalid_office_file", "Office OpenXML 文件头无效"
-    if suffix in {".doc", ".xls"} and not payload.startswith(b"\xd0\xcf\x11\xe0"):
-        return "invalid_office_file", "Office 二进制文件头无效"
+    if not suffix:
+        return "", f"download_size={len(payload)}"
+    declared = OFFICE_SUFFIX_KINDS.get(suffix)
+    if not declared:
+        # 不认识的扩展名不做判定，避免凭空造出新的"附件失效"
+        return "", f"download_size={len(payload)}"
+    body_kind = _payload_magic_kind(payload)
+    invalid_type = "invalid_office_file" if declared in {"ooxml", "ole2"} else "invalid_pdf"
+    if body_kind == "unknown":
+        return invalid_type, f"{suffix} 文件头无效"
+    if declared != body_kind:
+        # 实测普陀 7 条都是这种：后缀 .doc 里装的是 docx/PDF。文件能下载、Office 打得开，
+        # 属于命名与内容不一致，不是附件失效，不能当成"打不开"报给客户。
+        return (
+            "attachment_type_mismatch",
+            f"后缀 {suffix} 与内容类型（{body_kind}）不一致，文件本身可下载",
+        )
     return "", f"download_size={len(payload)}"
 
 
@@ -336,7 +368,7 @@ class BrowserCollector:
                 }
             payload_error, evidence = attachment_payload_error(url, content_type, payload)
             empty = content_length == "0" or payload_error == "empty_file"
-            review_required = status in {403, 429}
+            review_required = status in {403, 429} or payload_error == "attachment_type_mismatch"
             ok = status in {200, 206} and not payload_error
             return {
                 "kind": kind,
@@ -345,7 +377,8 @@ class BrowserCollector:
                 "status_code": status,
                 "result": "ok" if ok else "review_required" if review_required else "broken",
                 "error_type": (
-                    "" if ok else "access_restricted" if review_required else "empty_file" if empty
+                    "" if ok else payload_error if payload_error == "attachment_type_mismatch"
+                    else "access_restricted" if review_required else "empty_file" if empty
                     else "http_error" if status >= 400 else payload_error or "unexpected_status"
                 ),
                 "page_title": "",
@@ -655,6 +688,7 @@ class BrowserCollector:
         size = file_path.stat().st_size if file_path else 0
         payload = file_path.read_bytes()[:65536] if file_path and size else b""
         payload_error, evidence = attachment_payload_error(download.url or related.url, "", payload)
+        mismatch = payload_error == "attachment_type_mismatch"
         ok = not failure and not payload_error
         return self._with_link_metadata(
             {
@@ -662,10 +696,11 @@ class BrowserCollector:
                 "url": related.url or download.url,
                 "final_url": download.url,
                 "status_code": None,
-                "result": "ok" if ok else "broken",
+                "result": "ok" if ok else "review_required" if mismatch else "broken",
                 "error_type": "" if ok else "download_failed" if failure else payload_error,
                 "page_title": "",
                 "redirect_chain": [download.url],
+                "review_status": "manual_review" if mismatch else "confirmed",
                 "evidence": failure or evidence,
             },
             related,

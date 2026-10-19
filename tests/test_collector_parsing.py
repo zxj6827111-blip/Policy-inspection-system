@@ -15,8 +15,9 @@ from app.collector import (
     parse_iso_date,
     policy_list_item_from_api,
 )
-from app.config import SCAN_TARGETS
+from app.config import SCAN_TARGETS, SafetyConfig
 from app.domain import RelatedLink, SafetyPause
+from app.safety import SafetyController
 from app.putuo_body import clean_putuo_body_text
 from app.putuo_collector import PutuoDistrictCollector, parse_putuo_date, putuo_list_item_from_api
 
@@ -1161,6 +1162,44 @@ def test_attachment_payload_validation_detects_common_bad_files():
     assert attachment_payload_error("https://example.test/a.pdf", "text/html", b"<html>error</html>")[0] == "html_error"
     assert attachment_payload_error("https://example.test/a.pdf", "application/pdf", b"not a pdf")[0] == "invalid_pdf"
     assert attachment_payload_error("https://example.test/a.docx", "", b"not a zip")[0] == "invalid_office_file"
+
+
+@pytest.mark.parametrize(
+    ("url", "payload", "expected"),
+    [
+        ("https://example.test/a.pdf", b"%PDF-1.7 body", ""),
+        ("https://example.test/a.doc", b"\xd0\xcf\x11\xe0\x00\x00", ""),
+        ("https://example.test/a.docx", b"PK\x03\x04body", ""),
+        # 生产实测的 7 条假阳性全是这一类：文件合法，只是和后缀不一致，不该报"附件失效"
+        ("https://example.test/a.doc", b"PK\x03\x04body", "attachment_type_mismatch"),
+        ("https://example.test/a.docx", b"\xd0\xcf\x11\xe0\x00\x00", "attachment_type_mismatch"),
+        ("https://example.test/a.doc", b"%PDF-1.7 body", "attachment_type_mismatch"),
+        # 没有已知类型可比：不做判定
+        ("https://example.test/a.zip", b"whatever", ""),
+    ],
+    ids=["pdf-ok", "doc-ok", "docx-ok", "doc-holds-docx", "docx-holds-doc", "doc-holds-pdf", "unmapped-suffix"],
+)
+def test_attachment_type_mismatch_is_not_reported_as_broken(url, payload, expected):
+    error_type, evidence = attachment_payload_error(url, "", payload)
+    assert error_type == expected
+    if expected == "attachment_type_mismatch":
+        assert "可下载" in evidence
+
+
+@pytest.mark.asyncio
+async def test_download_with_valid_but_mismatched_body_goes_to_manual_review(tmp_path):
+    """_classify_download 不能把"类型与后缀不符"写成 broken：那会进客户可见的外链问题表。"""
+    collector = BrowserCollector(None, SafetyController(SafetyConfig()))
+    related = RelatedLink(kind="附件", url="https://example.test/a.doc", source_area="详情页正文")
+    file_path = tmp_path / "a.doc"
+    file_path.write_bytes(b"PK\x03\x04docx-bytes")
+    download = FakeDownload("https://example.test/a.doc", str(file_path))
+
+    result = await collector._classify_download(download, related)
+
+    assert result["result"] == "review_required"
+    assert result["error_type"] == "attachment_type_mismatch"
+    assert result["review_status"] == "manual_review"
 
 
 class FakeDownload:
