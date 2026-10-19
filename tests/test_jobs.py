@@ -297,6 +297,58 @@ async def test_legacy_version_reopens_only_for_missing_attachment_coverage(
 
 
 @pytest.mark.asyncio
+async def test_unevidenced_click_broken_link_forces_reopen_at_current_version(tmp_path, fake_runtime):
+    """客户可见表里不能留着"没有 HTTP 证据的失效判定"：这类条目下一轮必须重开核验。"""
+    db = Database(tmp_path / "unevidenced-broken.db")
+    db.initialize()
+    baseline_job = db.create_job(["普陀区"], "full", {}, 0)
+    db.update_job(
+        baseline_job, status="completed", coverage_status="complete", completion_kind="full",
+        estimated_total=1, examined_count=1,
+    )
+    repository = Repository(db)
+    url = "https://example.test/same"
+    document_id = repository.save_record(
+        baseline_job,
+        PolicyRecord(
+            "普陀区", "文件same", url, body_text="正文：附件：1.实施方案.pdf",
+            published_date=date(2026, 7, 1), authored_date=date(2026, 7, 1),
+        ),
+        [],
+    )
+    repository.record_scan_item(
+        baseline_job,
+        PolicyListItem("普陀区", 1, 0, "文件same", url, date(2026, 7, 1),
+                       source_site="市级平台·普陀区", source_key="municipal_putuo"),
+        detail_status="checked_complete", header_detected=True,
+        authored_date=date(2026, 7, 1), published_date=date(2026, 7, 1), document_id=document_id,
+    )
+    repository.save_link_check(baseline_job, document_id, {
+        "kind": "附件", "url": "https://example.test/a.pdf", "result": "broken",
+        "status_code": None, "error_type": "click_no_response", "source_area": "详情页正文",
+        "link_text": "附件", "source_page_url": url, "interaction_type": "click",
+    })
+    repository.save_link_check(baseline_job, document_id, {
+        "kind": "附件", "url": "https://example.test/b.pdf", "result": "ok", "status_code": 200,
+        "source_area": "详情页正文", "link_text": "附件二", "source_page_url": url,
+        "interaction_type": "href",
+    })
+    with db.connect() as conn:
+        conn.execute(
+            "UPDATE scan_item_results SET link_check_version=? WHERE job_id=?",
+            (PAGE_LINK_CHECK_VERSION, baseline_job),
+        )
+    fake_runtime.datasets = {"普陀区": [item("普陀区", 0, "same")]}
+    manager = JobManager(db)
+
+    job_id = await manager.create_and_start(["普陀区"], "incremental", baseline_job_id=baseline_job)
+    await wait_job(manager, job_id)
+
+    assert fake_runtime.opened == [url]
+    assert db.get_job(job_id)["processed_count"] == 1
+
+
+@pytest.mark.asyncio
 async def test_incremental_requires_a_matching_completed_full_baseline(tmp_path):
     db = Database(tmp_path / "baseline-validation.db")
     db.initialize()

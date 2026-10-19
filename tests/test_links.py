@@ -4,7 +4,7 @@ import httpx
 import pytest
 from playwright.async_api import TimeoutError as PlaywrightTimeout
 
-from app.collector import LINK_CHECK_USER_AGENT, LinkChecker
+from app.collector import LINK_CHECK_USER_AGENT, BrowserCollector, LinkChecker
 from app.config import SafetyConfig
 from app.domain import RelatedLink, SafetyPause
 from app.safety import SafetyController
@@ -557,4 +557,34 @@ async def test_click_no_response_that_also_fails_directly_stays_reported():
         await checker.client.aclose()
     assert result["result"] == "broken"
     assert result["error_type"] == "click_no_response"
+
+
+def related_click_link() -> RelatedLink:
+    return RelatedLink(
+        kind="附件", url="https://links.test/a.pdf", source_area="详情页正文",
+        link_text="附件", source_page_url="https://links.test/page.html", interaction_type="click",
+    )
+
+
+def test_click_probe_without_http_evidence_is_not_reported_as_broken():
+    """生产实测：2 条 click_no_response 判失效的附件，直连取都是 200 带真实字节。
+
+    没拿到状态码就没有断言"打不开"的资格，只能进人工复核，不能出现在客户可见表里。
+    """
+    collector = BrowserCollector(None, SafetyController(SafetyConfig()))
+    for probed in (None, {}, {"status_code": None, "result": "broken", "error_type": "timeout"}):
+        result = collector._finalize_click_probe(related_click_link(), probed)
+        assert result["result"] == "review_required", probed
+        assert result["error_type"] == "click_no_response"
+        assert result["review_status"] == "manual_review"
+        assert result["status_code"] is None
+
+
+def test_click_probe_with_direct_evidence_keeps_the_real_verdict():
+    collector = BrowserCollector(None, SafetyController(SafetyConfig()))
+    probed = {"status_code": 200, "result": "ok", "url": "https://links.test/a.pdf", "final_url": ""}
+    result = collector._finalize_click_probe(related_click_link(), probed)
+    assert result["result"] == "ok"
+    assert result["status_code"] == 200
+    assert result["source_area"] == "详情页正文"
 

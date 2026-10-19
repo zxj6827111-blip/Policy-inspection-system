@@ -949,6 +949,10 @@ class JobManager:
             # 被站点拒 UA 的 403）已经逐条复验回写过，真正遗留的缺口只有"正文声明了附件
             # 却从没检查过附件"这一类。只重开这些，既保住准确性，也不用把 23800 条全跑一遍。
             return False, "基线声明了附件却从未检查过附件，必须重新打开详情核验"
+        if row.get("has_unevidenced_broken_links"):
+            # 旧版点击式检查会留下"没有 HTTP 证据却判失效"的记录，这种不能留在客户可见表里，
+            # 重开一次让它带上真实状态码。
+            return False, "基线含无 HTTP 证据的点击类失效判定，必须重新打开详情核验"
         if row["detail_status"] in {"exception", "checked_incomplete"}:
             return False, "基线详情异常或表头字段不完整"
         if row.get("has_legacy_hidden_links"):

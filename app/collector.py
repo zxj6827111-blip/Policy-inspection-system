@@ -795,15 +795,13 @@ class BrowserCollector:
                 return result
 
             self.safety.after_request(None, "", enforce_risk=False)
-            # 点击没接到响应 ≠ 附件打不开：普陀重开详情后 17 条这类记录，独立请求取全部是
-            # 206 且带真实字节。先用浏览器自身的请求上下文直接取一次拿 HTTP 证据，
-            # 拿不到证据才保留 click_no_response。
+            # 点击没接到响应 ≠ 附件打不开：实测普陀重开详情后这类记录里，独立请求取全是
+            # 200/206 带真实字节。先用浏览器自身的请求上下文直接取一次拿 HTTP 证据。
+            probed = None
             if related.url:
                 with suppress(Exception):
                     probed = await self._check_browser_attachment(related.kind, related.url)
-                    if probed.get("status_code") is not None:
-                        return self._with_link_metadata(probed, related)
-            return self._link_error_result(related, "click_no_response", "点击后未出现跳转、下载或网络响应", result="broken")
+            return self._finalize_click_probe(related, probed)
         except (PlaywrightTimeout, asyncio.TimeoutError, httpx.TimeoutException) as exc:
             blocked_result = finish_navigation_failure()
             if blocked_result:
@@ -835,6 +833,21 @@ class BrowserCollector:
                         pending_popup = task.result()
                         if pending_popup and not pending_popup.is_closed():
                             await pending_popup.close()
+
+    def _finalize_click_probe(self, related: RelatedLink, probed: dict | None) -> dict[str, Any]:
+        """点击无响应的收尾：只有拿到 HTTP 证据才允许判失效，否则只能交人工复核。
+
+        生产实测有 2 条 click_no_response 判失效的附件，直连取都是 200 带真实字节；
+        没有状态码却写 broken 会直接进客户可见的问题表。
+        """
+        if probed and probed.get("status_code") is not None:
+            return self._with_link_metadata(probed, related)
+        return self._link_error_result(
+            related,
+            "click_no_response",
+            "点击后未出现跳转、下载或网络响应，直连复验也未取到 HTTP 证据",
+            result="review_required",
+        )
 
     async def _precheck_links_in_container(self, page: Page, container, links: list[RelatedLink]) -> None:
         candidates = container.locator(RELATED_CLICK_SELECTOR)
