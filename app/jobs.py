@@ -474,6 +474,18 @@ class JobManager:
                         return
                     self.db.update_job(job_id, pause_reason="")
                     await self._run_acquired(job_id)
+        except Exception as exc:  # noqa: BLE001 — 进入扫描前的准备阶段炸了也必须留痕
+            # 这段在 _run_acquired 的异常处理之外（解析目标、算同域主机）。以前任务会停在
+            # pending 不动、只在 PM2 日志里留一句 "Task exception was never retrieved"，
+            # 没人知道它其实根本没开始。
+            detail = f"{type(exc).__name__}: {exc}"
+            current = self.db.get_job(job_id)
+            if current and current["status"] in {JobStatus.PENDING, JobStatus.RUNNING}:
+                self.db.update_job(
+                    job_id, status=JobStatus.FAILED, last_error=detail, finished_at=utc_now(),
+                    coverage_status="partial", completion_kind="failed",
+                )
+                self.db.add_job_event(job_id, "failed", detail)
         finally:
             if self._tasks.get(job_id) is asyncio.current_task():
                 self._tasks.pop(job_id, None)

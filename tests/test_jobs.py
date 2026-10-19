@@ -348,6 +348,22 @@ async def test_unevidenced_click_broken_link_forces_reopen_at_current_version(tm
     assert db.get_job(job_id)["processed_count"] == 1
 
 
+@pytest.mark.asyncio
+async def test_unresolvable_target_fails_the_job_instead_of_stalling_in_pending(tmp_path):
+    """连扫描目标都解析不出来时要老实标失败，不能停在 pending 里悄悄不动。"""
+    db = Database(tmp_path / "bad-target.db")
+    db.initialize()
+    job_id = db.create_job(["不存在的区县"], "full", {}, 0)
+    manager = JobManager(db)
+
+    await manager._run(job_id)
+
+    job = db.get_job(job_id)
+    assert job["status"] == "failed", job
+    assert "不支持的扫描目标" in job["last_error"], job
+    assert job["completion_kind"] == "failed"
+
+
 def test_reconcile_closes_findings_from_any_earlier_job(tmp_path):
     """销号比对不能只看指定的那一个基线任务。
 
