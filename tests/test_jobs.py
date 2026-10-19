@@ -5,7 +5,7 @@ from datetime import date, datetime, timedelta, timezone
 import pytest
 
 from app.db import Database
-from app.domain import DetailInspection, PolicyListItem, PolicyRecord
+from app.domain import DetailInspection, Finding, PolicyListItem, PolicyRecord
 from app.domain import CooldownPause, ItemReviewRequired, SafetyPause
 from app.jobs import JobManager
 from app.repository import PAGE_LINK_CHECK_VERSION, Repository
@@ -346,6 +346,35 @@ async def test_unevidenced_click_broken_link_forces_reopen_at_current_version(tm
 
     assert fake_runtime.opened == [url]
     assert db.get_job(job_id)["processed_count"] == 1
+
+
+def test_reconcile_closes_findings_from_any_earlier_job(tmp_path):
+    """销号比对不能只看指定的那一个基线任务。
+
+    生产实况：49 条 META-001 出自 job 4（7-13），后来 job 9 已核验字段齐全，
+    但 job 17 的基线是 job 9，按老逻辑永远比不到 job 4，于是一条都没销掉。
+    """
+    db = Database(tmp_path / "reconcile-any-earlier.db")
+    db.initialize()
+    repo = Repository(db)
+    record = PolicyRecord("普陀区", "旧轮误报文件", "https://example.test/legacy-fp")
+    finding = Finding("META-001", "元数据问题", "high", "confirmed", "详情页表头字段缺失：索引号")
+
+    job_legacy = db.create_job(["普陀区"], "full", {}, 0)
+    job_baseline = db.create_job(["普陀区"], "full", {}, 0)
+    job_checking = db.create_job(["普陀区"], "incremental", {}, 0)
+    document_id = repo.save_record(job_legacy, record, [finding])
+    repo.save_record(job_baseline, record, [])
+
+    counts = repo.reconcile_rectifications(job_checking, document_id)
+
+    assert counts["closed"] == 1, counts
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT baseline_job_id,kind,rule_code FROM finding_transitions WHERE job_id=?",
+            (job_checking,),
+        ).fetchone()
+    assert dict(row) == {"baseline_job_id": job_legacy, "kind": "closed", "rule_code": "META-001"}
 
 
 @pytest.mark.asyncio

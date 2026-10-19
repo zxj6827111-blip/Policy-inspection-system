@@ -546,10 +546,13 @@ class Repository:
         return dict(row) if row else None
 
     def reconcile_rectifications(
-        self, job_id: int, baseline_job_id: int, document_id: int,
+        self, job_id: int, document_id: int,
     ) -> dict[str, int]:
-        """增量复查后与基线对齐：本轮不再命中的记「销号」，人工驳回却又命中的记「冲突」。
+        """增量复查后与历史对齐：本轮不再命中的记「销号」，人工驳回却又命中的记「冲突」。
 
+        「历史」是这一篇文档在**所有更早任务**里仍 current 的问题，每个规则取最新一条——
+        只比指定的那一个基线任务会漏掉更早轮次留下的行（实测普陀 49 条 META-001 来自
+        job 4，基线是 job 9，于是永远没人跟它比，job 9 早就核验过字段齐全也没用）。
         只在文档确实被重新打开并成功评估之后调用——否则「本轮没有这行」只代表没看，
         不代表网站改好了。人工驳回过的仍按驳回结论不报，这里只留一条提醒。
         """
@@ -560,9 +563,13 @@ class Repository:
             baseline = {
                 row["rule_code"]: dict(row)
                 for row in conn.execute(
-                    """SELECT * FROM rule_findings
-                    WHERE job_id=? AND document_id=? AND COALESCE(is_current, 1)=1""",
-                    (baseline_job_id, document_id),
+                    """SELECT f.* FROM rule_findings f
+                    WHERE f.document_id=? AND COALESCE(f.is_current, 1)=1 AND f.job_id<?
+                      AND f.id=(SELECT f2.id FROM rule_findings f2
+                                WHERE f2.document_id=f.document_id AND f2.rule_code=f.rule_code
+                                  AND COALESCE(f2.is_current, 1)=1 AND f2.job_id<?
+                                ORDER BY COALESCE(f2.created_at, '') DESC, f2.id DESC LIMIT 1)""",
+                    (document_id, job_id, job_id),
                 ).fetchall()
             }
             current = {
@@ -594,7 +601,7 @@ class Repository:
                     ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     ON CONFLICT(job_id,stable_key,kind) DO NOTHING""",
                     (
-                        job_id, baseline_job_id, document_id, stable_key, rule_code,
+                        job_id, old["job_id"], document_id, stable_key, rule_code,
                         old["category"], old["severity"], kind, old["detail"],
                         str(old["page_value"] or ""), after_value,
                         dict(doc)["source_site"] if doc else "",

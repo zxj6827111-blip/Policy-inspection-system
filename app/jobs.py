@@ -1324,7 +1324,7 @@ class JobManager:
         findings = evaluate_record(record, agency_rows, calendar, knowledge=self._knowledge_for_district(target.district))
         document_id = self.repo.save_record(job_id, record, findings)
         if baseline_job_id and document_id is not None:
-            self.repo.reconcile_rectifications(job_id, int(baseline_job_id), document_id)
+            self.repo.reconcile_rectifications(job_id, document_id)
         detail_status = "checked_incomplete" if record.missing_metadata_fields else "checked_complete"
         reason = (
             "详情页表头字段不完整，已记录 META-001 并继续既有检查"
@@ -1503,7 +1503,7 @@ class JobManager:
             findings = evaluate_record(record, agency_rows, calendar, knowledge=self._knowledge_for_district(target.district))
             document_id = self.repo.save_record(job_id, record, findings)
             if baseline_job_id and document_id is not None:
-                self.repo.reconcile_rectifications(job_id, int(baseline_job_id), document_id)
+                self.repo.reconcile_rectifications(job_id, document_id)
             detail_status = "checked_incomplete" if record.missing_metadata_fields else "checked_complete"
             reason = (
                 "详情页表头字段不完整，已记录 META-001 并继续既有检查"

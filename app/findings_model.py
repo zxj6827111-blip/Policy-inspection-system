@@ -15,6 +15,22 @@ LATEST_PER_DOCUMENT_RULE = """
             ORDER BY COALESCE(f2.created_at, '') DESC, f2.id DESC LIMIT 1)
 """
 
+# 增量复查写的 kind='closed' 记录代表「更晚一轮真开过详情、按同样口径评估后没再命中」。
+# 全局台账必须认这个结论，否则站点后来改了、或旧版解析器误报过的行，会永远挂在待整改里。
+# 若更晚一轮又重新命中，会留下一条比这条销号更新的问题行，这时不能再剔。别名同样必须是 f。
+RECTIFIED_BY_LATER_SCAN = """
+    NOT EXISTS (
+        SELECT 1 FROM finding_transitions t
+        WHERE t.document_id = f.document_id AND t.rule_code = f.rule_code
+          AND t.kind = 'closed' AND t.job_id > f.job_id
+          AND NOT EXISTS (SELECT 1 FROM rule_findings g
+                          WHERE g.document_id = f.document_id AND g.rule_code = f.rule_code
+                            AND COALESCE(g.is_current, 1) = 1 AND g.job_id > t.job_id)
+    )
+"""
+
+OPEN_PROBLEM_RULE = f"{LATEST_PER_DOCUMENT_RULE} AND {RECTIFIED_BY_LATER_SCAN}"
+
 # Machine conclusions
 MACHINE_CONFIRMED_BY_RULE = "confirmed_by_rule"
 MACHINE_SUSPECTED = "suspected"

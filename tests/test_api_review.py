@@ -628,6 +628,84 @@ def test_global_findings_list_reports_a_recurring_problem_once(tmp_path, monkeyp
         assert [row["job_id"] for row in scoped["items"]] == [first], scoped
 
 
+def _seed_rectifiable(db, repo, url: str):
+    """一篇文档：job_first 报过问题，job_later 复查没再命中（写 closed 销号记录）。"""
+    record = PolicyRecord("普陀区", "已整改文件", url)
+    finding = Finding("META-001", "元数据问题", "high", "confirmed", "详情页表头字段缺失：索引号")
+    job_first = db.create_job(["普陀区"], "full", {}, 1)
+    job_later = db.create_job(["普陀区"], "incremental", {}, 1)
+    db.update_job(job_first, status="completed", coverage_status="complete")
+    db.update_job(job_later, status="completed", coverage_status="complete")
+    document_id = repo.save_record(job_first, record, [finding])
+    return job_first, job_later, document_id, finding
+
+
+def _record_closed_transition(db, *, checking_job, source_job, document_id, finding, recorded_at):
+    with db.connect() as conn:
+        conn.execute(
+            """INSERT INTO finding_transitions(
+                job_id,baseline_job_id,document_id,stable_key,rule_code,category,severity,
+                kind,detail,before_value,after_value,source_site,district,title,document_url,recorded_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                checking_job, source_job, document_id, f"{document_id}:{finding.rule_code}",
+                finding.rule_code, finding.category, finding.severity, "closed",
+                finding.detail, "", "", "区级网站·普陀区", "普陀区", "已整改文件",
+                "https://example.test/rectified", recorded_at,
+            ),
+        )
+
+
+def test_rectified_problem_leaves_global_ledger_but_keeps_its_job_history(tmp_path, monkeypatch):
+    """更晚一轮已销号的问题不该再算现存问题，但历史任务自己的清单要留着。"""
+    db = Database(tmp_path / "rectified.db")
+    monkeypatch.setattr(main_module, "db", db)
+    monkeypatch.setattr(main_module, "manager", JobManager(db))
+    repo = Repository(db)
+
+    with TestClient(main_module.app) as client:
+        job_first, job_later, document_id, finding = _seed_rectifiable(
+            db, repo, "https://example.test/rectified"
+        )
+        assert client.get("/api/review-queue", params={"review_status": "all"}).json()["total"] == 1
+        _record_closed_transition(
+            db, checking_job=job_later, source_job=job_first, document_id=document_id,
+            finding=finding, recorded_at="2026-10-19T00:00:00+00:00",
+        )
+
+        payload = client.get("/api/review-queue", params={"review_status": "all"}).json()
+        assert payload["total"] == 0, payload
+        assert client.get("/api/overview").json()["finding_buckets"]["total"] == 0
+        # 历史不删：报过它的那一轮仍然数得到自己那条记录
+        assert len(client.get(f"/api/jobs/{job_first}/findings").json()) == 1
+
+
+def test_reconfirmed_problem_returns_after_a_later_closed_transition(tmp_path, monkeypatch):
+    """反向断言：更晚一轮又重新命中时，不能被更早那条销号记录吃掉。"""
+    db = Database(tmp_path / "reconfirmed.db")
+    monkeypatch.setattr(main_module, "db", db)
+    monkeypatch.setattr(main_module, "manager", JobManager(db))
+    repo = Repository(db)
+
+    with TestClient(main_module.app) as client:
+        job_first, job_later, document_id, finding = _seed_rectifiable(
+            db, repo, "https://example.test/reconfirmed"
+        )
+        _record_closed_transition(
+            db, checking_job=job_later, source_job=job_first, document_id=document_id,
+            finding=finding, recorded_at="2026-10-19T00:00:00+00:00",
+        )
+        assert client.get("/api/review-queue", params={"review_status": "all"}).json()["total"] == 0
+
+        job_third = db.create_job(["普陀区"], "incremental", {}, 1)
+        db.update_job(job_third, status="completed", coverage_status="complete")
+        repo.save_record(job_third, PolicyRecord("普陀区", "已整改文件", "https://example.test/reconfirmed"), [finding])
+
+        payload = client.get("/api/review-queue", params={"review_status": "all"}).json()
+        assert payload["total"] == 1, payload
+        assert payload["items"][0]["job_id"] == job_third, payload
+
+
 def test_overview_counts_each_recurring_problem_once(tmp_path, monkeypatch):
     """总览的 findings 分桶同样是跨任务口径，重复命中不能重复计数。"""
     db = Database(tmp_path / "recurring-overview.db")
