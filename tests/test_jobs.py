@@ -420,6 +420,11 @@ def _seed_vanished_case(tmp_path, name: str):
         authored_date=date(2023, 1, 2), published_date=date(2023, 4, 30), document_id=document_id,
     )
     generation_id = repo.create_generation(checking, target_key=target.key, generation_kind="incremental")
+    repo.upsert_source_inventory(item, baseline)
+    repo.update_inventory_detail(
+        target.key, item.stable_id or f"{target.key}|url:{url}",
+        detail_status="checked_complete", document_id=document_id,
+    )
     return db, repo, baseline, checking, target, item, document_id, generation_id
 
 
@@ -520,13 +525,11 @@ def test_vanished_candidates_exclude_docs_already_rechecked_this_job(tmp_path):
         tmp_path, "vanished-candidates.db"
     )
     url = item.url
-    assert [r["url"] for r in repo.vanished_open_findings(target.key, generation_id, checking)] == [url]
+    assert [r["url"] for r in repo.vanished_open_findings(target.key, generation_id)] == [url]
 
-    repo.record_scan_item(
-        checking, item, detail_status="checked_complete", header_detected=True,
-        authored_date=date(2023, 1, 2), published_date=date(2023, 4, 30), document_id=document_id,
-    )
-    assert repo.vanished_open_findings(target.key, generation_id, checking) == []
+    # 这一轮列表里能翻到它，就不该进复验候选
+    repo.upsert_generation_item(generation_id, checking, item)
+    assert repo.vanished_open_findings(target.key, generation_id) == []
 
 
 @pytest.mark.asyncio

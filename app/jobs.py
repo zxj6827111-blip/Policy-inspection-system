@@ -1638,7 +1638,7 @@ class JobManager:
         也不能销号。这里挨个开一次详情页——还打得开的按本轮结果重判（复用同一套销号），
         已经不成空壳/下线的才记销号，绝不把「本轮没扫到」当成整改。
         """
-        rows = self.repo.vanished_open_findings(target.key, generation_id, job_id)
+        rows = self.repo.vanished_open_findings(target.key, generation_id)
         if not rows:
             return
         baseline_job_id = job.get("baseline_job_id")
