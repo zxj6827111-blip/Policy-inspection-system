@@ -626,9 +626,11 @@ class BrowserCollector:
                 info = await asyncio.to_thread(socket.getaddrinfo, hostname, None, type=socket.SOCK_STREAM)
                 addresses = list({ipaddress.ip_address(item[4][0]) for item in info})
             except (OSError, ValueError) as exc:
-                raise UnsafeLinkDestination(f"关联链接域名无法安全解析：{hostname}") from exc
+                raise UnsafeLinkDestination(f"关联链接域名无法安全解析：{hostname}（地址 {url}）") from exc
         if not destination_addresses_are_public(hostname, addresses, literal=is_literal):
-            raise UnsafeLinkDestination(f"关联链接解析到本机、内网或非公网地址，已拒绝点击：{hostname}")
+            raise UnsafeLinkDestination(
+                f"关联链接解析到本机、内网或非公网地址，已拒绝点击：{hostname}（地址 {url}）"
+            )
 
     def _status_from_responses(self, responses: list, target_url: str, final_url: str = "") -> int | None:
         candidates = [final_url, target_url]
@@ -1263,9 +1265,9 @@ class LinkChecker:
         if parsed.netloc.lower() == urlparse(TARGET_URL).netloc.lower() and self.target_allowed_check:
             self.target_allowed_check(url)
             return
-        await self._validate_public_destination(parsed.hostname or "")
+        await self._validate_public_destination(parsed.hostname or "", url)
 
-    async def _validate_public_destination(self, hostname: str) -> None:
+    async def _validate_public_destination(self, hostname: str, url: str = "") -> None:
         is_literal = False
         try:
             literal = ipaddress.ip_address(hostname.strip("[]"))
@@ -1282,9 +1284,11 @@ class LinkChecker:
                     info = await asyncio.to_thread(socket.getaddrinfo, hostname, None, type=socket.SOCK_STREAM)
                     addresses = list({ipaddress.ip_address(item[4][0]) for item in info})
             except (OSError, ValueError) as exc:
-                raise UnsafeLinkDestination(f"关联链接域名无法安全解析：{hostname}") from exc
+                raise UnsafeLinkDestination(f"关联链接域名无法安全解析：{hostname}（地址 {url}）") from exc
         if not destination_addresses_are_public(hostname, addresses, literal=is_literal):
-            raise UnsafeLinkDestination(f"关联链接解析到本机、内网或非公网地址，已拒绝访问：{hostname}")
+            raise UnsafeLinkDestination(
+                f"关联链接解析到本机、内网或非公网地址，已拒绝访问：{hostname}（地址 {url}）"
+            )
 
     async def _call_rendered_checker(self, kind: str, url: str, related: RelatedLink | None) -> dict:
         assert self.rendered_checker
