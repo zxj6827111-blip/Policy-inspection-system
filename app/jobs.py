@@ -592,6 +592,13 @@ class JobManager:
                                 rendered_hosts=getattr(collector, "rendered_hosts", None),
                             ) as checker:
                                 await self._retest_target_exceptions(job_id, target, collector, checker, calendar)
+                                if job["mode"] == "incremental" and job.get("baseline_job_id"):
+                                    vanished_generation = await self._ensure_generation(
+                                        job, kind=job["mode"], target_key=target.key,
+                                    )
+                                    await self._recheck_vanished_documents(
+                                        job_id, job, target, collector, checker, calendar, vanished_generation,
+                                    )
                     finally:
                         for _target, collector in reversed(collectors):
                             await collector.__aexit__(None, None, None)
@@ -1621,6 +1628,81 @@ class JobManager:
                 message = f"复测异常：{type(exc).__name__}: {exc}"
                 self.repo.fail_scan_exception_retest(int(exception["id"]), message)
                 self.db.add_job_event(job_id, "exception_review_required", message, exception["url"])
+
+    async def _recheck_vanished_documents(
+        self, job_id, job, target, collector, checker, calendar, generation_id: int,
+    ) -> None:
+        """复验「列表里已经找不到、但库内仍有未关闭问题」的文档。
+
+        增量只按当期列表建队列，这类文档永远不会被重开：既不能确认问题是否还在，
+        也不能销号。这里挨个开一次详情页——还打得开的按本轮结果重判（复用同一套销号），
+        已经不成空壳/下线的才记销号，绝不把「本轮没扫到」当成整改。
+        """
+        rows = self.repo.vanished_open_findings(target.key, generation_id, job_id)
+        if not rows:
+            return
+        baseline_job_id = job.get("baseline_job_id")
+        self.db.add_job_event(job_id, "vanished_recheck_start", f"列表外文档复验开始：{len(rows)} 篇")
+        closed = reconfirmed = 0
+        for row in rows:
+            latest = self.db.get_job(job_id)
+            if not latest or latest["status"] != JobStatus.RUNNING:
+                return
+            item = PolicyListItem(
+                district=target.district, page_number=0, item_index=-1,
+                title=row["title"] or "", url=row["url"],
+                source_site=target.label, source_key=target.key, source_channel_id=target.channel_id,
+            )
+            try:
+                inspection = self._coerce_inspection(await collector.open_detail_url(
+                    target.district, row["url"], row["title"] or "",
+                ))
+            except SafetyPause:
+                raise
+            except Exception as exc:  # noqa: BLE001 — 单篇复验失败不该中断整批复验
+                self.db.add_job_event(
+                    job_id, "vanished_recheck_error", f"{type(exc).__name__}: {exc}"[:200], row["url"],
+                )
+                continue
+            record = inspection.record
+            if record is None:
+                if row["document_id"] is None:
+                    continue
+                closed += self.repo.close_open_findings_as_vanished(
+                    job_id, int(row["document_id"]),
+                    "列表外文档复验：详情页已不展示该文件（无政策表头或已下线）",
+                )
+                self.db.add_job_event(
+                    job_id, "vanished_recheck_closed",
+                    f"已下架，未关闭问题记销号：{(row['title'] or '')[:40]}", row["url"],
+                )
+                continue
+            record.district = target.district
+            record.source_site = record.source_site or target.label
+            record.header_detected = inspection.header_detected
+            record.missing_metadata_fields = self._all_missing_fields(inspection)
+            findings = evaluate_record(
+                record, self.db.agency_rules(target.district), calendar,
+                knowledge=self._knowledge_for_district(target.district),
+            )
+            document_id = self.repo.save_record(job_id, record, findings)
+            if baseline_job_id and document_id is not None:
+                self.repo.reconcile_rectifications(job_id, document_id)
+            for related in record.related_links:
+                self.repo.save_link_check(
+                    job_id, document_id, await checker.check(related.kind, related.url, related)
+                )
+            self._record_item_result(
+                job_id, item, inspection,
+                detail_status="checked_incomplete" if record.missing_metadata_fields else "checked_complete",
+                document_id=document_id, baseline_job_id=baseline_job_id,
+                reason="列表外文档复验：文档仍可访问，按本轮结果重判",
+            )
+            reconfirmed += len(findings)
+        self.db.add_job_event(
+            job_id, "vanished_recheck_done",
+            f"列表外文档复验完成：记销号 {closed} 条，复验后仍命中 {reconfirmed} 条",
+        )
 
     def _mark_exception_retest_success(self, job_id: int, finding_delta: int) -> None:
         current = self.db.get_job(job_id)

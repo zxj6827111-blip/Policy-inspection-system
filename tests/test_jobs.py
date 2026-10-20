@@ -9,6 +9,7 @@ from app.domain import DetailInspection, Finding, PolicyListItem, PolicyRecord
 from app.domain import CooldownPause, ItemReviewRequired, SafetyPause
 from app.jobs import JobManager
 from app.repository import PAGE_LINK_CHECK_VERSION, Repository
+from app.rules import WorkdayCalendar
 
 
 class FakeBrowser:
@@ -391,6 +392,141 @@ def test_reconcile_closes_findings_from_any_earlier_job(tmp_path):
             (job_checking,),
         ).fetchone()
     assert dict(row) == {"baseline_job_id": job_legacy, "kind": "closed", "rule_code": "META-001"}
+
+
+def _seed_vanished_case(tmp_path, name: str):
+    """造一篇「基线里报过 DATE-001、但新一轮列表里已经找不到」的文档。"""
+    from app.config import resolve_target
+
+    db = Database(tmp_path / name)
+    db.initialize()
+    repo = Repository(db)
+    baseline = db.create_job(["市级平台·普陀区"], "full", {}, 0)
+    db.update_job(baseline, status="completed", coverage_status="complete", completion_kind="full",
+                  estimated_total=1, examined_count=1)
+    checking = db.create_job(["市级平台·普陀区"], "incremental", {}, 0, baseline_job_id=baseline)
+    target = resolve_target("市级平台·普陀区")
+    url = "https://www.shpt.gov.cn/zhengwu/gone.html"
+    document_id = repo.save_record(
+        baseline,
+        PolicyRecord("普陀区", "列表外超期文件", url,
+                     authored_date=date(2023, 1, 2), published_date=date(2023, 4, 30)),
+        [Finding("DATE-001", "日期问题", "high", "confirmed", "成文日期至发布日期超过 20 个工作日")],
+    )
+    item = PolicyListItem("普陀区", 3, 0, "列表外超期文件", url, date(2023, 4, 30),
+                          source_site=target.label, source_key=target.key)
+    repo.record_scan_item(
+        baseline, item, detail_status="checked_complete", header_detected=True,
+        authored_date=date(2023, 1, 2), published_date=date(2023, 4, 30), document_id=document_id,
+    )
+    generation_id = repo.create_generation(checking, target_key=target.key, generation_kind="incremental")
+    return db, repo, baseline, checking, target, item, document_id, generation_id
+
+
+class VanishedCollector:
+    def __init__(self, record):
+        self.record = record
+        self.opened: list[str] = []
+
+    async def open_detail_url(self, _district, url, _title):
+        self.opened.append(url)
+        return DetailInspection(record=self.record, header_detected=self.record is not None)
+
+
+class VanishedChecker:
+    async def check(self, kind, url, _related=None):
+        return {"kind": kind, "url": url, "result": "ok", "status_code": 200}
+
+
+@pytest.mark.asyncio
+async def test_vanished_document_still_online_is_reverified_not_closed(tmp_path):
+    """列表外但页面还能打开的文档：按本轮结果重判，不能被「本轮没扫到」当成已整改。"""
+    db, repo, _baseline, checking, target, _item, document_id, generation_id = _seed_vanished_case(
+        tmp_path, "vanished-online.db"
+    )
+    still_bad = PolicyRecord(
+        "普陀区", "列表外超期文件", "https://www.shpt.gov.cn/zhengwu/gone.html",
+        authored_date=date(2023, 1, 2), published_date=date(2023, 4, 30),
+    )
+    collector = VanishedCollector(still_bad)
+    db.update_job(checking, status="running")
+    manager = JobManager(db)
+
+    await manager._recheck_vanished_documents(
+        checking, db.get_job(checking), target, collector, VanishedChecker(), WorkdayCalendar(), generation_id,
+    )
+
+    assert collector.opened == [still_bad.url]
+    with db.connect() as conn:
+        rows = conn.execute(
+            "SELECT job_id,is_current FROM rule_findings WHERE document_id=? AND rule_code='DATE-001'",
+            (document_id,),
+        ).fetchall()
+    assert {dict(r)["job_id"] for r in rows} == {_baseline, checking}, rows
+    assert all(r["is_current"] == 1 for r in rows), rows
+    # 台账按 (文档,规则) 取最新一条：仍算一条现存问题，且是本轮亲验的
+    from app.findings_model import OPEN_PROBLEM_RULE
+
+    with db.connect() as conn:
+        ledger = conn.execute(
+            f"SELECT count(*) FROM rule_findings f WHERE COALESCE(f.is_current,1)=1"
+            f" AND f.allow_customer_output=1 AND {OPEN_PROBLEM_RULE}",
+        ).fetchone()[0]
+    assert ledger == 1
+
+
+@pytest.mark.asyncio
+async def test_vanished_document_offline_closes_its_open_findings(tmp_path):
+    """详情页已经不成壳了才记销号，并把它移出问题库。"""
+    db, repo, _baseline, checking, target, _item, document_id, generation_id = _seed_vanished_case(
+        tmp_path, "vanished-offline.db"
+    )
+    collector = VanishedCollector(None)
+    db.update_job(checking, status="running")
+    manager = JobManager(db)
+
+    await manager._recheck_vanished_documents(
+        checking, db.get_job(checking), target, collector, VanishedChecker(), WorkdayCalendar(), generation_id,
+    )
+
+    with db.connect() as conn:
+        current = conn.execute(
+            "SELECT is_current FROM rule_findings WHERE document_id=?", (document_id,)
+        ).fetchone()[0]
+        transitions = conn.execute(
+            "SELECT kind,baseline_job_id,job_id,substr(detail,1,40) d FROM finding_transitions"
+            " WHERE document_id=? AND kind='closed'", (document_id,),
+        ).fetchall()
+        events = [r[0] for r in conn.execute(
+            "SELECT event_type FROM job_events WHERE job_id=? AND event_type LIKE 'vanished%'", (checking,)
+        ).fetchall()]
+    assert current == 0
+    assert [dict(t)["baseline_job_id"] for t in transitions] == [_baseline]
+    assert "列表外文档复验" in transitions[0]["d"]
+    assert "vanished_recheck_closed" in events
+
+    from app.findings_model import OPEN_PROBLEM_RULE
+
+    with db.connect() as conn:
+        ledger = conn.execute(
+            f"SELECT count(*) FROM rule_findings f WHERE COALESCE(f.is_current,1)=1"
+            f" AND f.allow_customer_output=1 AND {OPEN_PROBLEM_RULE}"
+        ).fetchone()[0]
+    assert ledger == 0
+
+
+def test_vanished_candidates_exclude_docs_already_rechecked_this_job(tmp_path):
+    db, repo, _baseline, checking, target, item, document_id, generation_id = _seed_vanished_case(
+        tmp_path, "vanished-candidates.db"
+    )
+    url = item.url
+    assert [r["url"] for r in repo.vanished_open_findings(target.key, generation_id, checking)] == [url]
+
+    repo.record_scan_item(
+        checking, item, detail_status="checked_complete", header_detected=True,
+        authored_date=date(2023, 1, 2), published_date=date(2023, 4, 30), document_id=document_id,
+    )
+    assert repo.vanished_open_findings(target.key, generation_id, checking) == []
 
 
 @pytest.mark.asyncio

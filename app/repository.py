@@ -540,6 +540,64 @@ class Repository:
                 ],
             )
 
+    def vanished_open_findings(
+        self, target_key: str, generation_id: int, job_id: int, limit: int = 400,
+    ) -> list[dict]:
+        """列表里已经没有、但库内仍挂着未关闭问题的文档。
+
+        增量只按当期列表建队列，所以「以前报过、今年列表里不再出现」的文档永远不会被重开，
+        它那条旧问题也就永远没人复验——既不能确认还在，也不能销号。
+        """
+        with self.db.connect() as conn:
+            rows = conn.execute(
+                """SELECT s.url, MAX(s.title) AS title, COALESCE(s.document_id, s.reused_document_id) AS document_id,
+                          COUNT(DISTINCT f.rule_code) AS open_rules
+                   FROM scan_item_results s
+                   JOIN policy_documents d ON d.id=COALESCE(s.document_id,s.reused_document_id)
+                   JOIN rule_findings f ON f.document_id=d.id
+                   WHERE s.target_key=? AND f.is_current=1 AND f.allow_customer_output=1
+                     AND NOT EXISTS (SELECT 1 FROM generation_items g
+                                     WHERE g.generation_id=? AND g.url=s.url)
+                     AND NOT EXISTS (SELECT 1 FROM scan_item_results r2
+                                     WHERE r2.job_id=? AND r2.url=s.url)
+                   GROUP BY s.url
+                   ORDER BY open_rules DESC, s.url LIMIT ?""",
+                (target_key, generation_id, job_id, limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def close_open_findings_as_vanished(self, job_id: int, document_id: int, note: str) -> int:
+        """详情页已不再展示该文件时，把这文档的现存问题记为销号并移出问题库。
+
+        判定依据来自本轮真开过的页面，不是「本轮没看到」——所以只在复验到空壳/下线时调用。
+        """
+        now = utc_now()
+        with self.db.connect() as conn:
+            rows = [dict(r) for r in conn.execute(
+                """SELECT f.*,d.title,d.url,d.district,d.source_site FROM rule_findings f
+                   JOIN policy_documents d ON d.id=f.document_id
+                   WHERE f.document_id=? AND COALESCE(f.is_current,1)=1""", (document_id,)
+            ).fetchall()]
+            for old in rows:
+                conn.execute(
+                    """INSERT INTO finding_transitions(
+                        job_id,baseline_job_id,document_id,stable_key,rule_code,category,severity,
+                        kind,detail,before_value,after_value,source_site,district,title,document_url,recorded_at
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    ON CONFLICT(job_id,stable_key,kind) DO NOTHING""",
+                    (
+                        job_id, old["job_id"], document_id,
+                        old["stable_key"] or f"{document_id}:{old['rule_code']}", old["rule_code"],
+                        old["category"], old["severity"], "closed",
+                        f"{old['detail'] or ''}｜{note}", str(old["page_value"] or ""), "",
+                        old["source_site"] or "", old["district"] or "", old["title"] or "", old["url"] or "", now,
+                    ),
+                )
+                conn.execute(
+                    "UPDATE rule_findings SET is_current=0, superseded_at=? WHERE id=?", (now, int(old["id"])),
+                )
+        return len(rows)
+
     def document(self, document_id: int) -> dict | None:
         with self.db.connect() as conn:
             row = conn.execute("SELECT * FROM policy_documents WHERE id=?", (document_id,)).fetchone()
