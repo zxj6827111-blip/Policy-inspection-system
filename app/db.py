@@ -327,6 +327,7 @@ CREATE TABLE IF NOT EXISTS continuous_schedules (
     next_full_reconcile_at TEXT,
     last_job_id INTEGER,
     last_status TEXT NOT NULL DEFAULT '',
+    consecutive_failures INTEGER NOT NULL DEFAULT 0,
     updated_at TEXT NOT NULL
 );
 """
@@ -422,6 +423,9 @@ class Database:
                 "review_status": "TEXT NOT NULL DEFAULT 'confirmed'",
                 "evidence": "TEXT NOT NULL DEFAULT ''",
             },
+            "continuous_schedules": {
+                "consecutive_failures": "INTEGER NOT NULL DEFAULT 0",
+            },
         }
         for table, columns in additions.items():
             existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
@@ -510,6 +514,7 @@ class Database:
                 incremental_interval_hours REAL NOT NULL DEFAULT 6, full_reconcile_interval_days REAL NOT NULL DEFAULT 7,
                 last_incremental_at TEXT, last_full_reconcile_at TEXT, next_incremental_at TEXT,
                 next_full_reconcile_at TEXT, last_job_id INTEGER, last_status TEXT NOT NULL DEFAULT '',
+                consecutive_failures INTEGER NOT NULL DEFAULT 0,
                 updated_at TEXT NOT NULL);
             """
         )

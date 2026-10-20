@@ -1774,6 +1774,7 @@ class JobManager:
         cfg = self.continuous_config
         values: dict[str, object] = {"last_status": str(status)}
         if status == JobStatus.COMPLETED:
+            values["consecutive_failures"] = 0
             if job["mode"] == "full":
                 values.update(
                     last_full_reconcile_at=now.isoformat(),
@@ -1786,11 +1787,39 @@ class JobManager:
                     next_incremental_at=(now + timedelta(hours=cfg.incremental_interval_hours)).isoformat(),
                 )
         else:
-            retry_at = (now + timedelta(minutes=cfg.failure_retry_minutes)).isoformat()
+            failures = int(schedule.get("consecutive_failures") or 0)
+            if status in {JobStatus.FAILED, JobStatus.PAUSED}:
+                failures += 1
+            # 15 分钟 → 30 → 60 …，最多一天一次。站点坏着的时候既不放弃（无人值守），
+            # 也不至于每 15 分钟起一个任务一直打。
+            delay_minutes = min(
+                cfg.failure_retry_minutes * (2 ** max(failures - 1, 0)),
+                self._max_retry_minutes(cfg),
+            )
+            retry_at = (now + timedelta(minutes=delay_minutes)).isoformat()
             values["next_incremental_at"] = retry_at
+            values["consecutive_failures"] = failures
             if job["mode"] == "full":
                 values["next_full_reconcile_at"] = retry_at
         self.repo.update_schedule(str(schedule["site_key"]), **values)
+
+    @staticmethod
+    def _max_retry_minutes(cfg: ContinuousScanConfig) -> float:
+        return min(1440.0, float(cfg.incremental_interval_hours) * 60.0)
+
+    @staticmethod
+    def _is_stale_due(value: str | None, interval_hours: float, now: datetime) -> bool:
+        """到点时间比一个完整周期还旧，说明调度停摆过，不能按"补跑"处理。"""
+        if not value:
+            return False
+        try:
+            due_at = datetime.fromisoformat(str(value))
+        except (TypeError, ValueError):
+            return True
+        if due_at.tzinfo is None:
+            due_at = due_at.replace(tzinfo=timezone.utc)
+        return (now - due_at) > timedelta(hours=float(interval_hours))
+
     def ensure_continuous_scheduler(self) -> None:
         if not self.continuous_config.enabled:
             return
@@ -1836,6 +1865,25 @@ class JobManager:
             ) <= now
             if not due_full and not due_incremental:
                 continue
+            if due_full and self._is_stale_due(
+                schedule["next_full_reconcile_at"], cfg.full_reconcile_interval_days * 24, now,
+            ):
+                # 调度停摆过：不补跑全量（一次几万篇会白占几天机器），只把到期推到未来。
+                # 本轮照常走增量，保证"打开开关"这一下仍然复查一遍整改。
+                self.repo.update_schedule(
+                    site_key,
+                    next_full_reconcile_at=(
+                        now + timedelta(days=cfg.full_reconcile_interval_days)
+                    ).isoformat(),
+                    last_status="skipped_stale_full",
+                )
+                print(
+                    f"continuous scheduler: {site_key} 全量到期已过期超过一个周期，跳过不补跑",
+                    flush=True,
+                )
+                due_full = False
+                if not due_incremental:
+                    continue
             if due_full:
                 job_id = self.db.create_job(
                     labels, "full", self._safety_payload(labels), 0, int(baseline["id"]),

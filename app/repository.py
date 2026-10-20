@@ -1055,7 +1055,9 @@ class Repository:
                 "SELECT * FROM continuous_schedules WHERE site_key=?", (site_key,),
             ).fetchone()
             if row:
-                return dict(row)
+                return self._converge_schedule_intervals(
+                    conn, dict(row), incremental_hours, reconcile_days,
+                )
             from datetime import datetime, timedelta, timezone
             base = datetime.now(timezone.utc)
             next_inc = (base + timedelta(hours=float(incremental_hours))).isoformat()
@@ -1075,6 +1077,49 @@ class Repository:
             ).fetchone()
         return dict(row)
 
+    def _converge_schedule_intervals(
+        self, conn: Any, row: dict, incremental_hours: float, reconcile_days: float,
+    ) -> dict:
+        """调用方传的周期（来自环境变量）是唯一事实来源，改了就把表里的值和下一轮时间一起收敛。
+
+        调度行创建后只会被调度器原样读出，若这里不收敛，改完 CONTINUOUS_SCAN_* 后
+        表里仍按旧节奏判到期：既可能提前跑，也可能一直不跑。
+        """
+        from datetime import datetime, timedelta, timezone
+
+        same = (
+            float(row.get("incremental_interval_hours") or 0) == float(incremental_hours)
+            and float(row.get("full_reconcile_interval_days") or 0) == float(reconcile_days)
+        )
+        if same:
+            return row
+        now = datetime.now(timezone.utc)
+        next_inc = self._next_after(row.get("last_incremental_at"), incremental_hours, now)
+        next_full = self._next_after(row.get("last_full_reconcile_at"), reconcile_days * 24, now)
+        conn.execute(
+            """UPDATE continuous_schedules SET incremental_interval_hours=?, full_reconcile_interval_days=?,
+            next_incremental_at=?, next_full_reconcile_at=?, updated_at=? WHERE site_key=?""",
+            (incremental_hours, reconcile_days, next_inc, next_full, utc_now(), row["site_key"]),
+        )
+        return dict(conn.execute(
+            "SELECT * FROM continuous_schedules WHERE site_key=?", (row["site_key"],),
+        ).fetchone())
+
+    @staticmethod
+    def _next_after(last_at: str | None, interval_hours: float, now: Any) -> str:
+        from datetime import datetime, timedelta, timezone
+
+        base = now
+        if last_at:
+            try:
+                base = datetime.fromisoformat(str(last_at))
+                if base.tzinfo is None:
+                    base = base.replace(tzinfo=timezone.utc)
+            except (TypeError, ValueError):
+                base = now
+        # 缩短周期时允许下一轮立刻到期，但不把时间戳留在过去。
+        return max(base + timedelta(hours=float(interval_hours)), now).isoformat()
+
     def get_schedule(self, site_key: str) -> dict | None:
         with self.db.connect() as conn:
             row = conn.execute(
@@ -1087,6 +1132,7 @@ class Repository:
             "enabled", "last_incremental_at", "last_full_reconcile_at", "next_incremental_at",
             "next_full_reconcile_at", "last_job_id", "last_status", "updated_at",
             "incremental_interval_hours", "full_reconcile_interval_days", "source_signature",
+            "consecutive_failures",
         }
         values = {k: v for k, v in values.items() if k in allowed}
         if not values:
