@@ -7,6 +7,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from app.db import Database, utc_now
+from app.findings_model import RECTIFIED_BY_LATER_SCAN
 from app.domain import Finding, PolicyListItem, PolicyRecord
 
 
@@ -549,12 +550,12 @@ class Repository:
         """
         with self.db.connect() as conn:
             rows = conn.execute(
-                """SELECT d.id AS document_id, d.url AS url, d.title AS title,
+                f"""SELECT d.id AS document_id, d.url AS url, d.title AS title,
                           COUNT(DISTINCT f.rule_code) AS open_rules
                    FROM rule_findings f
                    JOIN policy_documents d ON d.id=f.document_id
                    WHERE f.is_current=1 AND f.allow_customer_output=1 AND f.job_id<>?
-                     AND d.source_site=?
+                     AND d.source_site=? AND {RECTIFIED_BY_LATER_SCAN}
                      AND NOT EXISTS (SELECT 1 FROM scan_item_results n
                                      WHERE n.job_id=? AND n.target_key=? AND n.url=d.url)
                    GROUP BY d.id

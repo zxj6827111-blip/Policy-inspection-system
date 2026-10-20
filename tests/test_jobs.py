@@ -530,6 +530,32 @@ def test_vanished_candidates_exclude_docs_already_rechecked_this_job(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_already_rectified_findings_are_not_requeued_for_recheck(tmp_path):
+    """已被更晚一轮记过销号的行（还挂着 current）不该再被拉去复验。"""
+    db, repo, _baseline, checking, target, _item, document_id = _seed_vanished_case(
+        tmp_path, "vanished-rectified.db"
+    )
+    later = db.create_job(["市级平台·普陀区"], "incremental", {}, 0, baseline_job_id=checking)
+    with db.connect() as conn:
+        row = conn.execute(
+            """SELECT f.stable_key,f.rule_code,f.category,f.severity,f.detail,f.page_value,f.job_id,
+                      f.document_id,d.title,d.url,d.district,d.source_site
+               FROM rule_findings f JOIN policy_documents d ON d.id=f.document_id
+               WHERE f.document_id=?""",
+            (document_id,),
+        ).fetchone()
+        conn.execute(
+            """INSERT INTO finding_transitions(job_id,baseline_job_id,document_id,stable_key,rule_code,
+                category,severity,kind,detail,before_value,after_value,source_site,district,title,
+                document_url,recorded_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (later, row["job_id"], document_id, row["stable_key"], row["rule_code"], row["category"],
+             row["severity"], "closed", row["detail"], row["page_value"], "", row["source_site"],
+             row["district"], row["title"], row["url"], "2026-10-20T00:00:00+00:00"),
+        )
+    assert repo.vanished_open_findings(checking, target) == []
+
+
+@pytest.mark.asyncio
 async def test_incremental_requires_a_matching_completed_full_baseline(tmp_path):
     db = Database(tmp_path / "baseline-validation.db")
     db.initialize()
