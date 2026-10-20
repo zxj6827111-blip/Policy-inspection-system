@@ -409,7 +409,7 @@ def _seed_vanished_case(tmp_path, name: str):
     url = "https://www.shpt.gov.cn/zhengwu/gone.html"
     document_id = repo.save_record(
         baseline,
-        PolicyRecord("普陀区", "列表外超期文件", url,
+        PolicyRecord("普陀区", "列表外超期文件", url, source_site=target.label,
                      authored_date=date(2023, 1, 2), published_date=date(2023, 4, 30)),
         [Finding("DATE-001", "日期问题", "high", "confirmed", "成文日期至发布日期超过 20 个工作日")],
     )
@@ -419,13 +419,7 @@ def _seed_vanished_case(tmp_path, name: str):
         baseline, item, detail_status="checked_complete", header_detected=True,
         authored_date=date(2023, 1, 2), published_date=date(2023, 4, 30), document_id=document_id,
     )
-    generation_id = repo.create_generation(checking, target_key=target.key, generation_kind="incremental")
-    repo.upsert_source_inventory(item, baseline)
-    repo.update_inventory_detail(
-        target.key, item.stable_id or f"{target.key}|url:{url}",
-        detail_status="checked_complete", document_id=document_id,
-    )
-    return db, repo, baseline, checking, target, item, document_id, generation_id
+    return db, repo, baseline, checking, target, item, document_id
 
 
 class VanishedCollector:
@@ -446,7 +440,7 @@ class VanishedChecker:
 @pytest.mark.asyncio
 async def test_vanished_document_still_online_is_reverified_not_closed(tmp_path):
     """列表外但页面还能打开的文档：按本轮结果重判，不能被「本轮没扫到」当成已整改。"""
-    db, repo, _baseline, checking, target, _item, document_id, generation_id = _seed_vanished_case(
+    db, repo, _baseline, checking, target, _item, document_id = _seed_vanished_case(
         tmp_path, "vanished-online.db"
     )
     still_bad = PolicyRecord(
@@ -458,7 +452,7 @@ async def test_vanished_document_still_online_is_reverified_not_closed(tmp_path)
     manager = JobManager(db)
 
     await manager._recheck_vanished_documents(
-        checking, db.get_job(checking), target, collector, VanishedChecker(), WorkdayCalendar(), generation_id,
+        checking, db.get_job(checking), target, collector, VanishedChecker(), WorkdayCalendar()
     )
 
     assert collector.opened == [still_bad.url]
@@ -483,7 +477,7 @@ async def test_vanished_document_still_online_is_reverified_not_closed(tmp_path)
 @pytest.mark.asyncio
 async def test_vanished_document_offline_closes_its_open_findings(tmp_path):
     """详情页已经不成壳了才记销号，并把它移出问题库。"""
-    db, repo, _baseline, checking, target, _item, document_id, generation_id = _seed_vanished_case(
+    db, repo, _baseline, checking, target, _item, document_id = _seed_vanished_case(
         tmp_path, "vanished-offline.db"
     )
     collector = VanishedCollector(None)
@@ -491,7 +485,7 @@ async def test_vanished_document_offline_closes_its_open_findings(tmp_path):
     manager = JobManager(db)
 
     await manager._recheck_vanished_documents(
-        checking, db.get_job(checking), target, collector, VanishedChecker(), WorkdayCalendar(), generation_id,
+        checking, db.get_job(checking), target, collector, VanishedChecker(), WorkdayCalendar()
     )
 
     with db.connect() as conn:
@@ -521,15 +515,18 @@ async def test_vanished_document_offline_closes_its_open_findings(tmp_path):
 
 
 def test_vanished_candidates_exclude_docs_already_rechecked_this_job(tmp_path):
-    db, repo, _baseline, checking, target, item, document_id, generation_id = _seed_vanished_case(
+    db, repo, _baseline, checking, target, item, document_id = _seed_vanished_case(
         tmp_path, "vanished-candidates.db"
     )
     url = item.url
-    assert [r["url"] for r in repo.vanished_open_findings(target.key, generation_id)] == [url]
+    assert [r["url"] for r in repo.vanished_open_findings(checking, target)] == [url]
 
-    # 这一轮列表里能翻到它，就不该进复验候选
-    repo.upsert_generation_item(generation_id, checking, item)
-    assert repo.vanished_open_findings(target.key, generation_id) == []
+    # 本轮已经复验过（写了结果行）就不该再当候选
+    repo.record_scan_item(
+        checking, item, detail_status="checked_complete", header_detected=True,
+        authored_date=date(2023, 1, 2), published_date=date(2023, 4, 30), document_id=document_id,
+    )
+    assert repo.vanished_open_findings(checking, target) == []
 
 
 @pytest.mark.asyncio

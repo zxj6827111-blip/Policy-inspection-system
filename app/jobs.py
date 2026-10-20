@@ -593,11 +593,8 @@ class JobManager:
                             ) as checker:
                                 await self._retest_target_exceptions(job_id, target, collector, checker, calendar)
                                 if job["mode"] == "incremental" and job.get("baseline_job_id"):
-                                    vanished_generation = await self._ensure_generation(
-                                        job, kind=job["mode"], target_key=target.key,
-                                    )
                                     await self._recheck_vanished_documents(
-                                        job_id, job, target, collector, checker, calendar, vanished_generation,
+                                        job_id, job, target, collector, checker, calendar,
                                     )
                     finally:
                         for _target, collector in reversed(collectors):
@@ -1630,7 +1627,7 @@ class JobManager:
                 self.db.add_job_event(job_id, "exception_review_required", message, exception["url"])
 
     async def _recheck_vanished_documents(
-        self, job_id, job, target, collector, checker, calendar, generation_id: int,
+        self, job_id, job, target, collector, checker, calendar,
     ) -> None:
         """复验「列表里已经找不到、但库内仍有未关闭问题」的文档。
 
@@ -1638,7 +1635,7 @@ class JobManager:
         也不能销号。这里挨个开一次详情页——还打得开的按本轮结果重判（复用同一套销号），
         已经不成空壳/下线的才记销号，绝不把「本轮没扫到」当成整改。
         """
-        rows = self.repo.vanished_open_findings(target.key, generation_id)
+        rows = self.repo.vanished_open_findings(job_id, target)
         if not rows:
             return
         baseline_job_id = job.get("baseline_job_id")

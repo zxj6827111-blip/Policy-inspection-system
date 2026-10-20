@@ -540,29 +540,26 @@ class Repository:
                 ],
             )
 
-    def vanished_open_findings(
-        self, target_key: str, generation_id: int, limit: int = 400,
-    ) -> list[dict]:
-        """列表里已经没有、但库内仍挂着未关闭问题的文档。
+    def vanished_open_findings(self, job_id: int, target, limit: int = 400) -> list[dict]:
+        """本轮没在列表里出现、但库里仍挂着未关闭问题的文档。
 
-        增量只按当期列表建队列，所以「以前报过、今年列表里不再出现」的文档永远不会被重开，
-        它那条旧问题也就永远没人复验——既不能确认还在，也不能销号。
-        走 source_inventory 的稳定身份比对：generation_items 只有
-        (generation_id, stable_id) 唯一索引，按 url 比会退化成逐行全表扫。
+        增量只按当期列表建队列，这类文档永远不会被重开：既确认不了问题是否还在，
+        也销不掉号。候选只从「未关闭问题」这一小撮行出发，并用 (job_id,target_key,url)
+        索引判断本轮有没有复验过——按 url 全表比对会在两万多条的来源上先把扫描拖慢。
         """
         with self.db.connect() as conn:
             rows = conn.execute(
-                """SELECT i.url, i.title, i.last_document_id AS document_id,
+                """SELECT d.id AS document_id, d.url AS url, d.title AS title,
                           COUNT(DISTINCT f.rule_code) AS open_rules
-                   FROM source_inventory i
-                   JOIN rule_findings f ON f.document_id=i.last_document_id
-                   WHERE i.target_key=? AND i.is_present=1 AND i.last_document_id IS NOT NULL
-                     AND f.is_current=1 AND f.allow_customer_output=1
-                     AND NOT EXISTS (SELECT 1 FROM generation_items g
-                                     WHERE g.generation_id=? AND g.stable_id=i.stable_id)
-                   GROUP BY i.stable_id
-                   ORDER BY open_rules DESC, i.url LIMIT ?""",
-                (target_key, generation_id, limit),
+                   FROM rule_findings f
+                   JOIN policy_documents d ON d.id=f.document_id
+                   WHERE f.is_current=1 AND f.allow_customer_output=1 AND f.job_id<>?
+                     AND d.source_site=?
+                     AND NOT EXISTS (SELECT 1 FROM scan_item_results n
+                                     WHERE n.job_id=? AND n.target_key=? AND n.url=d.url)
+                   GROUP BY d.id
+                   ORDER BY open_rules DESC, d.url LIMIT ?""",
+                (job_id, target.label, job_id, target.key, limit),
             ).fetchall()
         return [dict(row) for row in rows]
 
