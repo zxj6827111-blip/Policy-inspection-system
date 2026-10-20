@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import argparse
+import shutil
 import sys
 from pathlib import Path
 
@@ -31,6 +32,10 @@ def main() -> int:
     parser.add_argument("--dest-dir", default="data/backups", help="备份输出目录（默认 data/backups）")
     parser.add_argument("--prune", action="store_true", help="同时清理过期备份")
     parser.add_argument("--retention-days", type=int, default=30, help="保留天数（默认 30）")
+    parser.add_argument(
+        "--min-free-gib", type=float, default=0.0,
+        help="可用空间低于该值（GiB）时跳过本次备份，默认 0 表示不检查",
+    )
     parser.add_argument("--db", default="", help="源数据库路径（默认 DB_PATH）")
     args = parser.parse_args()
 
@@ -42,6 +47,12 @@ def main() -> int:
     dest_dir = Path(args.dest_dir)
     if not dest_dir.is_absolute():
         dest_dir = ROOT / dest_dir
+
+    if args.min_free_gib > 0:
+        free_gib = shutil.disk_usage(dest_dir if dest_dir.exists() else ROOT).free / 2 ** 30
+        if free_gib < args.min_free_gib:
+            print(f"跳过备份：可用空间 {free_gib:.1f}GiB 低于阈值 {args.min_free_gib:g}GiB")
+            return 0
 
     db = Database(db_path)
     try:
