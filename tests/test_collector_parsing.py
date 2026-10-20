@@ -1315,6 +1315,34 @@ async def test_browser_click_blocks_private_redirect_before_request():
     assert context.routes[1].continued is False
     assert context.routes[1].aborted is True
     assert context.unrouted is True
+    # JS 触发的阅办链接 related.url 是空的，被拦下的地址必须落到 url 字段，
+    # 否则客户看到的是一行没有链接地址的问题。
+    assert result["url"] == "http://127.0.0.1/private", result
+    assert result["final_url"] == "http://127.0.0.1/private", result
+
+
+class FakePortLocator(FakeClickLocator):
+    async def click(self, **_kwargs):
+        route = FakeClickRoute("https://cmone.shcm.gov.cn:8085/epoint-web-zwdt/cmzwdt", "document")
+        self.context.routes.append(route)
+        await self.context.handler(route)
+
+
+@pytest.mark.asyncio
+async def test_nonstandard_port_link_is_blocked_and_still_recorded_with_its_url():
+    """生产实况：4 条 unsafe_destination 的 original_url 是空的，问题表里看不出是哪个链接。"""
+    context = FakeClickContext()
+    collector = BrowserCollector(None, FakePutuoApiSafety())
+    collector.context = context
+    related = RelatedLink(
+        "阅办联动", "", source_area="列表页", link_text="崇明区一件事专窗",
+        source_page_url="https://www.shanghai.gov.cn/zhengce/more?level=district&siteId=all",
+    )
+
+    result = await collector._check_related_click(FakeClickPage(), FakePortLocator(context), related)
+
+    assert result["error_type"] == "unsafe_destination"
+    assert "8085" in result["url"] and result["url"].startswith("https://cmone.shcm.gov.cn")
 
 
 @pytest.mark.asyncio

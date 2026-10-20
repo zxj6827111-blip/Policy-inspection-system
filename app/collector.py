@@ -716,6 +716,7 @@ class BrowserCollector:
         source_url = page.url
         responses = []
         navigation_failure: Exception | None = None
+        blocked_url = ""
         popup_task = None
         download_task = None
         route_registered = False
@@ -725,7 +726,7 @@ class BrowserCollector:
                 responses.append(response)
 
         async def guard_document_navigation(route) -> None:
-            nonlocal navigation_failure
+            nonlocal navigation_failure, blocked_url
             if urlparse(route.request.url).scheme not in {"http", "https"}:
                 await _settle_route(route, "continue_")
                 return
@@ -736,6 +737,9 @@ class BrowserCollector:
                 await self._ensure_click_target_allowed(route.request.url)
             except (UnsafeLinkDestination, SafetyPause) as exc:
                 navigation_failure = exc
+                # 点击式链接的 related.url 常常是空的（前台是 JS 触发），被拦下的真实地址
+                # 只在 route.request.url 里；不落这个字段，问题表就会输出一行没有链接地址的记录。
+                blocked_url = route.request.url
                 await _settle_route(route, "abort", "blockedbyclient")
                 return
             await _settle_route(route, "continue_")
@@ -748,9 +752,13 @@ class BrowserCollector:
             )
             if isinstance(navigation_failure, SafetyPause):
                 raise navigation_failure
-            return self._link_error_result(
+            result = self._link_error_result(
                 related, "unsafe_destination", str(navigation_failure), result="error"
             )
+            if not result.get("url"):
+                result["url"] = blocked_url
+                result["final_url"] = blocked_url
+            return result
 
         self.context.on("response", capture)
         await self.safety.before_request()
