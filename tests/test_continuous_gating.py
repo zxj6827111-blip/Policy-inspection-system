@@ -154,3 +154,75 @@ def test_completed_job_resets_failure_counter(gating_runtime):
     row = manager.repo.get_schedule("municipal_putuo")
     assert int(row["consecutive_failures"]) == 0
     assert datetime.fromisoformat(row["next_incremental_at"]) > datetime.now(timezone.utc) + timedelta(hours=5)
+
+
+@pytest.mark.asyncio
+async def test_tick_takes_one_backup_and_records_it_on_the_job(gating_runtime, monkeypatch):
+    """备份按"要扫描了"触发：一批里只备一次，并写进本轮任务的事件里。"""
+    manager, db = gating_runtime
+    labels = [t.label for t in targets_for_site("municipal_putuo")]
+    baseline_id = db.create_job(labels, "full", {}, 0, None)
+    db.update_job(baseline_id, status="completed", coverage_status="complete")
+    monkeypatch.setattr(manager, "eligible_baseline_for", lambda _labels: {"id": baseline_id})
+
+    async def fake_run(job_id):
+        return None
+
+    monkeypatch.setattr(manager, "_run", fake_run)
+    calls = []
+
+    async def fake_backup():
+        calls.append(1)
+        return "扫描前备份完成：stub.db"
+
+    monkeypatch.setattr(manager, "_backup_before_scan", fake_backup)
+    manager.repo.get_or_create_schedule("municipal_putuo", labels)
+    manager.repo.update_schedule(
+        "municipal_putuo",
+        next_incremental_at=(datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat(),
+    )
+
+    await manager._tick_continuous_schedules()
+    await asyncio.sleep(0)
+
+    assert len(calls) == 1
+    job = [row for row in db.list_jobs() if row["mode"] == "incremental"][0]
+    with db.connect() as conn:
+        events = conn.execute(
+            "SELECT event_type,message FROM job_events WHERE job_id=?", (job["id"],),
+        ).fetchall()
+    assert [(row["event_type"], row["message"]) for row in events] == [
+        ("pre_scan_backup", "扫描前备份完成：stub.db")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_scan_backup_happens_once_per_round(gating_runtime, tmp_path, monkeypatch):
+    import app.config as config_module
+
+    manager, _db = gating_runtime
+    data_dir = tmp_path / "data"
+    monkeypatch.setattr(config_module, "DATA_DIR", data_dir)
+
+    first = await manager._backup_before_scan()
+    second = await manager._backup_before_scan()
+
+    assert "备份完成" in first, first
+    assert "复用" in second, second
+    files = list((data_dir / "backups").glob("policy_inspector_*.db"))
+    assert len(files) == 1, files
+
+
+@pytest.mark.asyncio
+async def test_scan_backup_skips_when_disk_is_low(gating_runtime, tmp_path, monkeypatch):
+    import app.config as config_module
+    import app.jobs as jobs_module
+
+    manager, _db = gating_runtime
+    monkeypatch.setattr(config_module, "DATA_DIR", tmp_path / "data")
+    monkeypatch.setattr(jobs_module, "SCAN_BACKUP_MIN_FREE_GIB", 10 ** 9)
+
+    message = await manager._backup_before_scan()
+
+    assert "跳过扫描前备份" in message, message
+    assert not list((tmp_path / "data" / "backups").glob("policy_inspector_*.db"))

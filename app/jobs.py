@@ -35,6 +35,11 @@ from app.snapshot_scan import (
     refresh_generation_stats,
 )
 
+# 每轮自动扫描前的一次库快照：保留半年、低于水位不备、24 小时内不重复备。
+SCAN_BACKUP_KEEP_DAYS = 183
+SCAN_BACKUP_MIN_FREE_GIB = 8.0
+SCAN_BACKUP_GRACE_HOURS = 24.0
+
 
 class JobManager:
     def _knowledge_for_district(self, district: str):
@@ -1820,6 +1825,44 @@ class JobManager:
             due_at = due_at.replace(tzinfo=timezone.utc)
         return (now - due_at) > timedelta(hours=float(interval_hours))
 
+    async def _backup_before_scan(self) -> str:
+        """起一轮自动扫描之前留一份库快照。
+
+        按"要扫描了"触发，不是按日历；同一轮（24 小时内）只留一份，
+        备份失败不阻断扫描，结果写进本轮任务的 pre_scan_backup 事件里。
+        """
+        import shutil
+
+        from app.backup import backup_database, prune_old_backups
+        from app.config import DATA_DIR
+
+        backup_dir = DATA_DIR / "backups"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        newest = max(
+            backup_dir.glob("policy_inspector_*.db"),
+            key=lambda path: path.stat().st_mtime,
+            default=None,
+        )
+        if newest is not None:
+            age_hours = (datetime.now(timezone.utc).timestamp() - newest.stat().st_mtime) / 3600
+            if age_hours < SCAN_BACKUP_GRACE_HOURS:
+                return f"本轮已有扫描前备份，复用 {newest.name}"
+        free_gib = shutil.disk_usage(backup_dir).free / 2 ** 30
+        if free_gib < SCAN_BACKUP_MIN_FREE_GIB:
+            return f"跳过扫描前备份：可用空间 {free_gib:.1f}G 低于 {SCAN_BACKUP_MIN_FREE_GIB:g}G"
+        try:
+            path = await asyncio.to_thread(backup_database, self.db, backup_dir, "pre-scan")
+        except Exception as exc:  # 备份只是保险，不能因为它挡住扫描
+            return f"扫描前备份失败：{type(exc).__name__}: {exc}"
+        try:
+            pruned = await asyncio.to_thread(prune_old_backups, backup_dir, SCAN_BACKUP_KEEP_DAYS)
+        except Exception:
+            pruned = []
+        note = f"扫描前备份完成：{path.name}（{path.stat().st_size / 2 ** 20:.0f}MiB）"
+        if pruned:
+            note += f"，清理过期 {len(pruned)} 个文件"
+        return note
+
     def ensure_continuous_scheduler(self) -> None:
         if not self.continuous_config.enabled:
             return
@@ -1841,6 +1884,7 @@ class JobManager:
         if not cfg.enabled:
             return
         now = datetime.now(timezone.utc)
+        backed_up = False
         from app.config import targets_for_site
         for site_key, _site in SCAN_SITES.items():
             if cfg.site_keys and site_key not in cfg.site_keys:
@@ -1884,6 +1928,9 @@ class JobManager:
                 due_full = False
                 if not due_incremental:
                     continue
+            if not backed_up:
+                backup_message = await self._backup_before_scan()
+                backed_up = True
             if due_full:
                 job_id = self.db.create_job(
                     labels, "full", self._safety_payload(labels), 0, int(baseline["id"]),
@@ -1897,6 +1944,7 @@ class JobManager:
                 self.db.update_job(job_id, scan_phase=ScanPhase.INCREMENTAL_DISCOVERY)
                 status = "running_incremental"
             self.repo.update_schedule(site_key, last_job_id=job_id, last_status=status)
+            self.db.add_job_event(job_id, "pre_scan_backup", backup_message)
             self._tasks[job_id] = asyncio.create_task(self._run(job_id))
     def continuous_status(self) -> dict:
         """任务中心数据：只读，不创建调度行；未建基准的站点标记为不自动执行。"""
