@@ -463,9 +463,12 @@ class Repository:
         return dict(row) if row else None
 
     def scan_item_count(self, job_id: int) -> int:
+        # 列表外复验行用 page_number=0/item_index<0 作哨兵，不属于列表项，
+        # 不能拿来和 generation 的列表条目数做覆盖校验。
         with self.db.connect() as conn:
             return int(conn.execute(
-                "SELECT COUNT(*) FROM scan_item_results WHERE job_id=?", (job_id,)
+                "SELECT COUNT(*) FROM scan_item_results WHERE job_id=?"
+                " AND NOT (page_number=0 AND item_index<0)", (job_id,)
             ).fetchone()[0])
 
     def copy_baseline_findings(self, baseline_job_id: int, job_id: int, document_id: int) -> list[Finding]:
@@ -551,6 +554,8 @@ class Repository:
         with self.db.connect() as conn:
             rows = conn.execute(
                 f"""SELECT d.id AS document_id, d.url AS url, d.title AS title,
+                          (SELECT i.stable_id FROM source_inventory i
+                           WHERE i.target_key=? AND i.url=d.url LIMIT 1) AS stable_id,
                           COUNT(DISTINCT f.rule_code) AS open_rules
                    FROM rule_findings f
                    JOIN policy_documents d ON d.id=f.document_id
@@ -560,7 +565,7 @@ class Repository:
                                      WHERE n.job_id=? AND n.target_key=? AND n.url=d.url)
                    GROUP BY d.id
                    ORDER BY open_rules DESC, d.url LIMIT ?""",
-                (job_id, target.label, job_id, target.key, limit),
+                (target.key, job_id, target.label, job_id, target.key, limit),
             ).fetchall()
         return [dict(row) for row in rows]
 

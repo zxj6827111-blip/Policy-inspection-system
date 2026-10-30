@@ -406,6 +406,8 @@ def _site_status(site_key: str, jobs: list[dict] | None = None) -> dict:
     plan = manager.automatic_plan(labels, jobs)
     latest = plan["job"]
     baseline = plan["baseline"]
+    active = manager.active_job_for(labels, jobs)
+    last_completed = manager.last_completed_for(labels, jobs)
     return {
         "key": site.key,
         "label": site.label,
@@ -421,6 +423,10 @@ def _site_status(site_key: str, jobs: list[dict] | None = None) -> dict:
         "next_mode": plan["mode"],
         "baseline_job_id": int(baseline["id"]) if baseline else None,
         "latest_job": latest,
+        "active_job": active,
+        "last_completed_at": last_completed["finished_at"] if last_completed else None,
+        "last_completed_job_id": int(last_completed["id"]) if last_completed else None,
+        "last_completed_mode": last_completed["mode"] if last_completed else None,
     }
 
 
