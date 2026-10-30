@@ -138,9 +138,15 @@ class JobManager:
         return [job for job in source if self._job_sources(job) == signature]
 
     def active_job_for(self, districts: list[str], jobs: list[dict] | None = None) -> dict | None:
+        matching = self._matching_jobs(districts, jobs)
+        running = next((
+            job for job in matching
+            if job["status"] in {JobStatus.RUNNING, JobStatus.COOLING}
+        ), None)
+        if running is not None:
+            return running
         return next((
-            job for job in self._matching_jobs(districts, jobs)
-            if job["status"] in {JobStatus.PENDING, JobStatus.RUNNING, JobStatus.COOLING}
+            job for job in matching if job["status"] == JobStatus.PENDING
         ), None)
 
     def last_completed_for(self, districts: list[str], jobs: list[dict] | None = None) -> dict | None:
@@ -1941,6 +1947,10 @@ class JobManager:
             if not backed_up:
                 backup_message = await self._backup_before_scan()
                 backed_up = True
+            # 备份可能要几十秒；这期间被中断的任务可能已经恢复成 running/pending。
+            # 创建前必须再查一次，否则会排出一个同站点的重复任务。
+            if self.active_job_for(labels):
+                continue
             if due_full:
                 job_id = self.db.create_job(
                     labels, "full", self._safety_payload(labels), 0, int(baseline["id"]),
