@@ -156,6 +156,56 @@ def test_completed_job_resets_failure_counter(gating_runtime):
     assert datetime.fromisoformat(row["next_incremental_at"]) > datetime.now(timezone.utc) + timedelta(hours=5)
 
 
+def test_active_job_prefers_running_over_newer_pending(gating_runtime):
+    """排队等锁的 pending 任务不能盖住真正在跑的 running 任务。"""
+    manager, db = gating_runtime
+    labels = [t.label for t in targets_for_site("municipal_putuo")]
+    running_id = db.create_job(labels, "incremental", {}, 0, None)
+    db.update_job(running_id, status="running")
+    db.create_job(labels, "incremental", {}, 0, None)
+
+    active = manager.active_job_for(labels)
+
+    assert int(active["id"]) == running_id
+    assert active["status"] == "running"
+
+
+@pytest.mark.asyncio
+async def test_tick_skips_when_job_becomes_active_during_backup(gating_runtime, monkeypatch):
+    """备份耗时期间任务可能被自动恢复；创建前必须再查一次，不能排重复任务。"""
+    manager, db = gating_runtime
+    labels = [t.label for t in targets_for_site("municipal_putuo")]
+    baseline_id = db.create_job(labels, "full", {}, 0, None)
+    db.update_job(baseline_id, status="completed", coverage_status="complete")
+    monkeypatch.setattr(manager, "eligible_baseline_for", lambda _labels: {"id": baseline_id})
+
+    async def fake_run(job_id):
+        return None
+
+    monkeypatch.setattr(manager, "_run", fake_run)
+    resumed = {}
+
+    async def fake_backup():
+        job_id = db.create_job(labels, "incremental", {}, 0, baseline_id)
+        db.update_job(job_id, status="running")
+        resumed["id"] = job_id
+        return "扫描前备份完成：stub.db"
+
+    monkeypatch.setattr(manager, "_backup_before_scan", fake_backup)
+    manager.repo.get_or_create_schedule("municipal_putuo", labels)
+    manager.repo.update_schedule(
+        "municipal_putuo",
+        next_incremental_at=(datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat(),
+        next_full_reconcile_at=None,
+    )
+
+    await manager._tick_continuous_schedules()
+    await asyncio.sleep(0)
+
+    incremental = [job for job in db.list_jobs() if job["mode"] == "incremental"]
+    assert [int(job["id"]) for job in incremental] == [resumed["id"]]
+
+
 @pytest.mark.asyncio
 async def test_tick_takes_one_backup_and_records_it_on_the_job(gating_runtime, monkeypatch):
     """备份按"要扫描了"触发：一批里只备一次，并写进本轮任务的事件里。"""
