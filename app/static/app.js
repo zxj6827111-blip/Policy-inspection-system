@@ -12,7 +12,40 @@ function validatedUrl(value) {
 }
 function safeUrl(value) { return escapeHtml(validatedUrl(value)); }
 function fmtNum(value) { return Number(value ?? 0).toLocaleString('zh-CN'); }
-function fmtTime(value) { return value ? new Date(value).toLocaleString('zh-CN', {hour12: false}) : '-'; }
+// 一律按北京时间显示，避免浏览器时区（例如本机 PDT）把时间整体挪 15 小时。
+const BJ_TIME = new Intl.DateTimeFormat('zh-CN', {
+  timeZone: 'Asia/Shanghai', hour12: false,
+  year: 'numeric', month: '2-digit', day: '2-digit',
+  hour: '2-digit', minute: '2-digit', second: '2-digit',
+});
+const BJ_SHORT = new Intl.DateTimeFormat('zh-CN', {
+  timeZone: 'Asia/Shanghai', hour12: false,
+  month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
+});
+function fmtTime(value) {
+  if (!value) return '-';
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? '-' : BJ_TIME.format(parsed);
+}
+function fmtShortTime(value) {
+  if (!value) return '-';
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? '-' : BJ_SHORT.format(parsed);
+}
+function elapsedText(value) {
+  if (!value) return '-';
+  const seconds = Math.max(0, Math.floor((Date.now() - new Date(value).getTime()) / 1000));
+  if (seconds >= 86400) return `${Math.floor(seconds / 86400)} 天 ${Math.floor(seconds % 86400 / 3600)} 小时`;
+  if (seconds >= 3600) return `${Math.floor(seconds / 3600)} 小时 ${Math.floor(seconds % 3600 / 60)} 分`;
+  return `${Math.max(1, Math.floor(seconds / 60))} 分钟`;
+}
+function jobTimeCell(job) {
+  const active = ['pending', 'running', 'cooling'].includes(job.status);
+  let tail = '尚未完成';
+  if (job.finished_at) tail = `完成 ${fmtTime(job.finished_at)}`;
+  else if (active) tail = job.started_at ? `进行中 · 已 ${elapsedText(job.started_at)}` : '等待启动';
+  return `<span>${escapeHtml(fmtTime(job.started_at || job.created_at))}</span><small class="time-sub">${escapeHtml(tail)}</small>`;
+}
 function uniqueEvidenceTerms(values) {
   return [...new Set(values.map(value => String(value || '').trim()).filter(value => value.length >= 2))]
     .sort((left, right) => right.length - left.length);
@@ -33,8 +66,8 @@ function cooldownText(value) {
   if (!value) return '-';
   const target = new Date(value);
   const seconds = Math.max(0, Math.ceil((target.getTime() - Date.now()) / 1000));
-  if (seconds === 0) return `冷却已结束（${target.toLocaleString('zh-CN', {hour12:false})}）`;
-  return `剩余 ${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒（至 ${target.toLocaleString('zh-CN', {hour12:false})}）`;
+  if (seconds === 0) return `冷却已结束（${fmtTime(value)}）`;
+  return `剩余 ${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒（至 ${fmtTime(value)}）`;
 }
 function toast(message) {
   const box = $('#toast'); box.textContent = message; box.style.display = 'block';
@@ -205,20 +238,21 @@ function jobsForSite(site) {
 
 // ---------- 站点状态推导 ----------
 function siteState(site) {
-  const job = site.latest_job;
-  if (site.next_action === 'existing' && job) {
+  const job = site.active_job || site.latest_job;
+  const lastScan = site.last_completed_at ? ` · 上次 ${fmtShortTime(site.last_completed_at)}` : '';
+  if (site.active_job) {
     const running = `${fmtNum(job.examined_count)}/${job.estimated_total ? fmtNum(job.estimated_total) : '?'}`;
-    if (job.status === 'cooling') return {code:'active', dot:'s-run', pill:['pill-run','❄ 安全冷却中'], sub:`#${job.id} 冷却中 · ${running}`};
-    return {code:'active', dot:'s-run', pill:['pill-run','▶ 扫描中'], sub:`#${job.id} ${statusNames[job.status] || job.status} · ${running}`};
+    if (job.status === 'cooling') return {code:'active', dot:'s-run', pill:['pill-run','❄ 安全冷却中'], sub:`#${job.id} 冷却中 · ${running}${lastScan}`};
+    return {code:'active', dot:'s-run', pill:['pill-run','▶ 扫描中'], sub:`#${job.id} ${statusNames[job.status] || job.status} · ${running}${lastScan}`};
   }
   if (site.next_action === 'resume' && job) {
-    return {code:'attention', dot:'s-warn', pill:['pill-warn','⚠ 需要处理'], sub:`⚠ #${job.id} ${statusNames[job.status] || job.status} · 可恢复`};
+    return {code:'attention', dot:'s-warn', pill:['pill-warn','⚠ 需要处理'], sub:`⚠ #${job.id} ${statusNames[job.status] || job.status} · 可恢复${lastScan}`};
   }
   if (site.next_mode === 'incremental') {
-    return {code:'ready', dot:'s-ok', pill:['pill-ok','✓ 已建基准'], sub:`✓ 基线 #${site.baseline_job_id} · 增量就绪`};
+    return {code:'ready', dot:'s-ok', pill:['pill-ok','✓ 已建基准'], sub:`✓ 基线 #${site.baseline_job_id} · 增量就绪${lastScan}`};
   }
   if (job && job.mode === 'full' && job.status === 'completed') {
-    return {code:'invalid', dot:'s-warn', pill:['pill-warn','⚠ 记录不完整'], sub:'⚠ 记录不完整 · 需重新全量'};
+    return {code:'invalid', dot:'s-warn', pill:['pill-warn','⚠ 记录不完整'], sub:`⚠ 记录不完整 · 需重新全量${lastScan}`};
   }
   return {code:'fresh', dot:'s-none', pill:['pill-neutral','○ 尚未扫描'], sub:'未建基准 · 待首次全量'};
 }
@@ -331,7 +365,7 @@ async function navigate(key, apiPath) {
 async function renderOverviewDashboard() {
   const stats = $('#ov-stats');
   const recent = $('#ov-recent-jobs');
-  const recentJobsExpanded = recent?.querySelector('.recent-jobs-panel')?.open ?? false;
+  const recentJobsExpanded = recent?.querySelector('.recent-jobs-panel')?.open ?? true;
   if (!stats) return;
   stats.innerHTML = '<p class="muted-note panel-pad">加载仪表盘…</p>';
   if (recent) recent.innerHTML = '';
@@ -361,7 +395,7 @@ async function renderOverviewDashboard() {
   const recentJobs = (data.jobs || []).slice(0, 10);
   if (!recent) return;
   const recentBody = recentJobs.length ? `<div class="table-wrap"><table class="mini">
-      <thead><tr><th>任务</th><th>模式</th><th>状态</th><th>进度</th><th title="客户正式问题数 formal_finding_count">正式问题</th><th title="线索合计 finding_total_count / finding_count">线索</th><th>创建时间</th><th>结果</th></tr></thead>
+      <thead><tr><th>任务</th><th>模式</th><th>状态</th><th>进度</th><th title="客户正式问题数 formal_finding_count">正式问题</th><th title="线索合计 finding_total_count / finding_count">线索</th><th>开始 / 完成</th><th>结果</th></tr></thead>
       <tbody>${recentJobs.map(job => `<tr>
         <td class="num"><b>#${job.id}</b></td>
         <td>${job.mode === 'full' ? '全量' : '增量'}</td>
@@ -369,7 +403,7 @@ async function renderOverviewDashboard() {
         <td class="num">${fmtNum(job.examined_count)}/${job.estimated_total ? fmtNum(job.estimated_total) : '?'}</td>
         <td class="num" title="客户正式问题 formal_finding_count">${fmtNum(job.formal_finding_count != null ? job.formal_finding_count : 0)}</td>
         <td class="num" title="线索合计 finding_total_count">${fmtNum(job.finding_total_count != null ? job.finding_total_count : job.finding_count)}</td>
-        <td class="num">${fmtTime(job.created_at)}</td>
+        <td class="num">${jobTimeCell(job)}</td>
         <td><a class="btn btn-sm job-export" href="/api/jobs/${job.id}/export">Excel</a></td>
       </tr>`).join('')}</tbody>
     </table></div>` : '<div class="panel-pad"><p class="muted-note">暂无最近任务</p></div>';
@@ -587,7 +621,7 @@ function renderScanJobRows(rows) {
       <td><span class="pill ${jobStatusClass(job.status)}">${escapeHtml(statusNames[job.status] || job.status)}</span></td>
       <td><div class="job-progress"><span><i style="width:${percent}%"></i></span><b>${fmtNum(examined)} / ${total ? fmtNum(total) : '?'}</b></div></td>
       <td><strong class="metric-danger">${fmtNum(job.formal_finding_count || 0)}</strong><small>线索 ${fmtNum(job.finding_total_count ?? job.finding_count)}</small></td>
-      <td><span>${escapeHtml(fmtTime(job.created_at))}</span><small>${job.finished_at ? `完成 ${escapeHtml(fmtTime(job.finished_at))}` : '尚未完成'}</small></td>
+      <td>${jobTimeCell(job)}</td>
       <td><div class="row-actions"><button type="button" class="icon-action scan-job-open" data-id="${job.id}" title="打开任务" aria-label="打开任务">→</button><a class="icon-action job-export" href="/api/jobs/${job.id}/export" title="下载 Excel" aria-label="下载 Excel">↓</a>${deleteAction}</div></td>
     </tr>`;
   }).join('');
@@ -661,7 +695,7 @@ async function renderScanJobsView() {
       <button type="button" data-filter="all">全部 <b>${counts.all}</b></button><button type="button" data-filter="active">执行中 <b>${counts.active}</b></button>
       <button type="button" data-filter="completed">已完成 <b>${counts.completed}</b></button><button type="button" data-filter="attention">需关注 <b>${counts.attention}</b></button>
     </div><span class="toolbar-note">最近 ${data.length} 条任务</span></div>
-    <div class="table-wrap"><table class="mini business-table"><thead><tr><th>任务</th><th>扫描范围</th><th>模式</th><th>状态</th><th>覆盖进度</th><th>问题</th><th>时间</th><th>操作</th></tr></thead><tbody id="scan-job-rows"></tbody></table></div></div>`;
+    <div class="table-wrap"><table class="mini business-table"><thead><tr><th>任务</th><th>扫描范围</th><th>模式</th><th>状态</th><th>覆盖进度</th><th>问题</th><th>开始 / 完成</th><th>操作</th></tr></thead><tbody id="scan-job-rows"></tbody></table></div></div>`;
     document.querySelectorAll('.segmented [data-filter]').forEach(button => {
       button.classList.toggle('active', button.dataset.filter === scanJobFilter);
       button.addEventListener('click', () => {
@@ -784,7 +818,54 @@ const OV_METER = [
 const OV_PILL = {attention: 'pill-warn', active: 'pill-run', ready: 'pill-ok', fresh: 'pill-neutral'};
 const OV_MARK = {attention: '⚠', active: '▶', ready: '✓', fresh: '○'};
 
+function renderFreshness() {
+  const el = $('#ov-freshness');
+  if (!el) return;
+  const parts = [];
+  const names = siteDisplayNames(sites);
+  const siteName = site => `${names[site.key] || site.district} · ${siteLevelLabel(site)}`;
+  const completed = sites
+    .filter(site => site.last_completed_at)
+    .sort((left, right) => new Date(right.last_completed_at) - new Date(left.last_completed_at));
+  if (completed.length) {
+    const site = completed[0];
+    const mode = site.last_completed_mode === 'full' ? '全量' : '增量';
+    parts.push(`<span class="ov-chip">最近完成 <b class="num">${escapeHtml(fmtTime(site.last_completed_at))}</b> · ${escapeHtml(siteName(site))} #${site.last_completed_job_id}（${mode}）</span>`);
+  } else {
+    parts.push('<span class="ov-chip">还没有完成过扫描</span>');
+  }
+
+  const active = sites.filter(site => site.active_job);
+  if (active.length) {
+    const site = active[0];
+    const job = site.active_job;
+    const percent = Number(job.estimated_total) ? Math.round(Number(job.examined_count) / Number(job.estimated_total) * 100) : null;
+    const others = active.length > 1 ? `，另有 ${active.length - 1} 个站点` : '';
+    parts.push(`<span class="ov-chip">▶ 正在扫描 ${escapeHtml(siteName(site))} #${job.id}${percent == null ? '' : ` ${percent}%`} · 已 ${escapeHtml(elapsedText(job.started_at))}${others}</span>`);
+  } else {
+    parts.push('<span class="ov-chip">当前没有扫描任务</span>');
+  }
+
+  if (schedules && schedules.enabled) {
+    const scheduled = (schedules.sites || [])
+      .filter(entry => entry.has_baseline && entry.opted_in && entry.enabled)
+      .flatMap(entry => [entry.next_incremental_at, entry.next_full_reconcile_at])
+      .filter(Boolean)
+      .map(value => ({value, at: new Date(value).getTime()}));
+    const upcoming = scheduled.filter(item => item.at > Date.now()).sort((left, right) => left.at - right.at);
+    if (upcoming.length) {
+      parts.push(`<span class="ov-chip">下次自动扫描 <b class="num">${escapeHtml(fmtTime(upcoming[0].value))}</b></span>`);
+    } else {
+      parts.push(`<span class="ov-chip">${scheduled.length ? '自动调度已开启，有任务已到期未启动' : '自动调度已开启，暂无到期任务'}</span>`);
+    }
+  } else {
+    parts.push('<span class="ov-chip">自动调度未开启</span>');
+  }
+  el.innerHTML = parts.join('');
+}
+
 function renderOverview() {
+  renderFreshness();
   const counts = {attention: 0, active: 0, ready: 0, fresh: 0};
   const names = siteDisplayNames(sites);
   const actions = {
@@ -860,7 +941,7 @@ function renderLegacyJobs() {
       <td><span class="pill ${job.status === 'completed' ? 'pill-ok' : 'pill-neutral'}">${statusNames[job.status] || job.status}</span></td>
       <td class="num">${fmtNum(job.examined_count)}/${job.estimated_total ? fmtNum(job.estimated_total) : '?'}</td>
       <td class="num" title="客户正式问题 formal_finding_count">${fmtNum(job.formal_finding_count != null ? job.formal_finding_count : 0)}</td><td class="num" title="线索合计 finding_total_count">${fmtNum(job.finding_total_count != null ? job.finding_total_count : job.finding_count)}</td>
-      <td class="num">${fmtTime(job.created_at)}</td>
+      <td class="num">${jobTimeCell(job)}</td>
       <td><a class="btn btn-sm job-export" href="/api/jobs/${job.id}/export">Excel</a></td>
     </tr>`).join('');
 }
@@ -886,7 +967,7 @@ function displayJobFor(site) {
     const found = jobs.find(job => job.id === overrideJobId);
     if (found) return found;
   }
-  return site.latest_job || null;
+  return site.active_job || site.latest_job || null;
 }
 
 function heroConfig(site, state, job) {
@@ -920,7 +1001,7 @@ function heroConfig(site, state, job) {
   if (state.code === 'ready') {
     return {
       title: '一切正常，无需操作',
-      desc: `已建立基准数据库（基线 #${site.baseline_job_id}）。如需立即检查，可手动执行一次增量扫描，仅核验新增与变化条目。`,
+      desc: `已建立基准数据库（基线 #${site.baseline_job_id}）。${site.last_completed_at ? `上次扫描完成于 ${fmtTime(site.last_completed_at)}（#${site.last_completed_job_id}）。` : ''}如需立即检查，可手动执行一次增量扫描，仅核验新增与变化条目。`,
       buttons: [{label: '立即增量扫描', action: 'start'}],
       more: [
         ...(job ? [{label: '下载最近结果 Excel', href: `/api/jobs/${job.id}/export`}] : []),
@@ -1062,6 +1143,7 @@ function renderRail(site, state, job) {
     info.push(`<dt>覆盖栏目</dt><dd class="chips">${site.target_labels.map(label => `<span>${escapeHtml(label.split('·').pop())}</span>`).join('')}</dd>`);
   }
   if (site.baseline_job_id) info.push(`<dt>基准</dt><dd>基线 #${site.baseline_job_id}</dd>`);
+  if (site.last_completed_at) info.push(`<dt>上次扫描</dt><dd>${escapeHtml(fmtTime(site.last_completed_at))} 完成 · #${site.last_completed_job_id}</dd>`);
   info.push(`<dt>并行</dt><dd>${escapeHtml(siteParallelHint(site))}</dd>`);
   $('#rail-info').innerHTML = info.join('');
 
@@ -1104,7 +1186,7 @@ function renderSiteHistory(site) {
       <td><span class="pill ${pillClass}">${statusNames[job.status] || job.status}${isBaseline ? ' · 现行基准' : ''}</span>${incomplete ? ' <em class="history-warning">记录不完整</em>' : ''}</td>
       <td><span class="mini-progress"><span style="width:${percent}%"></span></span><span class="num">${fmtNum(examined)}/${total ? fmtNum(total) : '?'}</span></td>
       <td class="num" title="客户正式问题 formal_finding_count">${fmtNum(job.formal_finding_count != null ? job.formal_finding_count : 0)}</td><td class="num" title="线索合计 finding_total_count">${fmtNum(job.finding_total_count != null ? job.finding_total_count : job.finding_count)}</td>
-      <td class="num">${fmtTime(job.created_at)}</td>
+      <td class="num">${jobTimeCell(job)}</td>
       <td><a class="btn btn-sm job-export" href="/api/jobs/${job.id}/export">Excel</a></td>
     </tr>`;
   }).join('');

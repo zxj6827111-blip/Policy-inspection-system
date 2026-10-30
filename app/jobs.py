@@ -137,11 +137,18 @@ class JobManager:
         source = jobs if jobs is not None else self.db.list_jobs(1000)
         return [job for job in source if self._job_sources(job) == signature]
 
-    def _active_job_for(self, districts: list[str]) -> dict | None:
+    def active_job_for(self, districts: list[str], jobs: list[dict] | None = None) -> dict | None:
         return next((
-            job for job in self._matching_jobs(districts)
+            job for job in self._matching_jobs(districts, jobs)
             if job["status"] in {JobStatus.PENDING, JobStatus.RUNNING, JobStatus.COOLING}
         ), None)
+
+    def last_completed_for(self, districts: list[str], jobs: list[dict] | None = None) -> dict | None:
+        completed = [
+            job for job in self._matching_jobs(districts, jobs)
+            if job["status"] == JobStatus.COMPLETED and job.get("finished_at")
+        ]
+        return max(completed, key=lambda job: str(job["finished_at"])) if completed else None
 
     def eligible_baseline_for(self, districts: list[str], jobs: list[dict] | None = None) -> dict | None:
         candidates = jobs if jobs is not None else self.db.eligible_baselines()
@@ -225,7 +232,7 @@ class JobManager:
         """为选定站点创建新的完整全量任务，不复用或恢复历史任务。"""
         async with self._guard:
             for districts in source_groups:
-                active = self._active_job_for(districts)
+                active = self.active_job_for(districts)
                 if active:
                     raise ValueError(
                         f"{'、'.join(districts)}已有活动任务 #{active['id']}，"
@@ -316,7 +323,7 @@ class JobManager:
             if not job or job["status"] not in {JobStatus.PAUSED, JobStatus.PARTIAL, JobStatus.COOLING, JobStatus.FAILED}:
                 raise ValueError("该任务当前不能恢复")
             self._assert_putuo_query_contract(job, action="恢复")
-            active = self._active_job_for(self._job_sources(job))
+            active = self.active_job_for(self._job_sources(job))
             if active and int(active["id"]) != job_id:
                 raise ValueError(f"同站点已有活动任务 #{active['id']}，不能同时恢复旧任务")
             self._resume_locked(job, automatic=automatic)
@@ -1654,6 +1661,9 @@ class JobManager:
                 district=target.district, page_number=0, item_index=-1,
                 title=row["title"] or "", url=row["url"],
                 source_site=target.label, source_key=target.key, source_channel_id=target.channel_id,
+                # 稳定身份让同一 URL 幂等更新；没有库存行时用文档号占位，
+                # 避免同一来源多篇列表外文档共用 (0,-1) 位置键互相覆盖。
+                stable_id=row.get("stable_id") or f"offlist:{row['document_id']}",
             )
             try:
                 inspection = self._coerce_inspection(await collector.open_detail_url(
@@ -1899,7 +1909,7 @@ class JobManager:
                 incremental_hours=cfg.incremental_interval_hours,
                 reconcile_days=cfg.full_reconcile_interval_days,
             )
-            if not schedule.get("enabled") or self._active_job_for(labels):
+            if not schedule.get("enabled") or self.active_job_for(labels):
                 continue
             due_full = schedule.get("next_full_reconcile_at") and datetime.fromisoformat(
                 schedule["next_full_reconcile_at"]

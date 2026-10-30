@@ -474,6 +474,86 @@ async def test_vanished_document_still_online_is_reverified_not_closed(tmp_path)
     assert ledger == 1
 
 
+class MultiVanishedCollector:
+    async def open_detail_url(self, _district, url, _title):
+        return DetailInspection(
+            record=PolicyRecord(
+                "普陀区", "列表外超期文件", url,
+                authored_date=date(2023, 1, 2), published_date=date(2023, 4, 30),
+            ),
+            header_detected=True,
+        )
+
+
+def test_vanished_candidates_carry_inventory_stable_id(tmp_path):
+    db, repo, _baseline, checking, target, first_item, _document_id = _seed_vanished_case(
+        tmp_path, "vanished-stable-id.db"
+    )
+    assert repo.vanished_open_findings(checking, target)[0]["stable_id"] is None
+
+    repo.upsert_source_inventory(
+        PolicyListItem(
+            "普陀区", 3, 0, first_item.title, first_item.url, first_item.published_date,
+            source_site=target.label, source_key=target.key,
+            stable_id=f"{target.key}|id:999",
+        ),
+        generation_id=0,
+    )
+
+    assert repo.vanished_open_findings(checking, target)[0]["stable_id"] == f"{target.key}|id:999"
+
+
+@pytest.mark.asyncio
+async def test_multiple_vanished_documents_keep_separate_audit_rows(tmp_path):
+    """同一来源多篇列表外文档必须各有审计行，不能共用 (0,-1) 互相覆盖。"""
+    db, repo, baseline, checking, target, first_item, document_id = _seed_vanished_case(
+        tmp_path, "vanished-multiple.db"
+    )
+    second_url = "https://www.shpt.gov.cn/zhengwu/gone-2.html"
+    repo.save_record(
+        baseline,
+        PolicyRecord("普陀区", "列表外超期文件二", second_url, source_site=target.label,
+                     authored_date=date(2023, 1, 2), published_date=date(2023, 4, 30)),
+        [Finding("DATE-001", "日期问题", "high", "confirmed", "成文日期至发布日期超过 20 个工作日")],
+    )
+    db.update_job(checking, status="running")
+    manager = JobManager(db)
+
+    await manager._recheck_vanished_documents(
+        checking, db.get_job(checking), target, MultiVanishedCollector(), VanishedChecker(), WorkdayCalendar()
+    )
+
+    with db.connect() as conn:
+        rows = conn.execute(
+            "SELECT id,url,page_number,item_index FROM scan_item_results"
+            " WHERE job_id=? AND page_number=0 ORDER BY item_index",
+            (checking,),
+        ).fetchall()
+    by_url = {row["url"]: (row["id"], row["item_index"]) for row in rows}
+    assert set(by_url) == {first_item.url, second_url}, rows
+    assert len({value[1] for value in by_url.values()}) == 2
+    assert all(value[1] < 0 for value in by_url.values())
+    assert repo.scan_item_count(checking) == 0
+
+    # 同一 URL 再记一次必须原地更新，不能多出一行。
+    repo.record_scan_item(
+        checking,
+        PolicyListItem(
+            "普陀区", 0, -1, first_item.title, first_item.url,
+            source_site=target.label, source_key=target.key,
+            stable_id=f"offlist:{document_id}",
+        ),
+        detail_status="checked_complete",
+        reason="列表外文档复验：文档仍可访问，按本轮结果重判",
+    )
+    with db.connect() as conn:
+        again = conn.execute(
+            "SELECT id,url,item_index FROM scan_item_results WHERE job_id=? AND page_number=0",
+            (checking,),
+        ).fetchall()
+    assert {row["url"]: (row["id"], row["item_index"]) for row in again} == by_url
+
+
 @pytest.mark.asyncio
 async def test_vanished_document_offline_closes_its_open_findings(tmp_path):
     """详情页已经不成壳了才记销号，并把它移出问题库。"""

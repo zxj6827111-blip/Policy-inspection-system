@@ -176,6 +176,7 @@
           </span>
         </div>
         <p class="site-sub">全局仪表盘 · 最近任务 · 站点扫描入口</p>
+        <div class="ov-chips" id="ov-freshness" data-freshness></div>
         <div id="ov-stats" class="ov-stats"><p class="muted-note panel-pad">登录后加载仪表盘…</p></div>
         <div id="ov-recent-jobs"></div>
 
@@ -200,7 +201,7 @@
           <div class="card" id="legacy-card" hidden style="overflow:hidden; margin-top:16px">
             <div class="panel-head"><h3>其他历史任务</h3><span class="muted-note">与当前站点配置不完全对应的早期任务</span></div>
             <div class="table-wrap"><table class="mini" id="legacy-table">
-              <thead><tr><th>任务</th><th>来源</th><th>模式</th><th>状态</th><th>进度</th><th title="客户正式问题数 formal_finding_count">正式问题</th><th title="线索合计 finding_total_count / finding_count">线索</th><th>创建时间</th><th>结果</th></tr></thead>
+              <thead><tr><th>任务</th><th>来源</th><th>模式</th><th>状态</th><th>进度</th><th title="客户正式问题数 formal_finding_count">正式问题</th><th title="线索合计 finding_total_count / finding_count">线索</th><th>开始 / 完成</th><th>结果</th></tr></thead>
               <tbody id="legacy-body"></tbody>
             </table></div>
           </div>
@@ -308,7 +309,7 @@
             <div class="card" style="overflow:hidden">
               <div class="panel-head"><h3>本站点历史任务</h3></div>
               <div class="table-wrap"><table class="mini">
-                <thead><tr><th>任务</th><th>模式</th><th>状态</th><th>进度</th><th title="客户正式问题数 formal_finding_count">正式问题</th><th title="线索合计 finding_total_count / finding_count">线索</th><th>创建时间</th><th>结果</th></tr></thead>
+                <thead><tr><th>任务</th><th>模式</th><th>状态</th><th>进度</th><th title="客户正式问题数 formal_finding_count">正式问题</th><th title="线索合计 finding_total_count / finding_count">线索</th><th>开始 / 完成</th><th>结果</th></tr></thead>
                 <tbody id="site-history-body"></tbody>
               </table></div>
               <p class="muted-note panel-pad" id="site-history-empty" hidden>暂无记录。完成首次全量后，这里会显示每次扫描的结果与 Excel 下载。</p>

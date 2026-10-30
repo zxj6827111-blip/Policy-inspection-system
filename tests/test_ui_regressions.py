@@ -78,7 +78,7 @@ def test_overview_cards_align_and_recent_jobs_are_collapsible():
 
     assert 'class="card recent-jobs-panel"' in js
     assert '<summary class="panel-head recent-jobs-summary">' in js
-    assert "?.open ?? false" in js
+    assert "?.open ?? true" in js
     assert ".g-stat {" in css
     assert "margin-top: 0 !important" in css
 

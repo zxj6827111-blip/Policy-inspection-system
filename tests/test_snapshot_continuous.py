@@ -453,6 +453,27 @@ def test_snapshot_complete_coverage_passes_when_result_count_matches(tmp_path):
     manager._validate_complete_coverage(job_id)
 
 
+def test_snapshot_complete_coverage_ignores_offlist_recheck_rows(tmp_path):
+    """列表外复验写在 generation 账本之外，不能把它算成多出来的列表结果行。"""
+    manager, job_id = _seed_snapshot_validation_case(tmp_path, result_count=2)
+    repo = Repository(manager.db)
+    target = SCAN_TARGETS["putuo_government"]
+    offlist = PolicyListItem(
+        district=target.district, page_number=0, item_index=-1,
+        title="列表外文档", url="https://www.shpt.gov.cn/zhengwu/ysqgkml-qzfwj/off-list.html",
+        source_site=target.label, source_key=target.key, source_channel_id=target.channel_id,
+    )
+    repo.record_scan_item(
+        job_id, offlist, detail_status="checked_complete",
+        reason="列表外文档复验：文档仍可访问，按本轮结果重判",
+    )
+
+    assert repo.scan_item_count(job_id) == 2
+    listed = next(job for job in manager.db.list_jobs(10) if job["id"] == job_id)
+    assert listed["scan_item_count"] == 2
+    manager._validate_complete_coverage(job_id)
+
+
 @pytest.mark.asyncio
 async def test_cooldown_resume_continues(snapshot_runtime, monkeypatch):
     manager, db = snapshot_runtime

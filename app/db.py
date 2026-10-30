@@ -647,7 +647,8 @@ class Database:
         with self.connect() as conn:
             rows = conn.execute(
                 """SELECT j.*,
-                (SELECT COUNT(*) FROM scan_item_results s WHERE s.job_id=j.id) AS scan_item_count
+                (SELECT COUNT(*) FROM scan_item_results s WHERE s.job_id=j.id
+                 AND NOT (s.page_number=0 AND s.item_index<0)) AS scan_item_count
                 FROM scan_jobs j WHERE j.deleted_at IS NULL ORDER BY j.id DESC LIMIT ?""",
                 (limit,),
             ).fetchall()
